@@ -50,15 +50,15 @@ pub struct ContextResponse {
     pub hits: Vec<ContextHit>,
 }
 
-pub fn build(db: &Db, req: &ContextRequest) -> Result<String> {
-    let response = build_response(db, req)?;
+pub async fn build(db: &Db, req: &ContextRequest) -> Result<String> {
+    let response = build_response(db, req).await?;
     match req.format {
         Format::Json => Ok(serde_json::to_string_pretty(&response).unwrap_or_default()),
         Format::Markdown => Ok(render_markdown(&response)),
     }
 }
 
-pub fn build_response(db: &Db, req: &ContextRequest) -> Result<ContextResponse> {
+pub async fn build_response(db: &Db, req: &ContextRequest) -> Result<ContextResponse> {
     let candidates = db.search_nodes(&req.query, req.limit)?;
     let trav = Traversal::new(db);
 
@@ -80,8 +80,8 @@ pub fn build_response(db: &Db, req: &ContextRequest) -> Result<ContextResponse> 
 
     let mut hits = Vec::new();
     for n in candidates {
-        let callers = trav.callers(n.id, req.depth)?.nodes;
-        let callees = trav.callees(n.id, req.depth)?.nodes;
+        let callers = trav.callers(n.id, req.depth).await?.nodes;
+        let callees = trav.callees(n.id, req.depth).await?.nodes;
         let source = if req.include_source {
             file_cache.get(n.file.as_str()).map(|lines| {
                 let start = n.start_line.saturating_sub(1) as usize;

@@ -28,24 +28,24 @@ impl<'a> GraphApi<'a> {
         self.db.nodes_by_name(name)
     }
 
-    pub fn callers(&self, id: NodeId, depth: u32) -> Result<TraverseHits> {
-        Traversal::new(self.db).callers(id, depth)
+    pub async fn callers(&self, id: NodeId, depth: u32) -> Result<TraverseHits> {
+        Traversal::new(self.db).callers(id, depth).await
     }
 
-    pub fn callees(&self, id: NodeId, depth: u32) -> Result<TraverseHits> {
-        Traversal::new(self.db).callees(id, depth)
+    pub async fn callees(&self, id: NodeId, depth: u32) -> Result<TraverseHits> {
+        Traversal::new(self.db).callees(id, depth).await
     }
 
-    pub fn impact(&self, id: NodeId, max_depth: u32) -> Result<ImpactReport> {
-        Traversal::new(self.db).impact_radius(id, max_depth)
+    pub async fn impact(&self, id: NodeId, max_depth: u32) -> Result<ImpactReport> {
+        Traversal::new(self.db).impact_radius(id, max_depth).await
     }
 
-    pub fn references(&self, id: NodeId) -> Result<ReferencesReport> {
-        Traversal::new(self.db).references(id)
+    pub async fn references(&self, id: NodeId) -> Result<ReferencesReport> {
+        Traversal::new(self.db).references(id).await
     }
 
-    pub fn context_markdown(&self, req: &ContextRequest) -> Result<String> {
-        build(self.db, req)
+    pub async fn context_markdown(&self, req: &ContextRequest) -> Result<String> {
+        build(self.db, req).await
     }
 
     pub fn files(&self, prefix: &str) -> Result<Vec<FileRow>> {
@@ -56,16 +56,16 @@ impl<'a> GraphApi<'a> {
         self.db.stats()
     }
 
-    pub fn subgraph(&self, req: SubgraphRequest) -> Result<SubgraphResponse> {
-        Traversal::new(self.db).subgraph(req)
+    pub async fn subgraph(&self, req: SubgraphRequest) -> Result<SubgraphResponse> {
+        Traversal::new(self.db).subgraph(req).await
     }
 
-    pub fn neighborhood(
+    pub async fn neighborhood(
         &self,
         id: NodeId,
         depth: u32,
         kinds: &[codegraph_core::EdgeKind],
     ) -> Result<TraverseHits> {
-        Traversal::new(self.db).neighborhood(id, depth, kinds)
+        Traversal::new(self.db).neighborhood(id, depth, kinds).await
     }
 }

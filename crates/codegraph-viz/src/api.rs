@@ -108,7 +108,7 @@ pub async fn subgraph(
         node_limit: params.limit,
         edge_limit: params.limit.map(|l| l.saturating_mul(2)),
     };
-    match api.subgraph(req) {
+    match api.subgraph(req).await {
         Ok(s) => Json(s).into_response(),
         Err(e) => api_error(e),
     }
@@ -121,7 +121,7 @@ pub async fn neighbors(
 ) -> impl IntoResponse {
     let api = GraphApi::new(&state.db);
     let kinds = parse_kinds(params.kinds.as_deref());
-    match api.neighborhood(id, params.depth, &kinds) {
+    match api.neighborhood(id, params.depth, &kinds).await {
         Ok(h) => Json(h).into_response(),
         Err(e) => api_error(e),
     }
@@ -145,7 +145,7 @@ pub async fn callers(
     Query(params): Query<DepthParams>,
 ) -> impl IntoResponse {
     let api = GraphApi::new(&state.db);
-    match api.callers(id, params.depth) {
+    match api.callers(id, params.depth).await {
         Ok(h) => Json(h).into_response(),
         Err(e) => api_error(e),
     }
@@ -157,7 +157,7 @@ pub async fn callees(
     Query(params): Query<DepthParams>,
 ) -> impl IntoResponse {
     let api = GraphApi::new(&state.db);
-    match api.callees(id, params.depth) {
+    match api.callees(id, params.depth).await {
         Ok(h) => Json(h).into_response(),
         Err(e) => api_error(e),
     }

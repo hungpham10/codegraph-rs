@@ -62,8 +62,8 @@ fn seed_graph(db: &Db) -> (i64, i64, i64) {
     (ids[0], ids[1], fid)
 }
 
-#[test]
-fn subgraph_by_seed() {
+#[tokio::test]
+async fn subgraph_by_seed() {
     let (_d, db) = tmp_db();
     let (caller, callee, _) = seed_graph(&db);
     let api = GraphApi::new(&db);
@@ -77,14 +77,15 @@ fn subgraph_by_seed() {
             node_limit: None,
             edge_limit: None,
         })
+        .await
         .unwrap();
     assert!(sub.seed.is_some());
     assert!(sub.nodes.iter().any(|n| n.id == callee));
     assert!(!sub.edges.is_empty());
 }
 
-#[test]
-fn subgraph_by_query() {
+#[tokio::test]
+async fn subgraph_by_query() {
     let (_d, db) = tmp_db();
     seed_graph(&db);
     let api = GraphApi::new(&db);
@@ -98,12 +99,13 @@ fn subgraph_by_query() {
             node_limit: None,
             edge_limit: None,
         })
+        .await
         .unwrap();
     assert_eq!(sub.seed.as_ref().map(|n| n.name.as_str()), Some("caller"));
 }
 
-#[test]
-fn subgraph_default_overview() {
+#[tokio::test]
+async fn subgraph_default_overview() {
     let (_d, db) = tmp_db();
     seed_graph(&db);
     let api = GraphApi::new(&db);
@@ -117,17 +119,19 @@ fn subgraph_default_overview() {
             node_limit: None,
             edge_limit: None,
         })
+        .await
         .unwrap();
     assert_eq!(sub.nodes.len(), 2);
     assert!(!sub.edges.is_empty());
 }
 
-#[test]
-fn neighborhood_bidirectional() {
+#[tokio::test]
+async fn neighborhood_bidirectional() {
     let (_d, db) = tmp_db();
     let (caller, callee, _) = seed_graph(&db);
     let hits = Traversal::new(&db)
         .neighborhood(callee, 1, &[EdgeKind::Calls])
+        .await
         .unwrap();
     assert!(hits.nodes.iter().any(|n| n.id == caller));
 }

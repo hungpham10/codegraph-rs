@@ -91,7 +91,7 @@ impl McpServer {
     async fn handle_tool_call(&self, params: Value) -> anyhow::Result<Value> {
         let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-        let text = tools::dispatch(&self.db, name, args)?;
+        let text = tools::dispatch(&self.db, name, args).await?;
         Ok(json!({
             "content": [{ "type": "text", "text": text }],
             "isError": false,

@@ -79,7 +79,7 @@ fn tool(name: &str, desc: &str, schema: Value) -> Value {
     json!({ "name": name, "description": desc, "inputSchema": schema })
 }
 
-pub fn dispatch(db: &Db, name: &str, args: Value) -> anyhow::Result<String> {
+pub async fn dispatch(db: &Db, name: &str, args: Value) -> anyhow::Result<String> {
     let api = GraphApi::new(db);
     match name {
         "codegraph_search" => {
@@ -101,17 +101,21 @@ pub fn dispatch(db: &Db, name: &str, args: Value) -> anyhow::Result<String> {
         "codegraph_callers" => {
             let id = arg_i64(&args, "node")?;
             let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-            Ok(serde_json::to_string_pretty(&api.callers(id, depth)?)?)
+            Ok(serde_json::to_string_pretty(
+                &api.callers(id, depth).await?,
+            )?)
         }
         "codegraph_callees" => {
             let id = arg_i64(&args, "node")?;
             let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-            Ok(serde_json::to_string_pretty(&api.callees(id, depth)?)?)
+            Ok(serde_json::to_string_pretty(
+                &api.callees(id, depth).await?,
+            )?)
         }
         "codegraph_impact" => {
             let id = arg_i64(&args, "node")?;
             let depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
-            Ok(serde_json::to_string_pretty(&api.impact(id, depth)?)?)
+            Ok(serde_json::to_string_pretty(&api.impact(id, depth).await?)?)
         }
         "codegraph_context" => {
             let req = ContextRequest {
@@ -124,11 +128,11 @@ pub fn dispatch(db: &Db, name: &str, args: Value) -> anyhow::Result<String> {
                 limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as u32,
                 format: Format::Markdown,
             };
-            Ok(api.context_markdown(&req)?)
+            Ok(codegraph_context::build(db, &req).await?)
         }
         "codegraph_references" => {
             let id = arg_i64(&args, "node")?;
-            Ok(serde_json::to_string_pretty(&api.references(id)?)?)
+            Ok(serde_json::to_string_pretty(&api.references(id).await?)?)
         }
         "codegraph_files" => {
             let prefix = args.get("path").and_then(|v| v.as_str()).unwrap_or("");

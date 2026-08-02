@@ -35,9 +35,9 @@ fn node(name: &str) -> NodeDraft {
     }
 }
 
-#[test]
-fn callers_callees_chain() {
-    // A -> B -> C -> D
+#[tokio::test]
+async fn callers_callees_chain() {
+    // A > B > C > D
     let (_d, db) = db();
     let f = mk_file(&db, "a.ts");
     let ids = db
@@ -55,28 +55,28 @@ fn callers_callees_chain() {
         .unwrap();
 
     let t = Traversal::new(&db);
-    let cees = t.callees(ids[0], 3).unwrap();
+    let cees = t.callees(ids[0], 3).await.unwrap();
     assert_eq!(cees.nodes.len(), 3);
     assert!(cees.nodes.iter().any(|n| n.name == "d"));
 
-    let cers = t.callers(ids[3], 3).unwrap();
+    let cers = t.callers(ids[3], 3).await.unwrap();
     assert_eq!(cers.nodes.len(), 3);
     assert!(cers.nodes.iter().any(|n| n.name == "a"));
 
     // depth limit
-    let cees2 = t.callees(ids[0], 1).unwrap();
+    let cees2 = t.callees(ids[0], 1).await.unwrap();
     assert_eq!(cees2.nodes.len(), 1);
     assert_eq!(cees2.nodes[0].name, "b");
 }
 
-#[test]
-fn impact_groups_by_depth() {
+#[tokio::test]
+async fn impact_groups_by_depth() {
     let (_d, db) = db();
     let f = mk_file(&db, "a.ts");
     let ids = db
         .insert_nodes(f, &[node("root"), node("d1"), node("d2"), node("d2b")])
         .unwrap();
-    // d1 -> root, d2 -> d1, d2b -> d1
+    // d1 > root, d2 > d1, d2b > d1
     db.insert_edges(&[
         EdgeDraft {
             from_id: ids[1],
@@ -105,7 +105,7 @@ fn impact_groups_by_depth() {
     ])
     .unwrap();
     let t = Traversal::new(&db);
-    let imp = t.impact_radius(ids[0], 3).unwrap();
+    let imp = t.impact_radius(ids[0], 3).await.unwrap();
     assert_eq!(imp.direct.len(), 1);
     assert_eq!(imp.transitive.len(), 2);
     assert!(!imp.truncated);

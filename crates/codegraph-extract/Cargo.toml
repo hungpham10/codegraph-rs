@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints.rust]
+warnings = "deny"
+
 [dependencies]
 codegraph-core = { path = "../codegraph-core" }
 codegraph-db = { path = "../codegraph-db" }

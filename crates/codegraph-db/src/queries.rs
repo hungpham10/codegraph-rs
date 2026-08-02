@@ -362,6 +362,21 @@ pub(crate) fn edges_between(
     Ok(out)
 }
 
+pub(crate) fn edges_by_kind(c: &Connection, kind: EdgeKind) -> Result<Vec<Edge>> {
+    let sql = "SELECT e.from_id, e.to_id, e.kind, f.path, e.line, e.source
+               FROM edges e LEFT JOIN files f ON f.id = e.file_id
+               WHERE e.kind = ?1";
+    let mut s = c.prepare_cached(sql).map_err(db_err)?;
+    let it = s
+        .query_map(params![ekind_str(kind)], row_to_edge_with_source)
+        .map_err(db_err)?;
+    let mut out = Vec::new();
+    for r in it {
+        out.push(r.map_err(db_err)?);
+    }
+    Ok(out)
+}
+
 pub(crate) fn stats(c: &Connection) -> Result<DbStats> {
     let files: i64 = c
         .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
@@ -435,6 +450,26 @@ fn row_to_edge(r: &Row<'_>) -> rusqlite::Result<Edge> {
         )
     })?;
     let path: Option<String> = r.get(3)?;
+    Ok(Edge {
+        from: r.get(0)?,
+        to: r.get(1)?,
+        kind,
+        file: path.map(Utf8PathBuf::from),
+        line: r.get(4)?,
+    })
+}
+
+fn row_to_edge_with_source(r: &Row<'_>) -> rusqlite::Result<Edge> {
+    let kind_s: String = r.get(2)?;
+    let kind = parse_edge_kind(&kind_s).ok_or_else(||
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            Box::new(BadKind(kind_s.clone())),
+        )
+    )?;
+    let path: Option<String> = r.get(3)?;
+    let _source: Option<String> = r.get(5)?;
     Ok(Edge {
         from: r.get(0)?,
         to: r.get(1)?,

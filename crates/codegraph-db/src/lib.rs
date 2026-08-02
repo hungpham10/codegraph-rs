@@ -183,6 +183,11 @@ impl Db {
         queries::edges_between(&c, node_ids, kinds, limit)
     }
 
+    pub fn edges_by_kind(&self, kind: EdgeKind) -> Result<Vec<Edge>> {
+        let c = self.conn.lock();
+        queries::edges_by_kind(&c, kind)
+    }
+
     pub fn purge(&self) -> Result<()> {
         let c = self.conn.lock();
         c.execute_batch("DELETE FROM edges; DELETE FROM nodes; DELETE FROM files;")

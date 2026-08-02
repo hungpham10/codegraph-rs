@@ -455,7 +455,11 @@ fn cmd_context(root: &Utf8Path, target: &str, depth: u32, include_source: bool) 
         limit: 5,
         format: codegraph_context::Format::Markdown,
     };
-    print!("{}", codegraph_context::build(&db, &req)?);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let output = rt.block_on(codegraph_context::build(&db, &req))?;
+    print!("{}", output);
     Ok(())
 }
 
