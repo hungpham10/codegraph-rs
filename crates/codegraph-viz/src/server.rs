@@ -8,21 +8,28 @@ use axum::{
     routing::get,
     Router,
 };
-use codegraph_db::Db;
+use codegraph_graph::SharedGraphIndex;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
 
-pub async fn serve(db: Arc<Db>, config: VizConfig) -> anyhow::Result<()> {
+pub async fn serve(db_path: PathBuf, config: VizConfig) -> anyhow::Result<()> {
     let boot_json = serde_json::to_string(&config.boot)?;
-    let state = AppState { db, boot_json };
+    // Index sống trong chính file db (`.codegraph/db.sqlite`) — không sidecar.
+    let shared_index = Arc::new(SharedGraphIndex::open(Some(db_path)).await?);
+    let state = AppState {
+        shared_index,
+        boot_json,
+    };
 
     let app = Router::new()
         .route("/api/status", get(api::status))
         .route("/api/search", get(api::search))
-        .route("/api/node/{id}", get(api::node))
+        .route("/api/symbol/{id}", get(api::symbol))
+        .route("/api/flow/{id}", get(api::flow))
+        .route("/api/search_flow", get(api::search_flow))
         .route("/api/subgraph", get(api::subgraph))
-        .route("/api/neighbors/{id}", get(api::neighbors))
         .route("/api/files", get(api::files))
         .route("/api/callers/{id}", get(api::callers))
         .route("/api/callees/{id}", get(api::callees))

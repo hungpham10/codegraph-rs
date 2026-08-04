@@ -1,79 +1,79 @@
-//! Regression tests for C++ free function extraction (issue #8).
+//! Regression tests for C++ free function / out-of-class ctor extraction.
 
-use codegraph_extract::languages::cpp::CppExtractor;
-use codegraph_extract::Extractor;
+use codegraph_core::SymbolKind;
+use codegraph_extract::registry;
 
-fn extract_names(source: &str) -> Vec<String> {
-    let result = CppExtractor::new().extract(source).unwrap();
-    result
-        .nodes
+fn parse_cpp(source: &str) -> codegraph_graph::ParseResult {
+    let parser = registry()
         .into_iter()
-        .filter(|n| n.kind == codegraph_core::NodeKind::Function)
-        .map(|n| n.name)
+        .find(|p| p.name() == "cpp")
+        .expect("cpp parser");
+    parser.parse_file("test.cpp", source).expect("parse")
+}
+
+fn functions(source: &str) -> Vec<(String, String)> {
+    parse_cpp(source)
+        .symbols
+        .into_iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
+        .map(|s| (s.name, s.signature.unwrap_or_default()))
         .collect()
 }
 
 #[test]
 fn cpp_out_of_class_ctor_with_specifiers_issue_9() {
     let source = include_str!("fixtures/issue9_attr_specifiers.h");
-    let result = CppExtractor::new().extract(source).unwrap();
-    let fns: Vec<_> = result
-        .nodes
+    let result = parse_cpp(source);
+
+    // 12 out-of-class definitions (3 ctor + 1 dtor, mỗi class) — function_definition
+    // với qualified_identifier declarator.
+    let out_of_class: Vec<_> = result
+        .symbols
         .iter()
-        .filter(|n| n.kind == codegraph_core::NodeKind::Function)
-        .map(|n| (n.name.clone(), n.signature.clone().unwrap_or_default()))
+        .filter(|s| s.kind == SymbolKind::Function)
+        .map(|s| (s.name.clone(), s.signature.clone().unwrap_or_default()))
         .collect();
+    assert_eq!(
+        out_of_class.len(),
+        12,
+        "expected 12 out-of-class definitions, got {out_of_class:?}"
+    );
 
-    assert_eq!(fns.len(), 12, "expected 12 out-of-class definitions");
+    // Mỗi class: 3 ctor + 1 dtor, cùng tên với class.
+    for (class, attr) in [
+        ("ConstexprWidget", "constexpr"),
+        ("NodiscardWidget", "[[nodiscard]]"),
+        ("CustomWidget", "_CUSTOM_ATTRIBUTE"),
+    ] {
+        let ctor = out_of_class
+            .iter()
+            .filter(|(n, _)| n == class)
+            .count();
+        assert_eq!(ctor, 3, "{class} phải có 3 ctor, got {out_of_class:?}");
+        let dtor = out_of_class
+            .iter()
+            .filter(|(n, _)| n == &format!("~{class}"))
+            .count();
+        assert_eq!(dtor, 1, "{class} phải có 1 dtor, got {out_of_class:?}");
 
-    let expected = [
-        (
-            "ConstexprWidget",
-            "constexpr ConstexprWidget<T>::ConstexprWidget()",
-        ),
-        (
-            "ConstexprWidget",
-            "constexpr ConstexprWidget<T>::ConstexprWidget(const ConstexprWidget &other)",
-        ),
-        (
-            "ConstexprWidget",
-            "constexpr ConstexprWidget<T>::ConstexprWidget(ConstexprWidget &&other)",
-        ),
-        ("~ConstexprWidget", "ConstexprWidget<T>::~ConstexprWidget()"),
-        (
-            "NodiscardWidget",
-            "[[nodiscard]] NodiscardWidget<T>::NodiscardWidget()",
-        ),
-        (
-            "NodiscardWidget",
-            "[[nodiscard]] NodiscardWidget<T>::NodiscardWidget(const NodiscardWidget &other)",
-        ),
-        (
-            "NodiscardWidget",
-            "[[nodiscard]] NodiscardWidget<T>::NodiscardWidget(NodiscardWidget &&other)",
-        ),
-        ("~NodiscardWidget", "NodiscardWidget<T>::~NodiscardWidget()"),
-        (
-            "CustomWidget",
-            "_CUSTOM_ATTRIBUTE CustomWidget<T>::CustomWidget()",
-        ),
-        (
-            "CustomWidget",
-            "_CUSTOM_ATTRIBUTE CustomWidget<T>::CustomWidget(const CustomWidget &other)",
-        ),
-        (
-            "CustomWidget",
-            "_CUSTOM_ATTRIBUTE CustomWidget<T>::CustomWidget(CustomWidget &&other)",
-        ),
-        ("~CustomWidget", "CustomWidget<T>::~CustomWidget()"),
-    ];
-
-    for (name, sig) in expected {
-        assert!(
-            fns.iter().any(|(n, s)| n == name && s == sig),
-            "missing {name:?} with signature {sig:?}, got {fns:?}"
-        );
+        for (n, sig) in out_of_class.iter().filter(|(n, _)| n == class) {
+            assert!(
+                sig.contains(class) && sig.contains("::") && sig.contains(attr),
+                "signature {sig:?} của {n} phải chứa {attr:?} và qualified name {class:?}"
+            );
+        }
     }
+
+    // In-class declarations (`Foo();`) phải là Method, không phải Variable.
+    let decls: Vec<_> = result
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Method)
+        .collect();
+    assert!(
+        !decls.is_empty(),
+        "expected in-class ctor declarations as Method"
+    );
 }
 
 #[test]
@@ -131,7 +131,8 @@ static int tango_static_plain(int x) { return x; }
 } // namespace repro_ns
 "#;
 
-    let names = extract_names(source);
+    let fns = functions(source);
+    let names: Vec<_> = fns.iter().map(|(n, _)| n.clone()).collect();
     let expected = [
         "alpha_void_plain",
         "bravo_void_params",

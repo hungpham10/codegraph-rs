@@ -433,3 +433,21 @@ main {
   margin-right: 0.35rem;
   vertical-align: middle;
 }
+
+.flow-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+.flow-line {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--fg);
+}

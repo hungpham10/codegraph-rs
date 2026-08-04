@@ -10,6 +10,10 @@ pub enum Error {
     Db(String),
     #[error("parse: {0}")]
     Parse(String),
+    #[error("search: {0}")]
+    Search(String),
+    #[error("depth {depth} exceeds limit {limit}")]
+    DepthExceedsLimit { depth: usize, limit: usize },
     #[error("invalid: {0}")]
     Invalid(String),
     #[error("not initialized: run `codegraph init` first")]

@@ -1,5 +1,5 @@
 use crate::config::{self, ExtractConfig, HeaderLanguage};
-use crate::Extractor;
+use crate::LangParser;
 use camino::{Utf8Path, Utf8PathBuf};
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -7,37 +7,34 @@ use std::sync::Arc;
 
 pub struct FileMatch {
     pub path: Utf8PathBuf,
-    pub extractor: Arc<dyn Extractor>,
+    pub parser: Arc<dyn LangParser>,
 }
 
-pub type ExtMap = HashMap<&'static str, Arc<dyn Extractor>>;
+pub type ExtMap = HashMap<&'static str, Arc<dyn LangParser>>;
 
 pub struct WalkOptions<'a> {
     pub config: &'a ExtractConfig,
     pub project_hint: Option<HeaderLanguage>,
-    pub c_extractor: Option<Arc<dyn Extractor>>,
-    pub cpp_extractor: Option<Arc<dyn Extractor>>,
+    pub c_parser: Option<Arc<dyn LangParser>>,
+    pub cpp_parser: Option<Arc<dyn LangParser>>,
 }
 
-pub fn build_ext_map(extractors: &[Arc<dyn Extractor>]) -> ExtMap {
+pub fn build_ext_map(parsers: &[Arc<dyn LangParser>]) -> ExtMap {
     let mut ext_map: ExtMap = HashMap::new();
-    for ex in extractors {
-        for e in ex.extensions() {
-            ext_map.insert(*e, ex.clone());
+    for p in parsers {
+        for e in p.extensions() {
+            ext_map.insert(*e, p.clone());
         }
     }
     ext_map
 }
 
-fn find_extractor<'a>(
-    extractors: &'a [Arc<dyn Extractor>],
-    lang: &str,
-) -> Option<&'a Arc<dyn Extractor>> {
-    extractors.iter().find(|e| e.language() == lang)
+fn find_parser<'a>(parsers: &'a [Arc<dyn LangParser>], lang: &str) -> Option<&'a Arc<dyn LangParser>> {
+    parsers.iter().find(|p| p.name() == lang)
 }
 
 pub fn walk_options<'a>(
-    extractors: &'a [Arc<dyn Extractor>],
+    parsers: &'a [Arc<dyn LangParser>],
     config: &'a ExtractConfig,
     root: &Utf8Path,
 ) -> WalkOptions<'a> {
@@ -49,33 +46,18 @@ pub fn walk_options<'a>(
     WalkOptions {
         config,
         project_hint,
-        c_extractor: find_extractor(extractors, "c").cloned(),
-        cpp_extractor: find_extractor(extractors, "cpp").cloned(),
+        c_parser: find_parser(parsers, "c").cloned(),
+        cpp_parser: find_parser(parsers, "cpp").cloned(),
     }
-}
-
-/// Match a single path against the extractor registry, without walking the tree.
-/// Used for incremental (watcher-driven) syncs where the caller already knows
-/// which paths changed.
-pub fn match_extractor(
-    path: &Utf8Path,
-    ext_map: &ExtMap,
-    opts: &WalkOptions<'_>,
-) -> Option<Arc<dyn Extractor>> {
-    let ext = path.extension()?;
-    if ext == "h" {
-        return resolve_header_extractor(path, opts);
-    }
-    ext_map.get(ext).cloned()
 }
 
 pub fn walk(
     root: &Utf8Path,
-    extractors: &[Arc<dyn Extractor>],
+    parsers: &[Arc<dyn LangParser>],
     config: &ExtractConfig,
 ) -> Vec<FileMatch> {
-    let ext_map = build_ext_map(extractors);
-    let opts = walk_options(extractors, config, root);
+    let ext_map = build_ext_map(parsers);
+    let opts = walk_options(parsers, config, root);
 
     let mut out = Vec::new();
     let walker = WalkBuilder::new(root)
@@ -97,25 +79,22 @@ pub fn walk(
         let Ok(p) = Utf8PathBuf::from_path_buf(path.to_path_buf()) else {
             continue;
         };
-        let ex = if ext == "h" {
-            resolve_header_extractor(&p, &opts)
+        let parser = if ext == "h" {
+            resolve_header_parser(&p, &opts)
         } else {
             ext_map.get(ext).cloned()
         };
-        let Some(ex) = ex else {
+        let Some(parser) = parser else {
             continue;
         };
-        out.push(FileMatch {
-            path: p,
-            extractor: ex,
-        });
+        out.push(FileMatch { path: p, parser });
     }
     out
 }
 
-fn resolve_header_extractor(path: &Utf8Path, opts: &WalkOptions<'_>) -> Option<Arc<dyn Extractor>> {
-    let c = opts.c_extractor.as_ref();
-    let cpp = opts.cpp_extractor.as_ref();
+fn resolve_header_parser(path: &Utf8Path, opts: &WalkOptions<'_>) -> Option<Arc<dyn LangParser>> {
+    let c = opts.c_parser.as_ref();
+    let cpp = opts.cpp_parser.as_ref();
 
     match (c, cpp) {
         (None, None) => None,
@@ -128,9 +107,9 @@ fn resolve_header_extractor(path: &Utf8Path, opts: &WalkOptions<'_>) -> Option<A
 fn resolve_header_with_both(
     path: &Utf8Path,
     opts: &WalkOptions<'_>,
-    c: &Arc<dyn Extractor>,
-    cpp: &Arc<dyn Extractor>,
-) -> Arc<dyn Extractor> {
+    c: &Arc<dyn LangParser>,
+    cpp: &Arc<dyn LangParser>,
+) -> Arc<dyn LangParser> {
     match opts.config.header_language {
         HeaderLanguage::C => c.clone(),
         HeaderLanguage::Cpp => cpp.clone(),
@@ -180,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn cpp_project_headers_use_cpp_extractor() {
+    fn cpp_project_headers_use_cpp_parser() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         write_file(&root, "src/Foo.cpp", "class Foo {};\n");
@@ -190,18 +169,18 @@ mod tests {
             "#pragma once\nnamespace tnl { class Foo {}; }\n",
         );
 
-        let extractors = registry();
+        let parsers = registry();
         let config = ExtractConfig::default();
-        let matches = walk(&root, &extractors, &config);
+        let matches = walk(&root, &parsers, &config);
         let h = matches
             .iter()
             .find(|m| m.path.ends_with("Foo.h"))
             .expect("Foo.h should be indexed");
-        assert_eq!(h.extractor.language(), "cpp");
+        assert_eq!(h.parser.name(), "cpp");
     }
 
     #[test]
-    fn c_project_headers_use_c_extractor() {
+    fn c_project_headers_use_c_parser() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         write_file(&root, "src/foo.c", "struct foo { int x; };\n");
@@ -211,14 +190,14 @@ mod tests {
             "#ifndef FOO_H\n#define FOO_H\nstruct foo { int x; };\n#endif\n",
         );
 
-        let extractors = registry();
+        let parsers = registry();
         let config = ExtractConfig::default();
-        let matches = walk(&root, &extractors, &config);
+        let matches = walk(&root, &parsers, &config);
         let h = matches
             .iter()
             .find(|m| m.path.ends_with("foo.h"))
             .expect("foo.h should be indexed");
-        assert_eq!(h.extractor.language(), "c");
+        assert_eq!(h.parser.name(), "c");
     }
 
     #[test]
@@ -232,15 +211,15 @@ mod tests {
             "#ifndef FOO_H\n#define FOO_H\nstruct foo { int x; };\n#endif\n",
         );
 
-        let extractors = registry();
+        let parsers = registry();
         let config = ExtractConfig {
             header_language: HeaderLanguage::Cpp,
         };
-        let matches = walk(&root, &extractors, &config);
+        let matches = walk(&root, &parsers, &config);
         let h = matches
             .iter()
             .find(|m| m.path.ends_with("foo.h"))
             .expect("foo.h should be indexed");
-        assert_eq!(h.extractor.language(), "cpp");
+        assert_eq!(h.parser.name(), "cpp");
     }
 }

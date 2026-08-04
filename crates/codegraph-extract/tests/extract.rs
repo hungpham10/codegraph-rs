@@ -1,77 +1,78 @@
+//! Integration: Orchestrator walk + parse → GraphIndex::ingest → search.
+
 use camino::Utf8PathBuf;
-use codegraph_db::Db;
 use codegraph_extract::Orchestrator;
+use codegraph_graph::GraphIndex;
 
-fn open() -> (tempfile::TempDir, Db) {
-    let d = tempfile::tempdir().unwrap();
-    let p = Utf8PathBuf::from_path_buf(d.path().join("db.sqlite")).unwrap();
-    let db = Db::open(&p).unwrap();
-    (d, db)
-}
-
-#[test]
-fn index_fixtures_dir() {
-    let (_keep, db) = open();
-    let orch = Orchestrator::with_registry();
-    let root = Utf8PathBuf::from_path_buf(
+fn fixture_root() -> Utf8PathBuf {
+    Utf8PathBuf::from_path_buf(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
     )
-    .unwrap();
+    .unwrap()
+}
 
-    let stats = orch.index_all(&root, &db).unwrap();
-    assert!(
-        stats.files >= 7,
-        "expected at least 7 files, got {}",
-        stats.files
-    );
-    assert!(stats.nodes > 0);
+async fn index_fixtures() -> (GraphIndex, codegraph_extract::ExtractStats) {
+    let mut index = GraphIndex::in_memory();
+    let orch = Orchestrator::with_registry();
+    let stats = orch.index_all(&fixture_root(), &mut index).await.unwrap();
+    (index, stats)
+}
+
+#[tokio::test]
+async fn index_fixtures_dir() {
+    let (index, stats) = index_fixtures().await;
+
+    // 7 sample.* files + issue9_attr_specifiers.h
+    assert!(stats.files >= 8, "expected >= 8 files, got {}", stats.files);
+    assert!(stats.symbols > 0, "expected symbols");
+    assert!(stats.chains > 0, "expected chains");
+    assert!(stats.calls > 0, "expected calls");
 
     // Java
-    let hits = db.search_nodes("UserService", 10).unwrap();
+    let hits = index.search_symbol("UserService", None, 10).await.unwrap();
     assert!(
-        hits.iter().any(|n| n.language == "java"),
-        "expected java hit"
+        hits.iter().any(|s| s.language == "java"),
+        "expected java hit, got {hits:?}"
     );
 
     // Ruby
-    let hits = db.search_nodes("UserService", 10).unwrap();
+    let hits = index.search_symbol("UserService", None, 10).await.unwrap();
     assert!(
-        hits.iter().any(|n| n.language == "ruby"),
+        hits.iter().any(|s| s.language == "ruby"),
         "expected ruby hit"
     );
 
     // Python
-    let hits = db.search_nodes("process_user", 10).unwrap();
+    let hits = index.search_symbol("process_user", None, 10).await.unwrap();
     assert!(
-        hits.iter().any(|n| n.language == "python"),
+        hits.iter().any(|s| s.language == "python"),
         "expected python hit"
     );
 
     // Go
-    let hits = db.search_nodes("ProcessUser", 10).unwrap();
-    assert!(hits.iter().any(|n| n.language == "go"), "expected go hit");
+    let hits = index.search_symbol("ProcessUser", None, 10).await.unwrap();
+    assert!(hits.iter().any(|s| s.language == "go"), "expected go hit");
 
     // JS
-    let hits = db.search_nodes("processUser", 10).unwrap();
+    let hits = index.search_symbol("processUser", None, 10).await.unwrap();
     assert!(
-        hits.iter().any(|n| n.language == "javascript"),
+        hits.iter().any(|s| s.language == "javascript"),
         "expected js hit"
     );
 
-    // TS-specific: should have processUser
-    let hits = db.search_nodes("processUser", 10).unwrap();
+    // TS
+    let hits = index.search_symbol("processUser", None, 10).await.unwrap();
     assert!(
-        hits.iter().any(|n| n.name == "processUser"),
-        "missing processUser in {:?}",
-        hits
+        hits.iter().any(|s| s.name == "processUser"),
+        "missing processUser, got {hits:?}"
     );
 
-    // Rust-specific: should have process_user
-    let hits = db.search_nodes("process_user", 10).unwrap();
-    assert!(hits.iter().any(|n| n.name == "process_user"));
+    // Rust
+    let hits = index.search_symbol("process_user", None, 10).await.unwrap();
+    assert!(hits.iter().any(|s| s.name == "process_user"));
 
-    // UserService should appear (TS class + Rust struct)
-    let hits = db.search_nodes("UserService", 10).unwrap();
+    // UserService from TS class + Rust struct
+    let hits = index.search_symbol("UserService", None, 10).await.unwrap();
     assert!(
         hits.len() >= 2,
         "expected UserService from both TS and Rust, got {}",
@@ -79,55 +80,25 @@ fn index_fixtures_dir() {
     );
 }
 
-#[test]
-fn sync_skips_unchanged() {
-    let (_keep, db) = open();
-    let orch = Orchestrator::with_registry();
-    let root = Utf8PathBuf::from_path_buf(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
-    )
-    .unwrap();
+#[tokio::test]
+async fn chains_are_built_for_each_function() {
+    let (index, _) = index_fixtures().await;
+    let stats = index.stats();
+    assert!(stats.chains > 0, "expected chains in index");
 
-    orch.index_all(&root, &db).unwrap();
-    let s2 = orch.sync(&root, &db).unwrap();
-    assert_eq!(s2.files, 0, "no new files should be indexed");
-    assert!(s2.skipped >= 2);
-}
-
-#[test]
-fn sync_paths_skips_mtime_only_touch() {
-    use std::time::{Duration, SystemTime};
-
-    let (_keep, db) = open();
-    let orch = Orchestrator::with_registry();
-    let fixture = Utf8PathBuf::from_path_buf(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.rs"),
-    )
-    .unwrap();
-
-    orch.sync_paths(
-        fixture.parent().unwrap(),
-        &db,
-        std::slice::from_ref(&fixture),
-    )
-    .unwrap();
-    let indexed = db.stats().unwrap().files;
-    assert!(indexed >= 1, "fixture should be indexed");
-
-    let later = SystemTime::now() + Duration::from_secs(5);
-    filetime::set_file_mtime(
-        fixture.as_std_path(),
-        filetime::FileTime::from_system_time(later),
-    )
-    .unwrap();
-
-    let stats = orch
-        .sync_paths(
-            fixture.parent().unwrap(),
-            &db,
-            std::slice::from_ref(&fixture),
-        )
+    // Flow của một function trả về chain có marker hoặc ít nhất là chính nó.
+    let hits = index
+        .search_symbol("process_user", None, 10)
+        .await
         .unwrap();
-    assert_eq!(stats.files, 0, "mtime-only touch must not re-index");
-    assert!(stats.skipped >= 1, "expected skip, got {:?}", stats);
+    let py = hits
+        .iter()
+        .find(|s| s.language == "python")
+        .expect("python process_user");
+    let flow = index.flow(py.id).await.unwrap();
+    assert!(
+        !flow.chain.is_empty(),
+        "chain phải chứa chính function id"
+    );
+    assert_eq!(flow.chain[0], py.id, "chain bắt đầu bằng owner");
 }

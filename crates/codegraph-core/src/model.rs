@@ -25,4 +25,6 @@ pub struct Edge {
     pub kind: EdgeKind,
     pub file: Option<Utf8PathBuf>,
     pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }

@@ -1,23 +1,8 @@
-use crate::lang_extractor;
-use crate::languages::common::LangSpec;
-use codegraph_core::NodeKind;
-use tree_sitter::Node;
+use crate::languages::common::{CallRule, LangSpec};
+use codegraph_core::SymbolKind;
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_c::LANGUAGE.into()
-}
-
-fn import_path(n: &Node, src: &[u8]) -> Option<String> {
-    let mut c = n.walk();
-    for ch in n.children(&mut c) {
-        if matches!(ch.kind(), "string_literal" | "system_lib_string") {
-            return ch.utf8_text(src).ok().map(|s| {
-                s.trim_matches(|c| c == '"' || c == '<' || c == '>')
-                    .to_string()
-            });
-        }
-    }
-    None
 }
 
 pub static SPEC: LangSpec = LangSpec {
@@ -25,17 +10,48 @@ pub static SPEC: LangSpec = LangSpec {
     extensions: &["c"],
     ts_language,
     decls: &[
-        ("function_definition", NodeKind::Function),
-        ("struct_specifier", NodeKind::Struct),
-        ("enum_specifier", NodeKind::Enum),
-        ("union_specifier", NodeKind::Struct),
-        ("type_definition", NodeKind::TypeAlias),
+        ("function_definition", SymbolKind::Function),
+        ("struct_specifier", SymbolKind::Class),
+        ("union_specifier", SymbolKind::Class),
+        ("enum_specifier", SymbolKind::Enum),
+        ("type_definition", SymbolKind::Constant),
+        ("declaration", SymbolKind::Variable),
+        ("field_declaration", SymbolKind::Field),
+        ("parameter_declaration", SymbolKind::Parameter),
     ],
-    call_kind: Some("call_expression"),
-    callee_field: Some("function"),
-    callee_ident_kinds: &["identifier", "field_identifier"],
-    import_kinds: &["preproc_include"],
-    import_extract: Some(import_path),
+    func_kinds: &["function_definition"],
+    class_kinds: &["struct_specifier", "union_specifier"],
+    param_kinds: &["parameter_declaration"],
+    annotation_kinds: &[],
+    name_type_fallback: false,
+    calls: &[CallRule {
+        kind: "call_expression",
+        callee_field: "function",
+        arguments_field: "arguments",
+        name_fn: None,
+        target_fn: None,
+    }],
+    class_type_name: None,
+    if_kinds: &["if_statement"],
+    elif_kinds: &[],
+    if_block_kinds: &[],
+    loop_kinds: &["for_statement", "while_statement", "do_statement"],
+    switch_kinds: &["switch_statement"],
+    switch_block_kinds: &[],
+    switch_case_kinds: &["case_statement"],
+    switch_default_kinds: &["default_statement"],
+    return_kinds: &["return_statement"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    throw_kinds: &[],
+    try_kinds: &[],
+    except_kinds: &[],
+    try_else_kinds: &[],
+    finally_kinds: &[],
+    if_cond_field: "condition",
+    if_cons_field: "consequence",
+    if_alt_field: "alternative",
+    body_field: "body",
 };
 
-lang_extractor!(CExtractor, SPEC);
+crate::lang_parser!(CParser, SPEC);

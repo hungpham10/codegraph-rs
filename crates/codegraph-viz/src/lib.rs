@@ -4,9 +4,8 @@ pub mod api;
 mod assets;
 mod server;
 
-use codegraph_db::Db;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
@@ -24,6 +23,7 @@ pub struct VizConfig {
     pub boot: BootConfig,
 }
 
-pub async fn run(db: Arc<Db>, config: VizConfig) -> anyhow::Result<()> {
-    server::serve(db, config).await
+/// Serve UI trên index đã persist tại `db_path` (`.codegraph/db.sqlite`).
+pub async fn run(db_path: PathBuf, config: VizConfig) -> anyhow::Result<()> {
+    server::serve(db_path, config).await
 }

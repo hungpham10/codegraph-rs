@@ -1,8 +1,23 @@
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+//! Radix-node storage — the only persistence surface for the radix tree.
+//!
+//! Storage chỉ lưu các node của radix tree: prefix + record + children + root
+//! của từng shard. Mọi thao tác thay đổi cấu trúc cây đi qua một **transaction**
+//! (`Tx`) để áp dụng atomic — không có trạng thái trung gian lộ ra cho reader.
+//!
+//! Các khái niệm cũ (automaton, entries, blob, shard-compressed) đã bị xoá
+//! trong đợt refactor — nếu cần persistence tầng cao hơn thì phải làm ở tầng
+//! khác, không phải ở đây.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
+
+use async_trait::async_trait;
+use codegraph_core::{FileInfo, Symbol};
+
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 
 // ==================== Error Type ====================
 
@@ -26,23 +41,58 @@ impl std::error::Error for StorageError {}
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-const EMPTY: usize = 0;
+/// Node id 0 là sentinel (rỗng) — dùng để đánh dấu "không có" trong radix.
+pub const EMPTY: usize = 0;
 
-/// Serialize-friendly container cho toàn bộ nodes trong 1 shard.
-/// Dùng `bincode` + `zstd` để lưu thành 1 Redis key duy nhất.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ShardNodeData {
-    /// prefixes indexed by node_id (index 0 = sentinel)
-    pub prefixes: Vec<Vec<u8>>,
-    /// records indexed by node_id
-    pub records: Vec<usize>,
-    /// children IDs per node, indexed by node_id
-    pub children: Vec<Vec<usize>>,
+/// Encode chain thành bytes (u64 little-endian, 8 byte/element) — format của
+/// chain stream. Chain = chuỗi element id (marker + symbol) của một hàm.
+pub(crate) fn encode_chain(chain: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chain.len() * 8);
+    for e in chain {
+        out.extend_from_slice(&e.to_le_bytes());
+    }
+    out
 }
 
+/// Decode bytes trong chain stream về `Vec<u64>` element ids.
+#[allow(dead_code)] // chỉ dùng qua get_chain (test/sqlite builds)
+pub(crate) fn decode_chain(bytes: &[u8]) -> Vec<u64> {
+    bytes
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+// ==================== Transaction ====================
+
+/// Một mutation lẻ trong transaction.
+#[derive(Clone, Debug)]
+enum TxOp {
+    AddChild {
+        parent: usize,
+        child: usize,
+    },
+    MoveChild {
+        from: usize,
+        to: usize,
+        child: usize,
+    },
+    UpdateNode {
+        id: usize,
+        prefix: Option<Vec<u8>>,
+        record: Option<usize>,
+    },
+}
+
+/// Transaction — buffer toàn bộ mutation và áp dụng atomic tại `commit`.
+///
+/// `new_node` reserve id **ngay lập tức** (từ counter của storage) để caller
+/// (radix split) có thể dùng id làm tham chiếu trước khi commit; nhưng node
+/// chưa lộ ra cho reader cho tới khi `commit` hoàn tất.
+///
+/// `commit(self: Box<Self>)` tiêu thụ chính transaction — không thể commit 2 lần.
 #[async_trait]
-pub trait Storage: Send + Sync {
-    // ── Radix-style: node management ──
+pub trait Tx: Send {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize>;
     async fn update_node(
         &mut self,
@@ -50,255 +100,311 @@ pub trait Storage: Send + Sync {
         prefix: Option<Vec<u8>>,
         record: Option<usize>,
     ) -> Result<()>;
-    async fn add_child(&mut self, parent_id: usize, child_id: usize) -> Result<()>;
-    async fn get_node(&self, id: usize) -> Result<(Vec<u8>, usize)>;
-    async fn get_children(&self, id: usize) -> Result<Vec<usize>>;
-    async fn set_root(&mut self, shard: usize, root_id: usize) -> Result<()>;
-    async fn get_root(&self, shard: usize) -> Result<usize>;
-
-    /// Lấy children + prefix + record của từng child trong MỘT lần fetch (batch).
-    /// Dùng cho walk-down trong prefix search — tránh O(fanout) `get_node` riêng lẻ.
-    /// Default: `get_children` + `get_node` từng child — override ở storage có bulk.
-    async fn get_children_with_prefixes(&self, id: usize) -> Result<Vec<(usize, Vec<u8>, usize)>> {
-        let children = self.get_children(id).await?;
-        let mut out = Vec::with_capacity(children.len());
-        for &child in &children {
-            let (prefix, record) = self.get_node(child).await?;
-            out.push((child, prefix, record));
-        }
-        Ok(out)
-    }
-
-    /// Quét toàn bộ subtree từ `node_id` → `(parent, child, prefix, record)`,
-    /// root có `parent = None`. Dùng cho phần "scan ra" của prefix search:
-    /// 1 lần fetch cả subtree (override bằng recursive SQL) thay vì
-    /// get_node/get_children cho từng node. Caller tái dựng key bằng DFS trong bộ nhớ.
-    async fn scan_subtree(
-        &self,
-        node_id: usize,
-    ) -> Result<Vec<(Option<usize>, usize, Vec<u8>, usize)>> {
-        let mut out = Vec::new();
-        let mut stack = vec![(None, node_id)];
-        while let Some((parent, cur)) = stack.pop() {
-            let (prefix, record) = self.get_node(cur).await?;
-            out.push((parent, cur, prefix, record));
-            let children = self.get_children(cur).await?;
-            for child in children {
-                stack.push((Some(cur), child));
-            }
-        }
-        Ok(out)
-    }
-
-    // ── Bulk write mode (VD: rebuild transaction) ──
-
-    /// Bắt đầu bulk insert — backend có thể mở transaction để gộp nhiều insert
-    /// thành 1 commit (cắt chi phí autocommit per-write khi rebuild index).
-    /// Default no-op. Gọi `end_bulk` để commit.
-    async fn begin_bulk(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Kết thúc bulk insert — commit transaction (nếu có).
-    async fn end_bulk(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    // ── Automaton-style: state machine ──
-    async fn add_state(&mut self, label: &str) -> Result<usize>;
-    async fn set_transition(&mut self, from: usize, label: &str, to: usize) -> Result<()>;
-    async fn get_transitions(&self, from: usize) -> Result<Vec<(String, usize)>>;
-    async fn set_failure(&mut self, state: usize, fail: usize) -> Result<()>;
-    async fn get_failure(&self, state: usize) -> Result<usize>;
-    async fn set_output(&mut self, state: usize, pattern_idx: usize) -> Result<()>;
-    async fn get_output(&self, state: usize) -> Result<Option<usize>>;
-    async fn add_root_input(&mut self, state: usize) -> Result<()>;
-    async fn get_root_inputs(&self) -> Result<Vec<usize>>;
-    async fn get_label(&self, state: usize) -> Result<String>;
-    async fn num_states(&self) -> Result<usize>;
-
-    // ── Tree management ──
-    /// Xoá tất cả children của một node (dùng trong split).
-    async fn clear_children(&mut self, _parent_id: usize) -> Result<()> {
-        // Default no-op để không break implementors cũ
-        Ok(())
-    }
-
-    /// Xoá một child cụ thể của node (dùng trong split an toàn với Set).
-    async fn remove_child(&mut self, _parent_id: usize, _child_id: usize) -> Result<()> {
-        // Default no-op
-        Ok(())
-    }
-
-    /// Atomic commit của radix split: update prefix/record + xoá old children
-    /// trong một lần. Storage implementation phải đảm bảo hoặc tất cả thành
-    /// công hoặc không thay đổi gì, để crash không để lại tree không navigate được.
-    async fn commit_split(
-        &mut self,
-        parent: usize,
-        root_prefix: Vec<u8>,
-        new_record: usize,
-        children_to_remove: &[usize],
-    ) -> Result<()> {
-        // Default: fallback về sequential (không atomic) — override ở Redis
-        for &child in children_to_remove {
-            self.remove_child(parent, child).await?;
-        }
-        self.update_node(parent, Some(root_prefix), Some(new_record))
-            .await
-    }
-
-    // ── Persistence for reload ──
-    async fn save_entries(&mut self, entries: &[(i32, String)]) -> Result<()>;
-    async fn load_entries(&self) -> Result<Vec<(i32, String)>>;
-
-    /// Load individual entry by 1-indexed record index.
-    /// Dùng trong non-legacy mode để resolve tree's record → (i32, String).
-    /// Default: fallback về load_entries() + index (chậm nhưng backward compatible).
-    async fn load_entry(&self, idx: usize) -> Result<(i32, String)> {
-        let entries = self.load_entries().await?;
-        entries
-            .get(idx.checked_sub(1).ok_or_else(|| {
-                StorageError::Internal("invalid entry index 0 (must be 1-indexed)".into())
-            })?)
-            .cloned()
-            .ok_or_else(|| StorageError::Internal(format!("entry at index {idx} not found")))
-    }
-
-    /// Save individual entry (atomic per-entry).
-    /// Default: fallback về load_entries() + set + save_entries (chậm).
-    async fn save_entry(&mut self, idx: usize, entry_id: i32, name: &str) -> Result<()> {
-        let mut entries = self.load_entries().await?;
-        let idx0 = idx.checked_sub(1).ok_or_else(|| {
-            StorageError::Internal("invalid entry index 0 (must be 1-indexed)".into())
-        })?;
-        if idx0 >= entries.len() {
-            entries.resize(idx0 + 1, (0, String::new()));
-        }
-        entries[idx0] = (entry_id, name.to_string());
-        self.save_entries(&entries).await
-    }
-
-    /// Save metadata gắn với một record idx (opaque bytes, VD: call-site info
-    /// của edge). Record idx = ID tự nhiên của entry → dùng để enrich.
-    /// Default: no-op — backend không hỗ trợ meta.
-    async fn save_entry_meta(&mut self, _idx: usize, _meta: &[u8]) -> Result<()> {
-        Ok(())
-    }
-
-    /// Load metadata gắn với record idx.
-    /// Default: None — backend không lưu meta.
-    async fn load_entry_meta(&self, _idx: usize) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Count total entries in storage.
-    /// Default: load_entries().len() (chậm nhưng backward compatible).
-    async fn count_entries(&self) -> Result<usize> {
-        Ok(self.load_entries().await?.len())
-    }
-
-    /// Atomically allocate a unique record ID.
-    ///
-    /// - Redis: `INCR {prefix}:record_counter` — atomic across all instances.
-    /// - InMemory: local counter.
-    ///
-    /// Returns a 1-indexed ID that is guaranteed unique across all instances
-    /// sharing the same storage backend. This eliminates the race condition
-    /// that existed with the local `record_counter` field.
-    async fn allocate_record_id(&mut self) -> Result<usize>;
-
-    /// Initialize the record counter for a given count (used during reload).
-    ///
-    /// - Redis: `SET {prefix}:record_counter {count} NX` — only if not set,
-    ///   to avoid overwriting a counter from another active instance.
-    /// - InMemory: always resets the local counter.
-    async fn init_record_counter(&mut self, count: usize) -> Result<()>;
-
-    // ── Generic blob storage (cho bloom filters, etc.) ──
-
-    /// Save arbitrary binary data by key.
-    /// Dùng để persist bloom filters hoặc dữ liệu không cấu trúc khác.
-    async fn save_blob(&mut self, key: &str, data: &[u8]) -> Result<()>;
-
-    /// Load arbitrary binary data by key.
-    /// Trả về `None` nếu key không tồn tại.
-    async fn load_blob(&self, key: &str) -> Result<Option<Vec<u8>>>;
-
-    // ── Shard-level bulk save/load (compressed blob) ──
-
-    /// Save toàn bộ node data của 1 shard thành 1 compressed blob.
-    /// Default no-op (not supported by all storage backends).
-    async fn save_shard(&mut self, _shard: usize, _data: &ShardNodeData) -> Result<()> {
-        Ok(())
-    }
-
-    /// Load node data của 1 shard từ compressed blob.
-    /// Trả về `None` nếu chưa có blob (not supported hoặc chưa migrate).
-    async fn load_shard(&self, _shard: usize) -> Result<Option<ShardNodeData>> {
-        Ok(None)
-    }
+    async fn add_child(&mut self, parent: usize, child: usize) -> Result<()>;
+    async fn move_child(&mut self, from: usize, to: usize, child: usize) -> Result<()>;
+    async fn commit(self: Box<Self>) -> Result<()>;
 }
 
-// ==================== In-Memory Storage (Radix + Automaton) ====================
+// ==================== Storage trait ====================
 
-pub struct InMemoryStorage {
-    // ── Radix data ──
+/// Radix-node storage: node management + transaction.
+#[async_trait]
+pub trait Storage: Send + Sync {
+    // ── Node management ──
+    async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize>;
+    async fn update_node(
+        &mut self,
+        id: usize,
+        prefix: Option<Vec<u8>>,
+        record: Option<usize>,
+    ) -> Result<()>;
+    async fn get_node(&self, id: usize) -> Result<(Vec<u8>, usize)>;
+    async fn get_children(&self, id: usize) -> Result<Vec<usize>>;
+
+    // ── Edge data stream (metadata per edge id — chain model không còn link-edge) ──
+    /// Lưu dữ liệu edge (opaque bytes, VD CallEdgeMeta JSON) keyed theo edge id.
+    /// Mặc định: no-op.
+    #[allow(dead_code)] // API giữ nguyên (protected) — edges suy từ chain trong GraphIndex.
+    async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
+        let _ = (edge, data);
+        Ok(())
+    }
+    /// Đọc dữ liệu edge — `None` nếu edge chưa có. Mặc định: `None`.
+    #[allow(dead_code)] // API giữ nguyên (protected).
+    async fn get_edge_data(&self, edge: usize) -> Result<Option<Vec<u8>>> {
+        let _ = edge;
+        Ok(None)
+    }
+    /// Xoá toàn bộ edge stream (dùng khi rebuild index). Mặc định: no-op.
+    async fn clear_edges(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Duyệt toàn bộ edge data `(edge_id, meta)` theo thứ tự bất kỳ — dùng để
+    /// rebuild edge registry khi reopen (CallEdgeMeta chứa from/to). Mặc định:
+    /// không có edge nào.
+    #[allow(dead_code)] // dùng qua Search::for_each_edge_data (sqlite builds)
+    async fn for_each_edge_data(
+        &self,
+        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
+    ) -> Result<()> {
+        let _ = f;
+        Ok(())
+    }
+
+    // ── Node metadata stream (Node JSON — migrate từ Db xuống index) ──
+    /// Lưu metadata của node (opaque bytes, VD Node JSON) keyed theo element id
+    /// (`SYMBOL_BASE + db_node_id`). Mặc định: no-op.
+    async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
+        let _ = (elem, meta);
+        Ok(())
+    }
+    /// Đọc node metadata — `None` nếu node chưa có. Mặc định: `None`.
+    #[allow(dead_code)] // API giữ nguyên (protected) — GraphIndex dùng metas=None.
+    async fn get_node_meta(&self, elem: usize) -> Result<Option<Vec<u8>>> {
+        let _ = elem;
+        Ok(None)
+    }
+    /// Xoá toàn bộ node stream (dùng khi rebuild index). Mặc định: no-op.
+    async fn clear_node_meta(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    // ── Chain stream (per-owner chain — marker + symbol element ids) ──
+    /// Lưu chain của owner (keyed theo record của owner; u64 LE 8-byte/element).
+    /// Mặc định: no-op.
+    async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
+        let _ = (record, chain);
+        Ok(())
+    }
+    /// Đọc chain của owner — `None` nếu owner chưa có chain. Mặc định: `None`.
+    #[allow(dead_code)] // dùng qua Search::get_chain (test/sqlite builds)
+    async fn get_chain(&self, record: usize) -> Result<Option<Vec<u64>>> {
+        let _ = record;
+        Ok(None)
+    }
+    /// Xoá toàn bộ chains (dùng khi rebuild index). Mặc định: no-op.
+    async fn clear_chains(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    // ── Shard roots (endpoint) ──
+    async fn set_root(&mut self, shard: usize, root: usize) -> Result<()>;
+    async fn get_root(&self, shard: usize) -> Result<usize>;
+
+    // ── Metadata & key length ──
+    /// Lưu metadata (opaque bytes, VD: call-site info) cho một record.
+    /// Nằm tách khỏi radix node — keyed theo record index.
+    #[allow(dead_code)] // primitive storage — dùng trong storage tests
+    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()>;
+    /// Đọc metadata của record — `None` nếu record chưa có meta.
+    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>>;
+    /// Lưu độ dài key (số element) của record — dùng filter `depth` khi search.
+    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()>;
+    /// Đọc độ dài key của record — `None` nếu record chưa insert.
+    async fn get_key_len(&self, record: usize) -> Result<Option<usize>>;
+
+    // ── Shortcuts (auxiliary LIKE-search index) ──
+    /// Thêm `node_id` vào shortcut set của element `elem` (encoded bytes).
+    /// Shortcut set = mọi node có chứa element này trong prefix của nó — dùng
+    /// làm candidate khi tìm substring (KMP + DFS).
+    async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()>;
+    /// Lấy toàn bộ node id chứa element `elem` trong shard.
+    async fn get_shortcut_nodes(&self, shard: usize, elem: &[u8]) -> Result<Vec<usize>>;
+    /// Xoá toàn bộ shortcut sets (dùng khi rebuild index từ tree).
+    async fn clear_shortcuts(&mut self) -> Result<()>;
+
+    // ── Entity store (semgraph model — symbols/chains/callnames/files/version) ──
+    // Tầng dữ liệu ngữ nghĩa đã dời xuống storage (db/ cũ bị xoá): mọi backend
+    // giữ entity data riêng (InMemory = HashMap, Sqlite = bảng `sg_*`, Redis =
+    // hash). Mặc định no-op để backend không cần implement nếu chưa dùng.
+
+    // Method được GraphIndex gọi trực tiếp (ingest/register/flow) — live ở mọi
+    // build. Method chỉ dùng qua `rebuild()` (mở lại file — feature `sqlite`)
+    // cfg_attr allow cho build không feature đó; `load_symbol`/`load_call_name_index`
+    // chưa có caller — giữ allow cho tới khi consumer cần.
+    /// Lưu một symbol — mặc định: no-op.
+    async fn save_symbol(&mut self, _sym: &Symbol) -> Result<()> {
+        Ok(())
+    }
+    #[allow(dead_code)]
+    /// Đọc symbol theo id — mặc định: `None`.
+    async fn load_symbol(&self, _id: u64) -> Result<Option<Symbol>> {
+        Ok(None)
+    }
+    /// Đọc toàn bộ symbol (rebuild index khi open) — mặc định: rỗng.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn load_all_symbols(&self) -> Result<Vec<Symbol>> {
+        Ok(Vec::new())
+    }
+    /// Lưu `next_id` của symbol registry — mặc định: no-op.
+    async fn save_next_id(&mut self, _next: u64) -> Result<()> {
+        Ok(())
+    }
+    /// Đọc `next_id` — mặc định: 0 (chưa có symbol).
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn load_next_id(&self) -> Result<u64> {
+        Ok(0)
+    }
+    /// Đọc toàn bộ chain `(func_id, chain_bytes u64 LE)` — rebuild engine khi
+    /// open — mặc định: rỗng.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn all_chains(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+    /// Lưu call records của một func (opaque bytes, JSON) — mặc định: no-op.
+    async fn set_call_records(&mut self, _func: u64, _records: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    /// Đọc call records của func — mặc định: `None`.
+    async fn get_call_records(&self, _func: u64) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    /// Toàn bộ call records `(func_id, bytes)` — mặc định: rỗng.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn all_call_records(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+    /// Lưu inverted index `call name → call sites` (opaque bytes, JSON) — mặc
+    /// định: no-op.
+    async fn set_call_name_index(&mut self, _name: &str, _sites: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    #[allow(dead_code)]
+    /// Đọc call-name index — mặc định: `None`.
+    async fn load_call_name_index(&self, _name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    /// Toàn bộ call-name index `(name, bytes)` — mặc định: rỗng.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn all_call_name_indexes(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+    /// Upsert file info — mặc định: no-op.
+    async fn upsert_file(&mut self, _f: &FileInfo) -> Result<()> {
+        Ok(())
+    }
+    /// Toàn bộ files — mặc định: rỗng.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn load_all_files(&self) -> Result<Vec<FileInfo>> {
+        Ok(Vec::new())
+    }
+    /// Version của index (`index_version` — bump mỗi lần ingest) — mặc định: 0.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn version(&self) -> Result<u64> {
+        Ok(0)
+    }
+    /// Lưu version — mặc định: no-op.
+    async fn set_version(&mut self, _v: u64) -> Result<()> {
+        Ok(())
+    }
+    /// Xoá toàn bộ entity data (symbols/next_id/call_records/call_names/files/
+    /// version) — dùng khi full re-index. Mặc định: no-op.
+    async fn clear_entities(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    // ── Transaction ──
+    /// Bắt đầu một transaction (sync, không await — đúng theo cách radix gọi).
+    /// Buffer ops; mọi thay đổi chỉ lộ ra khi `commit`.
+    fn new_tx(&self) -> Box<dyn Tx>;
+}
+
+// ==================== In-Memory Storage ====================
+
+struct MemoryData {
+    /// (prefix, record) — index 0 là sentinel.
     nodes: Vec<(Vec<u8>, usize)>,
+    /// children list per node (index 0 = sentinel).
     children: Vec<Vec<usize>>,
+    /// root id per shard.
     roots: Vec<usize>,
+    /// record_idx → metadata (opaque bytes, VD: call-site info).
+    meta: HashMap<usize, Vec<u8>>,
+    /// record_idx → độ dài key (số element) — dùng filter `depth` khi search.
+    key_lens: HashMap<usize, usize>,
+    /// shortcuts[shard][elem_bytes] = node ids chứa elem trong prefix.
+    shortcuts: Vec<HashMap<Vec<u8>, HashSet<usize>>>,
+    /// edge id → dữ liệu edge (opaque bytes, VD EdgeMeta JSON).
+    edges: HashMap<usize, Vec<u8>>,
+    /// element id → node metadata (Node JSON).
+    node_meta: HashMap<usize, Vec<u8>>,
+    /// record (owner) → chain bytes (u64 LE 8-byte/element).
+    chains: HashMap<usize, Vec<u8>>,
+    // ── Entity store (semgraph model) ──
+    // Ghi/đọc bởi entity methods qua InMemoryStorage (GraphIndex ingest/rebuild).
+    /// symbol id → Symbol.
+    symbols: HashMap<u64, Symbol>,
+    /// next_id của symbol registry.
+    next_id: u64,
+    /// func id → call records (JSON).
+    call_records: HashMap<u64, Vec<u8>>,
+    /// call name → call sites (JSON).
+    call_names: HashMap<String, Vec<u8>>,
+    /// path → FileInfo.
+    files: HashMap<String, FileInfo>,
+    /// index version.
+    version: u64,
+}
 
-    // ── Automaton data ──
-    labels: Vec<String>,
-    transitions: Vec<BTreeMap<String, usize>>,
-    failures: Vec<usize>,
-    outputs: BTreeMap<usize, usize>,
-    root_inputs: Vec<usize>,
+/// In-memory radix storage. Thread-safe: toàn bộ state nằm sau 1 RwLock;
+/// id được cấp bằng AtomicUsize nên các transaction song song không trùng id.
+pub struct InMemoryStorage {
+    data: Arc<RwLock<MemoryData>>,
+    next_id: Arc<AtomicUsize>,
+}
 
-    // ── Persistence for reload ──
-    entries_data: Vec<(i32, String)>,
-    /// Metadata theo record idx (1-indexed) — enrich cho entry/edge.
-    entries_meta: HashMap<usize, Vec<u8>>,
-
-    // ── Atomic record ID counter (non-legacy mode) ──
-    /// Local counter for atomically allocating unique record IDs.
-    /// 0-based, increments on each call → returns 1-indexed IDs.
-    id_counter: usize,
-
-    // ── Generic blob storage ──
-    blobs: HashMap<String, Vec<u8>>,
+impl InMemoryStorage {
+    pub fn new() -> Self {
+        Self {
+            data: Arc::new(RwLock::new(MemoryData {
+                nodes: vec![(vec![], EMPTY)], // sentinel
+                children: vec![vec![]],
+                roots: vec![],
+                meta: HashMap::new(),
+                key_lens: HashMap::new(),
+                shortcuts: vec![],
+                edges: HashMap::new(),
+                node_meta: HashMap::new(),
+                chains: HashMap::new(),
+                symbols: HashMap::new(),
+                // Id bắt đầu từ SYMBOL_BASE (marker reserved 1..=99).
+                next_id: codegraph_core::SYMBOL_BASE,
+                call_records: HashMap::new(),
+                call_names: HashMap::new(),
+                files: HashMap::new(),
+                version: 0,
+            })),
+            next_id: Arc::new(AtomicUsize::new(1)),
+        }
+    }
 }
 
 impl Default for InMemoryStorage {
     fn default() -> Self {
-        Self {
-            // Radix sentinel tại index 0
-            nodes: vec![(vec![], 0)],
-            children: vec![vec![]],
-            roots: vec![],
+        Self::new()
+    }
+}
 
-            // Automaton root state tại index 0 (dùng chung sentinel với radix)
-            labels: vec![String::new()],
-            transitions: vec![BTreeMap::new()],
-            failures: vec![0],
-            outputs: BTreeMap::new(),
-            root_inputs: Vec::new(),
-            entries_data: Vec::new(),
-            entries_meta: HashMap::new(),
-            id_counter: 0,
-            blobs: HashMap::new(),
-        }
+impl InMemoryStorage {
+    /// Reserve một id mới (dùng chung cho cả new_node trực tiếp lẫn tx).
+    fn alloc_id(&self) -> usize {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl Storage for InMemoryStorage {
-    // ==================== Radix Methods ====================
-
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
-        let id = self.nodes.len();
-        self.nodes.push((prefix, record));
-        self.children.push(Vec::new());
+        let id = self.alloc_id();
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        if d.nodes.len() <= id {
+            d.nodes.resize(id + 1, (vec![], EMPTY));
+            d.children.resize(id + 1, vec![]);
+        }
+        d.nodes[id] = (prefix, record);
         Ok(id)
     }
 
@@ -308,223 +414,532 @@ impl Storage for InMemoryStorage {
         prefix: Option<Vec<u8>>,
         record: Option<usize>,
     ) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        if id >= d.nodes.len() {
+            return Err(StorageError::BranchOutOfRange(id));
+        }
         if let Some(p) = prefix {
-            self.nodes[id].0 = p;
+            d.nodes[id].0 = p;
         }
         if let Some(r) = record {
-            self.nodes[id].1 = r;
-        }
-        Ok(())
-    }
-
-    async fn add_child(&mut self, parent_id: usize, child_id: usize) -> Result<()> {
-        self.children[parent_id].push(child_id);
-        Ok(())
-    }
-
-    async fn clear_children(&mut self, parent_id: usize) -> Result<()> {
-        if parent_id < self.children.len() {
-            self.children[parent_id].clear();
-        }
-        Ok(())
-    }
-
-    async fn remove_child(&mut self, parent_id: usize, child_id: usize) -> Result<()> {
-        if parent_id < self.children.len() {
-            self.children[parent_id].retain(|&c| c != child_id);
+            d.nodes[id].1 = r;
         }
         Ok(())
     }
 
     async fn get_node(&self, id: usize) -> Result<(Vec<u8>, usize)> {
-        if id >= self.nodes.len() {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        if id >= d.nodes.len() {
             return Err(StorageError::BranchOutOfRange(id));
         }
-        Ok(self.nodes[id].clone())
+        Ok(d.nodes[id].clone())
     }
 
     async fn get_children(&self, id: usize) -> Result<Vec<usize>> {
-        if id >= self.children.len() {
-            return Ok(vec![]);
-        }
-        Ok(self.children[id].clone())
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.children.get(id).cloned().unwrap_or_default())
     }
 
-    async fn set_root(&mut self, shard: usize, root_id: usize) -> Result<()> {
-        if shard >= self.roots.len() {
-            self.roots.resize(shard + 1, 0);
+    async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        if shard >= d.roots.len() {
+            d.roots.resize(shard + 1, EMPTY);
         }
-        self.roots[shard] = root_id;
+        d.roots[shard] = root;
         Ok(())
     }
 
     async fn get_root(&self, shard: usize) -> Result<usize> {
-        Ok(self.roots.get(shard).copied().unwrap_or(EMPTY))
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.roots.get(shard).copied().unwrap_or(EMPTY))
     }
 
-    // ── Persistence for reload ──
-    async fn save_entries(&mut self, entries: &[(i32, String)]) -> Result<()> {
-        self.entries_data = entries.to_vec();
+    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.meta.insert(record, meta.to_vec());
         Ok(())
     }
 
-    async fn load_entries(&self) -> Result<Vec<(i32, String)>> {
-        Ok(self.entries_data.clone())
+    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.meta.get(&record).cloned())
     }
 
-    async fn load_entry(&self, idx: usize) -> Result<(i32, String)> {
-        let idx0 = idx.checked_sub(1).ok_or_else(|| {
-            StorageError::Internal("invalid entry index 0 (must be 1-indexed)".into())
-        })?;
-        self.entries_data
-            .get(idx0)
-            .cloned()
-            .ok_or_else(|| StorageError::Internal(format!("entry at index {idx} not found")))
+    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.key_lens.insert(record, len);
+        Ok(())
     }
 
-    async fn save_entry(&mut self, idx: usize, entry_id: i32, name: &str) -> Result<()> {
-        let idx0 = idx.checked_sub(1).ok_or_else(|| {
-            StorageError::Internal("invalid entry index 0 (must be 1-indexed)".into())
-        })?;
-        if idx0 >= self.entries_data.len() {
-            self.entries_data.resize(idx0 + 1, (0, String::new()));
+    async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.key_lens.get(&record).copied())
+    }
+
+    async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        if shard >= d.shortcuts.len() {
+            d.shortcuts.resize(shard + 1, HashMap::new());
         }
-        self.entries_data[idx0] = (entry_id, name.to_string());
+        d.shortcuts[shard]
+            .entry(elem.to_vec())
+            .or_default()
+            .insert(node_id);
         Ok(())
     }
 
-    async fn count_entries(&self) -> Result<usize> {
-        Ok(self.entries_data.len())
+    async fn get_shortcut_nodes(&self, shard: usize, elem: &[u8]) -> Result<Vec<usize>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.shortcuts
+            .get(shard)
+            .and_then(|m| m.get(elem))
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default())
     }
 
-    async fn save_entry_meta(&mut self, idx: usize, meta: &[u8]) -> Result<()> {
-        self.entries_meta.insert(idx, meta.to_vec());
+    async fn clear_shortcuts(&mut self) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        for map in d.shortcuts.iter_mut() {
+            map.clear();
+        }
         Ok(())
     }
 
-    async fn load_entry_meta(&self, idx: usize) -> Result<Option<Vec<u8>>> {
-        Ok(self.entries_meta.get(&idx).cloned())
-    }
-
-    async fn allocate_record_id(&mut self) -> Result<usize> {
-        self.id_counter += 1;
-        Ok(self.id_counter)
-    }
-
-    async fn init_record_counter(&mut self, count: usize) -> Result<()> {
-        self.id_counter = count;
+    async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.edges.insert(edge, data.to_vec());
         Ok(())
     }
 
-    async fn save_blob(&mut self, key: &str, data: &[u8]) -> Result<()> {
-        self.blobs.insert(key.to_string(), data.to_vec());
+    async fn get_edge_data(&self, edge: usize) -> Result<Option<Vec<u8>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.edges.get(&edge).cloned())
+    }
+
+    async fn clear_edges(&mut self) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.edges.clear();
         Ok(())
     }
 
-    async fn load_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.blobs.get(key).cloned())
+    async fn for_each_edge_data(
+        &self,
+        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
+    ) -> Result<()> {
+        let items: Vec<(usize, Vec<u8>)> = {
+            let d = self
+                .data
+                .read()
+                .map_err(|_| StorageError::Internal("poison".into()))?;
+            d.edges.iter().map(|(&id, data)| (id, data.clone())).collect()
+        };
+        for (id, data) in items {
+            f(id, &data)?;
+        }
+        Ok(())
     }
 
-    // ==================== Automaton Methods ====================
+    async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.node_meta.insert(elem, meta.to_vec());
+        Ok(())
+    }
 
-    async fn add_state(&mut self, label: &str) -> Result<usize> {
-        let id = self.labels.len();
-        self.labels.push(label.to_string());
-        self.transitions.push(BTreeMap::new());
-        self.failures.push(0);
+    async fn get_node_meta(&self, elem: usize) -> Result<Option<Vec<u8>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.node_meta.get(&elem).cloned())
+    }
+
+    async fn clear_node_meta(&mut self) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.node_meta.clear();
+        Ok(())
+    }
+
+    async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.chains.insert(record, encode_chain(chain));
+        Ok(())
+    }
+
+    async fn get_chain(&self, record: usize) -> Result<Option<Vec<u64>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.chains.get(&record).map(|b| decode_chain(b)))
+    }
+
+    async fn clear_chains(&mut self) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.chains.clear();
+        Ok(())
+    }
+
+    async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.symbols.insert(sym.id, sym.clone());
+        Ok(())
+    }
+
+    async fn load_symbol(&self, id: u64) -> Result<Option<Symbol>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.symbols.get(&id).cloned())
+    }
+
+    async fn load_all_symbols(&self) -> Result<Vec<Symbol>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        let mut out: Vec<Symbol> = d.symbols.values().cloned().collect();
+        out.sort_by_key(|s| s.id);
+        Ok(out)
+    }
+
+    async fn save_next_id(&mut self, next: u64) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.next_id = next;
+        Ok(())
+    }
+
+    async fn load_next_id(&self) -> Result<u64> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.next_id)
+    }
+
+    async fn all_chains(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        let mut out: Vec<(u64, Vec<u8>)> = d
+            .chains
+            .iter()
+            .map(|(&rec, bytes)| (rec as u64, bytes.clone()))
+            .collect();
+        out.sort_by_key(|(rec, _)| *rec);
+        Ok(out)
+    }
+
+    async fn set_call_records(&mut self, func: u64, records: &[u8]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.call_records.insert(func, records.to_vec());
+        Ok(())
+    }
+
+    async fn get_call_records(&self, func: u64) -> Result<Option<Vec<u8>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.call_records.get(&func).cloned())
+    }
+
+    async fn all_call_records(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.call_records.iter().map(|(&f, b)| (f, b.clone())).collect())
+    }
+
+    async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.call_names.insert(name.to_string(), sites.to_vec());
+        Ok(())
+    }
+
+    async fn load_call_name_index(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.call_names.get(name).cloned())
+    }
+
+    async fn all_call_name_indexes(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.call_names.iter().map(|(n, b)| (n.clone(), b.clone())).collect())
+    }
+
+    async fn upsert_file(&mut self, f: &FileInfo) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.files.insert(f.path.clone(), f.clone());
+        Ok(())
+    }
+
+    async fn load_all_files(&self) -> Result<Vec<FileInfo>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        let mut out: Vec<FileInfo> = d.files.values().cloned().collect();
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
+    async fn version(&self) -> Result<u64> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.version)
+    }
+
+    async fn set_version(&mut self, v: u64) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.version = v;
+        Ok(())
+    }
+
+    async fn clear_entities(&mut self) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.symbols.clear();
+        d.next_id = codegraph_core::SYMBOL_BASE;
+        d.call_records.clear();
+        d.call_names.clear();
+        d.files.clear();
+        d.version = 0;
+        Ok(())
+    }
+
+    fn new_tx(&self) -> Box<dyn Tx> {
+        Box::new(InMemoryTx {
+            data: self.data.clone(),
+            next_id: self.next_id.clone(),
+            nodes: Vec::new(),
+            ops: Vec::new(),
+        })
+    }
+}
+
+/// Transaction cho `InMemoryStorage`: buffer toàn bộ mutation, áp dụng
+/// atomic dưới 1 write lock tại `commit`.
+struct InMemoryTx {
+    data: Arc<RwLock<MemoryData>>,
+    next_id: Arc<AtomicUsize>,
+    /// (reserved_id, prefix, record) — được append tại commit.
+    nodes: Vec<(usize, Vec<u8>, usize)>,
+    ops: Vec<TxOp>,
+}
+
+#[async_trait]
+impl Tx for InMemoryTx {
+    async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        self.nodes.push((id, prefix, record));
         Ok(id)
     }
 
-    async fn set_transition(&mut self, from: usize, label: &str, to: usize) -> Result<()> {
-        self.transitions[from].insert(label.to_string(), to);
+    async fn update_node(
+        &mut self,
+        id: usize,
+        prefix: Option<Vec<u8>>,
+        record: Option<usize>,
+    ) -> Result<()> {
+        self.ops.push(TxOp::UpdateNode { id, prefix, record });
         Ok(())
     }
 
-    async fn get_transitions(&self, from: usize) -> Result<Vec<(String, usize)>> {
-        Ok(self.transitions[from].clone().into_iter().collect())
-    }
-
-    async fn set_failure(&mut self, state: usize, fail: usize) -> Result<()> {
-        self.failures[state] = fail;
+    async fn add_child(&mut self, parent: usize, child: usize) -> Result<()> {
+        self.ops.push(TxOp::AddChild { parent, child });
         Ok(())
     }
 
-    async fn get_failure(&self, state: usize) -> Result<usize> {
-        Ok(self.failures[state])
-    }
-
-    async fn set_output(&mut self, state: usize, pattern_idx: usize) -> Result<()> {
-        self.outputs.insert(state, pattern_idx);
+    async fn move_child(&mut self, from: usize, to: usize, child: usize) -> Result<()> {
+        self.ops.push(TxOp::MoveChild { from, to, child });
         Ok(())
     }
 
-    async fn get_output(&self, state: usize) -> Result<Option<usize>> {
-        Ok(self.outputs.get(&state).copied())
-    }
+    async fn commit(self: Box<Self>) -> Result<()> {
+        let InMemoryTx {
+            data, nodes, ops, ..
+        } = *self;
 
-    async fn add_root_input(&mut self, state: usize) -> Result<()> {
-        self.root_inputs.push(state);
-        Ok(())
-    }
+        let mut d = data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
 
-    async fn get_root_inputs(&self) -> Result<Vec<usize>> {
-        Ok(self.root_inputs.clone())
-    }
-
-    async fn get_label(&self, state: usize) -> Result<String> {
-        if state >= self.labels.len() {
-            return Err(StorageError::BranchOutOfRange(state));
+        // 1. Materialize các node đã reserve (đảm bảo children[leg] tồn tại
+        //    trước khi ops move/add trỏ tới).
+        for (id, prefix, record) in nodes {
+            if d.nodes.len() <= id {
+                d.nodes.resize(id + 1, (vec![], EMPTY));
+                d.children.resize(id + 1, vec![]);
+            }
+            d.nodes[id] = (prefix, record);
         }
-        Ok(self.labels[state].clone())
-    }
 
-    async fn num_states(&self) -> Result<usize> {
-        Ok(self.transitions.len())
+        // 2. Áp dụng toàn bộ ops — tất cả cùng thành công hoặc cùng thất bại
+        //    (single write lock → không lộ trạng thái trung gian).
+        for op in ops {
+            match op {
+                TxOp::AddChild { parent, child } => {
+                    if parent < d.children.len() && !d.children[parent].contains(&child) {
+                        d.children[parent].push(child);
+                    }
+                }
+                TxOp::MoveChild { from, to, child } => {
+                    if from < d.children.len() {
+                        d.children[from].retain(|&c| c != child);
+                    }
+                    if to < d.children.len() && !d.children[to].contains(&child) {
+                        d.children[to].push(child);
+                    }
+                }
+                TxOp::UpdateNode { id, prefix, record } => {
+                    if id < d.nodes.len() {
+                        if let Some(p) = prefix {
+                            d.nodes[id].0 = p;
+                        }
+                        if let Some(r) = record {
+                            d.nodes[id].1 = r;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
 // =========================================================================
-//  Redis Storage
-//  (chỉ build khi feature "redis" được bật)
+//  Redis Storage — chỉ build khi feature "redis" được bật.
 // =========================================================================
 
 #[cfg(feature = "redis")]
+#[allow(dead_code)] // backend redis chỉ được exercise bởi tests của chính nó (chưa có production path)
 pub mod redis {
-    //! Redis-backed Storage implementation (Radix + Automaton).
+    //! Redis-backed radix-node storage.
     //!
-    //! ## Cấu trúc key
-    //!
-    //! | Key                        | Kiểu  | Mục đích                        |
-    //! |----------------------------|-------|---------------------------------|
-    //! | `{prefix}:branch`          | List  | prefix của từng node            |
-    //! | `{prefix}:record`          | List  | record của từng node            |
-    //! | `{prefix}:forward:{id}`    | Set   | children list của node          |
-    //! | `{prefix}:endpoint`        | Hash  | root ID cho mỗi shard           |
-    //! | `{prefix}:entries_blob`    | String| entries zstd blob               |
-    //! | `{prefix}:record_counter`  | String| atomic counter (INCR)           |
-    //! | `{prefix}:shard:{shard}`   | String| node data zstd blob per shard   |
-    //! | `{prefix}:{blob_key}`      | String| binary blobs (bloom filters...) |
-    //! | `{prefix}:label`           | List  | label của từng state            |
-    //! | `{prefix}:trans:{id}`      | Hash  | transitions của state           |
-    //! | `{prefix}:failure`         | List  | failure link của state          |
-    //! | `{prefix}:output`          | Hash  | output (pattern_idx) của state  |
-    //! | `{prefix}:root_inputs`     | List  | danh sách root input states     |
+    //! Cấu trúc key:
+    //! | Key                      | Kiểu  | Mục đích                  |
+    //! |--------------------------|-------|---------------------------|
+    //! | `{prefix}:branch`        | List  | prefix của từng node      |
+    //! | `{prefix}:record`        | List  | record của từng node      |
+    //! | `{prefix}:forward:{id}`  | Set   | children list của node    |
+    //! | `{prefix}:endpoint`      | Hash  | root ID cho mỗi shard     |
+    //! | `{prefix}:meta`          | Hash  | record_idx → metadata     |
+    //! | `{prefix}:keylen`        | Hash  | record_idx → key length   |
+    //! | `{prefix}:edgedata`      | Hash  | edge id → edge metadata   |
+    //! | `{prefix}:nodemeta`      | Hash  | element id → node metadata|
+    //! | `{prefix}:chains`        | Hash  | record → chain bytes      |
+    //! | `{prefix}:shortcut:{shard}:{elem}` | Set | node ids chứa elem |
+    //! | `{prefix}:symbols`       | Hash  | symbol id → Symbol JSON   |
+    //! | `{prefix}:nextid`        | String| next symbol registry id  |
+    //! | `{prefix}:callrecords`   | Hash  | func id → call records    |
+    //! | `{prefix}:callnames`     | Hash  | call name → call sites    |
+    //! | `{prefix}:files`         | Hash  | path → FileInfo JSON      |
+    //! | `{prefix}:version`       | String| index version            |
 
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use redis::aio::MultiplexedConnection;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::Mutex;
 
-    use super::{Result, ShardNodeData, Storage, StorageError};
+    use async_trait::async_trait;
+
+    use super::{FileInfo, Result, Storage, StorageError, Symbol, Tx, TxOp};
 
     // ==================== KeyBuilder ====================
 
     type KeyFormatter = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
     /// Cấu hình key cho Redis storage.
-    ///
-    /// Mặc định format: `{prefix}:{name}` và `{prefix}:{name}:{id}`.
-    /// Có thể dùng `with_formatter` để custom hoàn toàn.
+    #[derive(Clone)]
     pub struct KeyBuilder {
         prefix: String,
         formatter: Option<KeyFormatter>,
@@ -538,7 +953,6 @@ pub mod redis {
             }
         }
 
-        /// Dùng custom formatter thay vì default `{prefix}:{name}`.
         pub fn with_formatter(prefix: &str, f: KeyFormatter) -> Self {
             Self {
                 prefix: prefix.to_string(),
@@ -558,6 +972,21 @@ pub mod redis {
         pub fn indexed(&self, name: &str, idx: usize) -> String {
             self.key(&format!("{name}:{idx}"))
         }
+
+        /// `shortcut(3, [0x01])` → `"{prefix}:shortcut:3:{0x01}"`
+        /// (bytes của elem nối trực tiếp — Redis key binary-safe).
+        pub fn shortcut(&self, shard: usize, elem: &[u8]) -> Vec<u8> {
+            let mut k = self.key(&format!("shortcut:{shard}")).into_bytes();
+            k.push(b':');
+            k.extend_from_slice(elem);
+            k
+        }
+
+        /// Prefix chung của mọi shortcut key: `"{prefix}:shortcut:"`.
+        /// Dùng làm MATCH pattern khi SCAN để xoá toàn bộ shortcuts.
+        pub fn shortcut_prefix(&self) -> String {
+            self.key("shortcut") + ":"
+        }
     }
 
     /// Helper shorthand: `cmd("LLEN")` → `redis::cmd("LLEN")`
@@ -570,69 +999,43 @@ pub mod redis {
     pub struct RedisStorage {
         conn: Arc<Mutex<MultiplexedConnection>>,
         kb: KeyBuilder,
-        /// In-memory cache of entries, loaded from compressed zstd blob or old Hash.
-        /// `load_entry()` reads from here — zero Redis calls at search time.
-        entries_cache: RwLock<Vec<(i32, String)>>,
     }
 
     impl RedisStorage {
-        /// Helper: lock the mutex, unwrap on poison.
         async fn lock(&self) -> tokio::sync::MutexGuard<'_, MultiplexedConnection> {
             self.conn.lock().await
         }
 
-        /// Tạo storage từ `redis::Client` (async).
         pub async fn new(client: redis::Client, prefix: &str) -> Result<Self> {
             let conn = client
                 .get_multiplexed_async_connection()
                 .await
                 .map_err(|e| StorageError::Internal(e.to_string()))?;
-
             let s = Self {
                 conn: Arc::new(Mutex::new(conn)),
                 kb: KeyBuilder::new(prefix),
-                entries_cache: RwLock::new(Vec::new()),
             };
             s.init().await?;
             Ok(s)
         }
 
-        /// Tạo storage từ `MultiplexedConnection` có sẵn (vd từ `Resolver::cache()`).
         pub async fn from_multiplexed(conn: MultiplexedConnection, prefix: &str) -> Result<Self> {
             let s = Self {
                 conn: Arc::new(Mutex::new(conn)),
                 kb: KeyBuilder::new(prefix),
-                entries_cache: RwLock::new(Vec::new()),
             };
             s.init().await?;
             Ok(s)
         }
 
-        /// Tạo storage với `KeyBuilder` tuỳ chỉnh + client.
         pub async fn with_key_builder(client: redis::Client, kb: KeyBuilder) -> Result<Self> {
             let conn = client
                 .get_multiplexed_async_connection()
                 .await
                 .map_err(|e| StorageError::Internal(e.to_string()))?;
-
             let s = Self {
                 conn: Arc::new(Mutex::new(conn)),
                 kb,
-                entries_cache: RwLock::new(Vec::new()),
-            };
-            s.init().await?;
-            Ok(s)
-        }
-
-        /// Tạo storage với `MultiplexedConnection` + `KeyBuilder` custom.
-        pub async fn from_multiplexed_with_key_builder(
-            conn: MultiplexedConnection,
-            kb: KeyBuilder,
-        ) -> Result<Self> {
-            let s = Self {
-                conn: Arc::new(Mutex::new(conn)),
-                kb,
-                entries_cache: RwLock::new(Vec::new()),
             };
             s.init().await?;
             Ok(s)
@@ -640,59 +1043,40 @@ pub mod redis {
 
         async fn init(&self) -> Result<()> {
             let mut conn = self.lock().await;
-
             let exists: bool = cmd("EXISTS")
                 .arg(self.kb.key("branch"))
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
             if !exists {
                 redis::pipe()
                     .atomic()
                     .rpush(self.kb.key("branch"), b"" as &[u8])
                     .rpush(self.kb.key("record"), 0i64)
-                    .rpush(self.kb.key("label"), "")
-                    .rpush(self.kb.key("failure"), 0i64)
                     .exec_async(&mut *conn)
                     .await
                     .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
             }
-
             Ok(())
         }
 
-        // ── Compression helpers for entries ──
-
-        /// Serialize + zstd-compress entries vector.
-        fn compress_entries(entries: &[(i32, String)]) -> Result<Vec<u8>> {
-            let bytes = bincode::serialize(entries)
-                .map_err(|e| StorageError::Internal(format!("bincode: {e}")))?;
-            zstd::encode_all(&bytes[..], 3)
-                .map_err(|e| StorageError::Internal(format!("zstd compress: {e}")))
-        }
-
-        /// zstd-decompress + deserialize entries vector.
-        fn decompress_entries(data: &[u8]) -> Result<Vec<(i32, String)>> {
-            let bytes = zstd::decode_all(data)
-                .map_err(|e| StorageError::Internal(format!("zstd decompress: {e}")))?;
-            bincode::deserialize(&bytes)
-                .map_err(|e| StorageError::Internal(format!("bincode: {e}")))
+        /// Độ dài hiện tại của branch list = số node (gồm sentinel).
+        /// Node id tiếp theo = len - 1.
+        async fn node_len(&self) -> Result<usize> {
+            let mut conn = self.lock().await;
+            let len: usize = cmd("LLEN")
+                .arg(self.kb.key("branch"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(len)
         }
     }
 
-    #[async_trait::async_trait]
+    #[async_trait]
     impl Storage for RedisStorage {
-        // ==================== Radix Methods ====================
-
         async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
             let mut conn = self.lock().await;
-
-            // Atomic pipeline: cả 2 RPUSH trong cùng MULTI/EXEC.
-            // EXEC trả về array [len_branch, len_record] — lấy len từ RPUSH branch.
-            // Cách này tránh race condition LLEN sau atomic pipe (nếu 2 connections
-            // cùng gọi new_node, LLEN có thể thấy tổng cả 2).
-            // ⚡ query_async trả về Value (exec_async trả về () — không dùng được)
             let result: redis::Value = redis::pipe()
                 .atomic()
                 .rpush(self.kb.key("branch"), &prefix[..])
@@ -701,32 +1085,20 @@ pub mod redis {
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
 
-            // Parse EXEC response: Value::Array([Value::Int(len), Value::Int(...)])
             let len: usize = match result {
                 redis::Value::Array(ref items) => match items.first() {
                     Some(redis::Value::Int(n)) => *n as usize,
-                    _ => {
-                        // Fallback: LLEN (nếu response format khác mong đợi)
-                        let llen = cmd("LLEN")
-                            .arg(self.kb.key("branch"))
-                            .query_async::<usize>(&mut *conn)
-                            .await;
-                        match llen {
-                            Ok(l) => l,
-                            Err(e) => return Err(StorageError::Internal(e.to_string())),
-                        }
-                    }
-                },
-                _ => {
-                    let llen = cmd("LLEN")
+                    _ => cmd("LLEN")
                         .arg(self.kb.key("branch"))
                         .query_async::<usize>(&mut *conn)
-                        .await;
-                    match llen {
-                        Ok(l) => l,
-                        Err(e) => return Err(StorageError::Internal(e.to_string())),
-                    }
-                }
+                        .await
+                        .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?,
+                },
+                _ => cmd("LLEN")
+                    .arg(self.kb.key("branch"))
+                    .query_async::<usize>(&mut *conn)
+                    .await
+                    .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?,
             };
 
             Ok(len - 1)
@@ -739,7 +1111,6 @@ pub mod redis {
             record: Option<usize>,
         ) -> Result<()> {
             let mut conn = self.lock().await;
-
             let mut pipe = redis::pipe();
             pipe.atomic();
             if let Some(p) = prefix {
@@ -748,255 +1119,168 @@ pub mod redis {
             if let Some(r) = record {
                 pipe.lset(self.kb.key("record"), id as isize, r as i64);
             }
-
             pipe.exec_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        async fn add_child(&mut self, parent_id: usize, child_id: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            cmd("SADD")
-                .arg(self.kb.indexed("forward", parent_id))
-                .arg(child_id as i64)
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        async fn clear_children(&mut self, parent_id: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            cmd("DEL")
-                .arg(self.kb.indexed("forward", parent_id))
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        async fn remove_child(&mut self, parent_id: usize, child_id: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            cmd("SREM")
-                .arg(self.kb.indexed("forward", parent_id))
-                .arg(child_id as i64)
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        /// Atomic split commit: update prefix/record + SREM tất cả old children
-        /// trong một MULTI/EXEC, đảm bảo crash không để tree ở trạng thái không
-        /// navigate được (old prefix + children đã xoá).
-        async fn commit_split(
-            &mut self,
-            parent: usize,
-            root_prefix: Vec<u8>,
-            new_record: usize,
-            children_to_remove: &[usize],
-        ) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            let mut pipe = redis::pipe();
-            pipe.atomic();
-            pipe.lset(self.kb.key("branch"), parent as isize, &root_prefix[..]);
-            pipe.lset(self.kb.key("record"), parent as isize, new_record as i64);
-            for &child in children_to_remove {
-                pipe.cmd("SREM")
-                    .arg(self.kb.indexed("forward", parent))
-                    .arg(child as i64)
-                    .ignore();
-            }
-            pipe.exec_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
             Ok(())
         }
 
         async fn get_node(&self, id: usize) -> Result<(Vec<u8>, usize)> {
             let mut conn = self.lock().await;
-
             let prefix: Vec<u8> = cmd("LINDEX")
                 .arg(self.kb.key("branch"))
                 .arg(id as isize)
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
             let rec: i64 = cmd("LINDEX")
                 .arg(self.kb.key("record"))
                 .arg(id as isize)
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
             Ok((prefix, rec as usize))
         }
 
         async fn get_children(&self, id: usize) -> Result<Vec<usize>> {
             let mut conn = self.lock().await;
-
             let children: Vec<i64> = cmd("SMEMBERS")
                 .arg(self.kb.indexed("forward", id))
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
             Ok(children.into_iter().map(|x| x as usize).collect())
         }
 
-        async fn set_root(&mut self, shard: usize, root_id: usize) -> Result<()> {
+        async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
             let mut conn = self.lock().await;
-
             cmd("HSET")
                 .arg(self.kb.key("endpoint"))
                 .arg(shard as i64)
-                .arg(root_id as i64)
+                .arg(root as i64)
                 .query_async::<()>(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
             Ok(())
         }
 
         async fn get_root(&self, shard: usize) -> Result<usize> {
             let mut conn = self.lock().await;
-
             let root: Option<i64> = cmd("HGET")
                 .arg(self.kb.key("endpoint"))
                 .arg(shard as i64)
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
             Ok(root.unwrap_or(0) as usize)
         }
 
-        // ── Persistence for reload ──
-        // Entries stored as compressed zstd blob: {prefix}:entries_blob
-        //   value = bincode(Vec<(i32, String)>) compressed with zstd level 3
-        //
-        // In-memory cache `entries_cache` avoids Redis calls at search time.
-        //
-        // Lưu ý: `save_entry` chỉ update cache (không gọi Redis).
-        // Blob được persist qua `save_entries` (gọi sau insert batch).
-
-        /// Save entries: compress to zstd blob + update cache.
-        async fn save_entries(&mut self, entries: &[(i32, String)]) -> Result<()> {
-            *self.entries_cache.write().await = entries.to_vec();
-
-            let compressed = Self::compress_entries(entries)?;
+        async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
             let mut conn = self.lock().await;
-            cmd("SET")
-                .arg(self.kb.key("entries_blob"))
-                .arg(&compressed)
+            cmd("HSET")
+                .arg(self.kb.key("meta"))
+                .arg(record as i64)
+                .arg(meta)
                 .query_async::<()>(&mut *conn)
                 .await
-                .map_err(|e| StorageError::Internal(e.to_string()))?;
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
             Ok(())
         }
 
-        /// Load entries từ compressed blob, populate cache.
-        async fn load_entries(&self) -> Result<Vec<(i32, String)>> {
-            {
-                let cache = self.entries_cache.read().await;
-                if !cache.is_empty() {
-                    return Ok(cache.clone());
+        async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
+            let mut conn = self.lock().await;
+            let meta: Option<Vec<u8>> = cmd("HGET")
+                .arg(self.kb.key("meta"))
+                .arg(record as i64)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(meta)
+        }
+
+        async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("HSET")
+                .arg(self.kb.key("keylen"))
+                .arg(record as i64)
+                .arg(len as i64)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
+            let mut conn = self.lock().await;
+            let len: Option<i64> = cmd("HGET")
+                .arg(self.kb.key("keylen"))
+                .arg(record as i64)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(len.map(|x| x as usize))
+        }
+
+        async fn add_shortcut_node(
+            &mut self,
+            shard: usize,
+            elem: &[u8],
+            node_id: usize,
+        ) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("SADD")
+                .arg(self.kb.shortcut(shard, elem))
+                .arg(node_id as i64)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn get_shortcut_nodes(&self, shard: usize, elem: &[u8]) -> Result<Vec<usize>> {
+            let mut conn = self.lock().await;
+            let nodes: Vec<i64> = cmd("SMEMBERS")
+                .arg(self.kb.shortcut(shard, elem))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(nodes.into_iter().map(|x| x as usize).collect())
+        }
+
+        async fn clear_shortcuts(&mut self) -> Result<()> {
+            let mut conn = self.lock().await;
+            let pattern = format!("{}*", self.kb.shortcut_prefix());
+            let mut cursor: u64 = 0;
+            loop {
+                let (next_cursor, keys): (u64, Vec<String>) = cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(500)
+                    .query_async(&mut *conn)
+                    .await
+                    .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+                for key in keys {
+                    cmd("DEL")
+                        .arg(key)
+                        .query_async::<()>(&mut *conn)
+                        .await
+                        .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+                }
+                cursor = next_cursor;
+                if cursor == 0 {
+                    break;
                 }
             }
-
-            let mut conn = self.lock().await;
-            let blob: Option<Vec<u8>> = cmd("GET")
-                .arg(self.kb.key("entries_blob"))
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e| StorageError::Internal(e.to_string()))?;
-
-            let entries = match blob {
-                Some(data) => Self::decompress_entries(&data)?,
-                None => Vec::new(),
-            };
-
-            *self.entries_cache.write().await = entries.clone();
-            Ok(entries)
-        }
-
-        /// Load individual entry từ in-memory cache (zero Redis calls).
-        async fn load_entry(&self, idx: usize) -> Result<(i32, String)> {
-            let idx0 = idx.checked_sub(1).ok_or_else(|| {
-                StorageError::Internal("invalid entry index 0 (must be 1-indexed)".into())
-            })?;
-
-            let cache = self.entries_cache.read().await;
-            cache.get(idx0).cloned().ok_or_else(|| {
-                StorageError::Internal(format!("entry at index {idx} not found (cache cold?)"))
-            })
-        }
-
-        /// Save individual entry: update cache (không gọi Redis).
-        /// Blob được persist qua `save_entries` sau insert batch.
-        async fn save_entry(&mut self, idx: usize, entry_id: i32, name: &str) -> Result<()> {
-            let idx0 = idx.checked_sub(1).ok_or_else(|| {
-                StorageError::Internal("invalid entry index 0 (must be 1-indexed)".into())
-            })?;
-
-            let mut cache = self.entries_cache.write().await;
-            if idx0 >= cache.len() {
-                cache.resize(idx0 + 1, (0, String::new()));
-            }
-            cache[idx0] = (entry_id, name.to_string());
             Ok(())
         }
 
-        async fn count_entries(&self) -> Result<usize> {
-            let cache = self.entries_cache.read().await;
-            if !cache.is_empty() {
-                return Ok(cache.len());
-            }
-            // Cold start: load entries to populate cache
-            drop(cache);
-            self.load_entries().await?;
-            Ok(self.entries_cache.read().await.len())
-        }
-
-        async fn allocate_record_id(&mut self) -> Result<usize> {
+        async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
             let mut conn = self.lock().await;
-            let id: i64 = cmd("INCR")
-                .arg(self.kb.key("record_counter"))
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-            Ok(id as usize)
-        }
-
-        async fn init_record_counter(&mut self, count: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-            // SET NX: only set if key doesn't exist yet.
-            // Prevents overwriting a counter from another active instance.
-            let _: Option<String> = cmd("SET")
-                .arg(self.kb.key("record_counter"))
-                .arg(count as i64)
-                .arg("NX")
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-            Ok(())
-        }
-
-        async fn save_blob(&mut self, key: &str, data: &[u8]) -> Result<()> {
-            let mut conn = self.lock().await;
-            cmd("SET")
-                .arg(self.kb.key(key))
+            cmd("HSET")
+                .arg(self.kb.key("edgedata"))
+                .arg(edge as i64)
                 .arg(data)
                 .query_async::<()>(&mut *conn)
                 .await
@@ -1004,236 +1288,450 @@ pub mod redis {
             Ok(())
         }
 
-        async fn load_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        async fn get_edge_data(&self, edge: usize) -> Result<Option<Vec<u8>>> {
             let mut conn = self.lock().await;
-            let val: Option<Vec<u8>> = cmd("GET")
-                .arg(self.kb.key(key))
+            let data: Option<Vec<u8>> = cmd("HGET")
+                .arg(self.kb.key("edgedata"))
+                .arg(edge as i64)
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-            Ok(val)
+            Ok(data)
         }
 
-        // ── Shard-level compressed blob (override Storage trait defaults) ──
+        async fn clear_edges(&mut self) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("DEL")
+                .arg(self.kb.key("edgedata"))
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
 
-        async fn save_shard(&mut self, shard: usize, data: &ShardNodeData) -> Result<()> {
-            let bytes = bincode::serialize(data)
-                .map_err(|e| StorageError::Internal(format!("bincode shard: {e}")))?;
-            let compressed = zstd::encode_all(&bytes[..], 3)
-                .map_err(|e| StorageError::Internal(format!("zstd shard: {e}")))?;
+        async fn for_each_edge_data(
+            &self,
+            f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
+        ) -> Result<()> {
+            let mut conn = self.lock().await;
+            let items: Vec<(i64, Vec<u8>)> = cmd("HGETALL")
+                .arg(self.kb.key("edgedata"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            for (id, data) in items {
+                f(id as usize, &data)?;
+            }
+            Ok(())
+        }
 
+        async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("HSET")
+                .arg(self.kb.key("nodemeta"))
+                .arg(elem as i64)
+                .arg(meta)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn get_node_meta(&self, elem: usize) -> Result<Option<Vec<u8>>> {
+            let mut conn = self.lock().await;
+            let meta: Option<Vec<u8>> = cmd("HGET")
+                .arg(self.kb.key("nodemeta"))
+                .arg(elem as i64)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(meta)
+        }
+
+        async fn clear_node_meta(&mut self) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("DEL")
+                .arg(self.kb.key("nodemeta"))
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("HSET")
+                .arg(self.kb.key("chains"))
+                .arg(record as i64)
+                .arg(super::encode_chain(chain))
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn get_chain(&self, record: usize) -> Result<Option<Vec<u64>>> {
+            let mut conn = self.lock().await;
+            let bytes: Option<Vec<u8>> = cmd("HGET")
+                .arg(self.kb.key("chains"))
+                .arg(record as i64)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(bytes.map(|b| super::decode_chain(&b)))
+        }
+
+        async fn clear_chains(&mut self) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("DEL")
+                .arg(self.kb.key("chains"))
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
+            let mut conn = self.lock().await;
+            let data = serde_json::to_vec(sym).map_err(|e| StorageError::Internal(e.to_string()))?;
+            cmd("HSET")
+                .arg(self.kb.key("symbols"))
+                .arg(sym.id as i64)
+                .arg(data)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn load_symbol(&self, id: u64) -> Result<Option<Symbol>> {
+            let mut conn = self.lock().await;
+            let data: Option<Vec<u8>> = cmd("HGET")
+                .arg(self.kb.key("symbols"))
+                .arg(id as i64)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            data.map(|d| {
+                serde_json::from_slice(&d).map_err(|e| StorageError::Internal(e.to_string()))
+            })
+            .transpose()
+        }
+
+        async fn load_all_symbols(&self) -> Result<Vec<Symbol>> {
+            let mut conn = self.lock().await;
+            let map: HashMap<String, Vec<u8>> = cmd("HGETALL")
+                .arg(self.kb.key("symbols"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            let mut out: Vec<Symbol> = Vec::with_capacity(map.len());
+            for data in map.into_values() {
+                out.push(
+                    serde_json::from_slice(&data)
+                        .map_err(|e| StorageError::Internal(e.to_string()))?,
+                );
+            }
+            out.sort_by_key(|s| s.id);
+            Ok(out)
+        }
+
+        async fn save_next_id(&mut self, next: u64) -> Result<()> {
             let mut conn = self.lock().await;
             cmd("SET")
-                .arg(self.kb.indexed("shard", shard))
-                .arg(&compressed)
+                .arg(self.kb.key("nextid"))
+                .arg(next as i64)
                 .query_async::<()>(&mut *conn)
                 .await
-                .map_err(|e| StorageError::Internal(e.to_string()))?;
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
             Ok(())
         }
 
-        async fn load_shard(&self, shard: usize) -> Result<Option<ShardNodeData>> {
+        async fn load_next_id(&self) -> Result<u64> {
             let mut conn = self.lock().await;
-            let blob: Option<Vec<u8>> = cmd("GET")
-                .arg(self.kb.indexed("shard", shard))
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e| StorageError::Internal(e.to_string()))?;
-
-            match blob {
-                Some(data) => {
-                    let bytes = zstd::decode_all(&data[..])
-                        .map_err(|e| StorageError::Internal(format!("zstd shard: {e}")))?;
-                    let shard_data: ShardNodeData = bincode::deserialize(&bytes)
-                        .map_err(|e| StorageError::Internal(format!("bincode shard: {e}")))?;
-                    Ok(Some(shard_data))
-                }
-                None => Ok(None),
-            }
-        }
-
-        // ==================== Automaton Methods ====================
-
-        async fn add_state(&mut self, label: &str) -> Result<usize> {
-            let mut conn = self.lock().await;
-
-            // Atomic pipeline: label + failure trong cùng MULTI/EXEC
-            // EXEC trả về [len_label, len_failure] — parse từ phần tử đầu
-            let result: redis::Value = redis::pipe()
-                .atomic()
-                .rpush(self.kb.key("label"), label)
-                .rpush(self.kb.key("failure"), 0i64)
+            let next: Option<i64> = cmd("GET")
+                .arg(self.kb.key("nextid"))
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            // Registry chưa có symbol — bắt đầu từ SYMBOL_BASE (giống sqlite init).
+            Ok(next.map(|n| n as u64).unwrap_or(codegraph_core::SYMBOL_BASE))
+        }
 
-            let len: usize = match result {
-                redis::Value::Array(ref items) => match items.first() {
-                    Some(redis::Value::Int(n)) => *n as usize,
-                    _ => {
-                        let llen = cmd("LLEN")
-                            .arg(self.kb.key("label"))
-                            .query_async::<usize>(&mut *conn)
-                            .await;
-                        match llen {
-                            Ok(l) => l,
-                            Err(e) => return Err(StorageError::Internal(e.to_string())),
+        async fn all_chains(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+            let mut conn = self.lock().await;
+            let map: HashMap<i64, Vec<u8>> = cmd("HGETALL")
+                .arg(self.kb.key("chains"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            let mut out: Vec<(u64, Vec<u8>)> = map
+                .into_iter()
+                .map(|(r, b)| (r as u64, b))
+                .collect();
+            out.sort_by_key(|(r, _)| *r);
+            Ok(out)
+        }
+
+        async fn set_call_records(&mut self, func: u64, records: &[u8]) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("HSET")
+                .arg(self.kb.key("callrecords"))
+                .arg(func as i64)
+                .arg(records)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn get_call_records(&self, func: u64) -> Result<Option<Vec<u8>>> {
+            let mut conn = self.lock().await;
+            let records: Option<Vec<u8>> = cmd("HGET")
+                .arg(self.kb.key("callrecords"))
+                .arg(func as i64)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(records)
+        }
+
+        async fn all_call_records(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+            let mut conn = self.lock().await;
+            let map: HashMap<i64, Vec<u8>> = cmd("HGETALL")
+                .arg(self.kb.key("callrecords"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            let mut out: Vec<(u64, Vec<u8>)> = map
+                .into_iter()
+                .map(|(f, b)| (f as u64, b))
+                .collect();
+            out.sort_by_key(|(f, _)| *f);
+            Ok(out)
+        }
+
+        async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("HSET")
+                .arg(self.kb.key("callnames"))
+                .arg(name)
+                .arg(sites)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn load_call_name_index(&self, name: &str) -> Result<Option<Vec<u8>>> {
+            let mut conn = self.lock().await;
+            let sites: Option<Vec<u8>> = cmd("HGET")
+                .arg(self.kb.key("callnames"))
+                .arg(name)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(sites)
+        }
+
+        async fn all_call_name_indexes(&self) -> Result<Vec<(String, Vec<u8>)>> {
+            let mut conn = self.lock().await;
+            let map: HashMap<String, Vec<u8>> = cmd("HGETALL")
+                .arg(self.kb.key("callnames"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            let mut out: Vec<(String, Vec<u8>)> = map.into_iter().collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(out)
+        }
+
+        async fn upsert_file(&mut self, f: &FileInfo) -> Result<()> {
+            let mut conn = self.lock().await;
+            let data = serde_json::to_vec(f).map_err(|e| StorageError::Internal(e.to_string()))?;
+            cmd("HSET")
+                .arg(self.kb.key("files"))
+                .arg(&f.path)
+                .arg(data)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn load_all_files(&self) -> Result<Vec<FileInfo>> {
+            let mut conn = self.lock().await;
+            let map: HashMap<String, Vec<u8>> = cmd("HGETALL")
+                .arg(self.kb.key("files"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            let mut out: Vec<FileInfo> = Vec::with_capacity(map.len());
+            for data in map.into_values() {
+                out.push(
+                    serde_json::from_slice(&data)
+                        .map_err(|e| StorageError::Internal(e.to_string()))?,
+                );
+            }
+            out.sort_by(|a, b| a.path.cmp(&b.path));
+            Ok(out)
+        }
+
+        async fn version(&self) -> Result<u64> {
+            let mut conn = self.lock().await;
+            let v: Option<i64> = cmd("GET")
+                .arg(self.kb.key("version"))
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(v.map(|n| n as u64).unwrap_or(0))
+        }
+
+        async fn set_version(&mut self, v: u64) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("SET")
+                .arg(self.kb.key("version"))
+                .arg(v as i64)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn clear_entities(&mut self) -> Result<()> {
+            let mut conn = self.lock().await;
+            cmd("DEL")
+                .arg(self.kb.key("symbols"))
+                .arg(self.kb.key("nextid"))
+                .arg(self.kb.key("callrecords"))
+                .arg(self.kb.key("callnames"))
+                .arg(self.kb.key("files"))
+                .arg(self.kb.key("version"))
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
+        }
+
+        fn new_tx(&self) -> Box<dyn Tx> {
+            Box::new(RedisTx {
+                conn: self.conn.clone(),
+                kb: self.kb.clone(),
+                nodes: Vec::new(),
+                ops: Vec::new(),
+            })
+        }
+    }
+
+    // ==================== Redis Transaction ====================
+
+    /// Transaction cho `RedisStorage`.
+    ///
+    /// - `new_node` snapshot độ dài branch list lúc tạo tx, id = base + n
+    ///   (giả định single-connection — toàn bộ command đi qua cùng 1 mutex).
+    /// - `commit` build một MULTI/EXEC pipeline: RPUSH toàn bộ node mới trước,
+    ///   rồi áp dụng các op cấu trúc — atomic, không lộ trạng thái trung gian.
+    pub struct RedisTx {
+        conn: Arc<Mutex<MultiplexedConnection>>,
+        kb: KeyBuilder,
+        nodes: Vec<(usize, Vec<u8>, usize)>,
+        ops: Vec<TxOp>,
+    }
+
+    #[async_trait]
+    impl Tx for RedisTx {
+        async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
+            let base = self.node_len_checked().await?;
+            let id = base + self.nodes.len();
+            self.nodes.push((id, prefix, record));
+            Ok(id)
+        }
+
+        async fn update_node(
+            &mut self,
+            id: usize,
+            prefix: Option<Vec<u8>>,
+            record: Option<usize>,
+        ) -> Result<()> {
+            self.ops.push(TxOp::UpdateNode { id, prefix, record });
+            Ok(())
+        }
+
+        async fn add_child(&mut self, parent: usize, child: usize) -> Result<()> {
+            self.ops.push(TxOp::AddChild { parent, child });
+            Ok(())
+        }
+
+        async fn move_child(&mut self, from: usize, to: usize, child: usize) -> Result<()> {
+            self.ops.push(TxOp::MoveChild { from, to, child });
+            Ok(())
+        }
+
+        async fn commit(self: Box<Self>) -> Result<()> {
+            let RedisTx {
+                conn,
+                kb,
+                nodes,
+                ops,
+                ..
+            } = *self;
+
+            let mut conn = conn.lock().await;
+            let mut pipe = redis::pipe();
+            pipe.atomic();
+
+            // 1. RPUSH toàn bộ node mới (sentinel đã có sẵn ở index 0).
+            for (_, prefix, record) in &nodes {
+                pipe.rpush(kb.key("branch"), &prefix[..]);
+                pipe.rpush(kb.key("record"), *record as i64);
+            }
+
+            // 2. Áp dụng ops.
+            for op in ops {
+                match op {
+                    TxOp::AddChild { parent, child } => {
+                        pipe.cmd("SADD")
+                            .arg(kb.indexed("forward", parent))
+                            .arg(child as i64)
+                            .ignore();
+                    }
+                    TxOp::MoveChild { from, to, child } => {
+                        pipe.cmd("SREM")
+                            .arg(kb.indexed("forward", from))
+                            .arg(child as i64)
+                            .ignore();
+                        pipe.cmd("SADD")
+                            .arg(kb.indexed("forward", to))
+                            .arg(child as i64)
+                            .ignore();
+                    }
+                    TxOp::UpdateNode { id, prefix, record } => {
+                        if let Some(p) = prefix {
+                            pipe.lset(kb.key("branch"), id as isize, &p[..]);
+                        }
+                        if let Some(r) = record {
+                            pipe.lset(kb.key("record"), id as isize, r as i64);
                         }
                     }
-                },
-                _ => {
-                    let llen = cmd("LLEN")
-                        .arg(self.kb.key("label"))
-                        .query_async::<usize>(&mut *conn)
-                        .await;
-                    match llen {
-                        Ok(l) => l,
-                        Err(e) => return Err(StorageError::Internal(e.to_string())),
-                    }
                 }
-            };
-
-            Ok(len - 1)
-        }
-
-        async fn set_transition(&mut self, from: usize, label: &str, to: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            cmd("HSET")
-                .arg(self.kb.indexed("trans", from))
-                .arg(label)
-                .arg(to as i64)
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        async fn get_transitions(&self, from: usize) -> Result<Vec<(String, usize)>> {
-            let mut conn = self.lock().await;
-
-            let pairs: Vec<(String, String)> = cmd("HGETALL")
-                .arg(self.kb.indexed("trans", from))
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(pairs
-                .into_iter()
-                .map(|(k, v)| (k, v.parse::<usize>().unwrap_or(0)))
-                .collect())
-        }
-
-        async fn set_failure(&mut self, state: usize, fail: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            cmd("LSET")
-                .arg(self.kb.key("failure"))
-                .arg(state as isize)
-                .arg(fail as i64)
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        async fn get_failure(&self, state: usize) -> Result<usize> {
-            let mut conn = self.lock().await;
-
-            let val: Option<i64> = cmd("LINDEX")
-                .arg(self.kb.key("failure"))
-                .arg(state as isize)
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(val.unwrap_or(0) as usize)
-        }
-
-        async fn set_output(&mut self, state: usize, pattern_idx: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            cmd("HSET")
-                .arg(self.kb.key("output"))
-                .arg(state as i64)
-                .arg(pattern_idx as i64)
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        async fn get_output(&self, state: usize) -> Result<Option<usize>> {
-            let mut conn = self.lock().await;
-
-            let val: Option<i64> = cmd("HGET")
-                .arg(self.kb.key("output"))
-                .arg(state as i64)
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(val.map(|v| v as usize))
-        }
-
-        async fn add_root_input(&mut self, state: usize) -> Result<()> {
-            let mut conn = self.lock().await;
-
-            cmd("RPUSH")
-                .arg(self.kb.key("root_inputs"))
-                .arg(state as i64)
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(())
-        }
-
-        async fn get_root_inputs(&self) -> Result<Vec<usize>> {
-            let mut conn = self.lock().await;
-
-            let vals: Vec<i64> = cmd("LRANGE")
-                .arg(self.kb.key("root_inputs"))
-                .arg(0i64)
-                .arg(-1i64)
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(vals.into_iter().map(|v| v as usize).collect())
-        }
-
-        async fn get_label(&self, state: usize) -> Result<String> {
-            let mut conn = self.lock().await;
-
-            let val: Option<Vec<u8>> = cmd("LINDEX")
-                .arg(self.kb.key("label"))
-                .arg(state as isize)
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            match val {
-                Some(bytes) => {
-                    String::from_utf8(bytes).map_err(|e| StorageError::Internal(e.to_string()))
-                }
-                None => Ok(String::new()),
             }
+
+            pipe.exec_async(&mut *conn)
+                .await
+                .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+            Ok(())
         }
+    }
 
-        async fn num_states(&self) -> Result<usize> {
-            let mut conn = self.lock().await;
-
-            let n: usize = cmd("LLEN")
-                .arg(self.kb.key("label"))
+    impl RedisTx {
+        async fn node_len_checked(&self) -> Result<usize> {
+            let mut conn = self.conn.lock().await;
+            let len: usize = cmd("LLEN")
+                .arg(self.kb.key("branch"))
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-
-            Ok(n)
+            Ok(len)
         }
     }
 
@@ -1244,181 +1742,295 @@ pub mod redis {
         use std::sync::atomic::{AtomicU16, Ordering};
 
         use super::*;
+        use crate::radix::EMPTY;
         use crate::storage::Storage;
 
         static COUNTER: AtomicU16 = AtomicU16::new(0);
 
-        /// Tạo RedisStorage mới với prefix unique (cần tokio runtime).
-        /// Dùng PID + counter để tránh collision với stale data từ test run cũ.
         async fn new_test_storage() -> RedisStorage {
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let pid = std::process::id();
             let client = redis::Client::open("redis://127.0.0.1:6379/15")
                 .expect("redis connection failed — is redis-server running?");
-            RedisStorage::new(client, &format!("test:merged:{}:{n}", pid))
+            RedisStorage::new(client, &format!("test:radix:{}:{n}", pid))
                 .await
                 .expect("init failed")
         }
-
-        // ── Radix-style tests ──
 
         #[tokio::test]
         async fn test_new_node_and_get_node() {
             let mut s = new_test_storage().await;
             let id = s.new_node(b"hello".to_vec(), 42).await.unwrap();
-            assert_ne!(id, 0, "id should not be the sentinel");
-
+            assert_ne!(id, EMPTY);
             let (prefix, record) = s.get_node(id).await.unwrap();
             assert_eq!(prefix, b"hello");
             assert_eq!(record, 42);
         }
 
         #[tokio::test]
-        async fn test_update_node() {
+        async fn test_meta_roundtrip() {
             let mut s = new_test_storage().await;
-            let id = s.new_node(b"init".to_vec(), 1).await.unwrap();
+            assert_eq!(s.get_meta(42).await.unwrap(), None);
+            assert_eq!(s.get_key_len(42).await.unwrap(), None);
+            s.set_meta(42, b"call-site-info").await.unwrap();
+            s.set_key_len(42, 5).await.unwrap();
+            assert_eq!(
+                s.get_meta(42).await.unwrap().as_deref(),
+                Some(b"call-site-info".as_slice())
+            );
+            assert_eq!(s.get_key_len(42).await.unwrap(), Some(5));
+            s.set_meta(42, b"updated").await.unwrap();
+            assert_eq!(
+                s.get_meta(42).await.unwrap().as_deref(),
+                Some(b"updated".as_slice())
+            );
+        }
 
-            s.update_node(id, Some(b"updated".to_vec()), Some(99))
+        #[tokio::test]
+        async fn test_shortcuts_roundtrip() {
+            let mut s = new_test_storage().await;
+            assert!(s.get_shortcut_nodes(1, b"l").await.unwrap().is_empty());
+            s.add_shortcut_node(1, b"l", 10).await.unwrap();
+            s.add_shortcut_node(1, b"l", 20).await.unwrap();
+            s.add_shortcut_node(1, b"o", 10).await.unwrap();
+            let nodes = s.get_shortcut_nodes(1, b"l").await.unwrap();
+            assert!(nodes.contains(&10) && nodes.contains(&20));
+            assert_eq!(nodes.len(), 2);
+            s.clear_shortcuts().await.unwrap();
+            assert!(s.get_shortcut_nodes(1, b"l").await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_tx_split_commit() {
+            let mut s = new_test_storage().await;
+            let parent = s.new_node(b"hello".to_vec(), 1).await.unwrap();
+
+            let mut tx = s.new_tx();
+            let new_id = tx.new_node(b"p".to_vec(), 2).await.unwrap();
+            let leg_id = tx.new_node(b"lo".to_vec(), 1).await.unwrap();
+            tx.move_child(parent, leg_id, 0).await.unwrap();
+            tx.add_child(parent, leg_id).await.unwrap();
+            tx.add_child(parent, new_id).await.unwrap();
+            tx.update_node(parent, Some(b"hel".to_vec()), Some(0))
                 .await
                 .unwrap();
+            tx.commit().await.unwrap();
 
-            let (prefix, record) = s.get_node(id).await.unwrap();
-            assert_eq!(prefix, b"updated");
-            assert_eq!(record, 99);
-        }
-
-        #[tokio::test]
-        async fn test_add_child_and_get_children() {
-            let mut s = new_test_storage().await;
-            let parent = s.new_node(b"parent".to_vec(), 0).await.unwrap();
-            let child1 = s.new_node(b"child1".to_vec(), 1).await.unwrap();
-            let child2 = s.new_node(b"child2".to_vec(), 2).await.unwrap();
-
-            s.add_child(parent, child1).await.unwrap();
-            s.add_child(parent, child2).await.unwrap();
-
+            let (prefix, _) = s.get_node(parent).await.unwrap();
+            assert_eq!(prefix, b"hel");
             let children = s.get_children(parent).await.unwrap();
-            // Set → không đảm bảo thứ tự, chỉ kiểm tra nội dung
-            assert_eq!(children.len(), 2);
-            assert!(children.contains(&child1));
-            assert!(children.contains(&child2));
+            assert!(children.contains(&leg_id));
+            assert!(children.contains(&new_id));
         }
+    }
+}
 
-        #[tokio::test]
-        async fn test_remove_child() {
-            let mut s = new_test_storage().await;
-            let parent = s.new_node(b"parent".to_vec(), 0).await.unwrap();
-            let child1 = s.new_node(b"child1".to_vec(), 1).await.unwrap();
-            let child2 = s.new_node(b"child2".to_vec(), 2).await.unwrap();
-            let child3 = s.new_node(b"child3".to_vec(), 3).await.unwrap();
+// ==================== Tests (InMemory) ====================
 
-            s.add_child(parent, child1).await.unwrap();
-            s.add_child(parent, child2).await.unwrap();
-            s.add_child(parent, child3).await.unwrap();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            let children = s.get_children(parent).await.unwrap();
-            assert_eq!(children.len(), 3);
+    #[tokio::test]
+    async fn test_new_node_and_get_node() {
+        let mut s = InMemoryStorage::default();
+        let id = s.new_node(b"hello".to_vec(), 42).await.unwrap();
+        assert_ne!(id, EMPTY);
+        let (prefix, record) = s.get_node(id).await.unwrap();
+        assert_eq!(prefix, b"hello");
+        assert_eq!(record, 42);
+    }
 
-            // Xoá child2
-            s.remove_child(parent, child2).await.unwrap();
-            let children = s.get_children(parent).await.unwrap();
-            assert_eq!(children.len(), 2);
-            assert!(children.contains(&child1));
-            assert!(children.contains(&child3));
-            assert!(!children.contains(&child2));
+    #[tokio::test]
+    async fn test_update_node() {
+        let mut s = InMemoryStorage::default();
+        let id = s.new_node(b"init".to_vec(), 1).await.unwrap();
+        s.update_node(id, Some(b"updated".to_vec()), Some(99))
+            .await
+            .unwrap();
+        let (prefix, record) = s.get_node(id).await.unwrap();
+        assert_eq!(prefix, b"updated");
+        assert_eq!(record, 99);
+    }
 
-            // Xoá không tồn tại → không lỗi
-            s.remove_child(parent, 999).await.unwrap();
-            let children = s.get_children(parent).await.unwrap();
-            assert_eq!(children.len(), 2);
-        }
+    #[tokio::test]
+    async fn test_children_and_roots() {
+        let mut s = InMemoryStorage::default();
+        let parent = s.new_node(b"p".to_vec(), 0).await.unwrap();
+        let c1 = s.new_node(b"c1".to_vec(), 1).await.unwrap();
+        let c2 = s.new_node(b"c2".to_vec(), 2).await.unwrap();
+        // Mutate qua Tx — production chỉ đi qua Tx, không có Storage::add_child.
+        let mut tx = s.new_tx();
+        tx.add_child(parent, c1).await.unwrap();
+        tx.add_child(parent, c2).await.unwrap();
+        tx.commit().await.unwrap();
+        let children = s.get_children(parent).await.unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.contains(&c1));
+        assert!(children.contains(&c2));
 
-        #[tokio::test]
-        async fn test_root() {
-            let mut s = new_test_storage().await;
+        assert_eq!(s.get_root(3).await.unwrap(), EMPTY);
+        s.set_root(3, parent).await.unwrap();
+        assert_eq!(s.get_root(3).await.unwrap(), parent);
+    }
 
-            assert_eq!(s.get_root(3).await.unwrap(), 0, "fresh shard returns 0");
+    #[tokio::test]
+    async fn test_meta_roundtrip() {
+        let mut s = InMemoryStorage::default();
+        // Chưa có gì → None.
+        assert_eq!(s.get_meta(7).await.unwrap(), None);
+        assert_eq!(s.get_key_len(7).await.unwrap(), None);
+        s.set_meta(7, b"call-site-info".as_slice()).await.unwrap();
+        s.set_key_len(7, 5).await.unwrap();
+        assert_eq!(
+            s.get_meta(7).await.unwrap().as_deref(),
+            Some(b"call-site-info".as_slice())
+        );
+        assert_eq!(s.get_key_len(7).await.unwrap(), Some(5));
+        // Ghi đè meta.
+        s.set_meta(7, b"updated").await.unwrap();
+        s.set_key_len(7, 6).await.unwrap();
+        assert_eq!(
+            s.get_meta(7).await.unwrap().as_deref(),
+            Some(b"updated".as_slice())
+        );
+        assert_eq!(s.get_key_len(7).await.unwrap(), Some(6));
+        // Record khác không ảnh hưởng.
+        assert_eq!(s.get_meta(8).await.unwrap(), None);
+        assert_eq!(s.get_key_len(8).await.unwrap(), None);
+    }
 
-            s.set_root(3, 42).await.unwrap();
-            assert_eq!(s.get_root(3).await.unwrap(), 42);
+    #[tokio::test]
+    async fn test_shortcuts_roundtrip() {
+        let mut s = InMemoryStorage::default();
+        // Chưa có gì → empty.
+        assert!(s.get_shortcut_nodes(1, b"l").await.unwrap().is_empty());
+        s.add_shortcut_node(1, b"l", 10).await.unwrap();
+        s.add_shortcut_node(1, b"l", 20).await.unwrap();
+        s.add_shortcut_node(1, b"o", 10).await.unwrap();
+        s.add_shortcut_node(2, b"l", 30).await.unwrap(); // shard khác
+        let nodes = s.get_shortcut_nodes(1, b"l").await.unwrap();
+        assert!(nodes.contains(&10) && nodes.contains(&20));
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(s.get_shortcut_nodes(2, b"l").await.unwrap(), vec![30]);
 
-            s.set_root(3, 99).await.unwrap();
-            assert_eq!(s.get_root(3).await.unwrap(), 99);
-        }
+        // Clear → rỗng hết.
+        s.clear_shortcuts().await.unwrap();
+        assert!(s.get_shortcut_nodes(1, b"l").await.unwrap().is_empty());
+        assert!(s.get_shortcut_nodes(2, b"l").await.unwrap().is_empty());
+    }
 
-        #[tokio::test]
-        async fn test_consecutive_ids() {
-            let mut s = new_test_storage().await;
-            let a = s.new_node(b"a".to_vec(), 10).await.unwrap();
-            let b = s.new_node(b"b".to_vec(), 20).await.unwrap();
-            let c = s.new_node(b"c".to_vec(), 30).await.unwrap();
+    #[tokio::test]
+    async fn test_tx_commit_applies_atomically() {
+        let mut s = InMemoryStorage::default();
+        let parent = s.new_node(b"hello".to_vec(), 1).await.unwrap();
 
-            assert_eq!(a, 1);
-            assert_eq!(b, 2);
-            assert_eq!(c, 3);
-        }
+        let mut tx = s.new_tx();
+        let new_id = tx.new_node(b"p".to_vec(), 2).await.unwrap();
+        let leg_id = tx.new_node(b"lo".to_vec(), 1).await.unwrap();
+        tx.move_child(parent, leg_id, 0).await.unwrap(); // no-op: 0 chưa phải child
+        tx.add_child(parent, leg_id).await.unwrap();
+        tx.add_child(parent, new_id).await.unwrap();
+        tx.update_node(parent, Some(b"hel".to_vec()), Some(0))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
 
-        // ── Automaton-style tests ──
+        let (prefix, record) = s.get_node(parent).await.unwrap();
+        assert_eq!(prefix, b"hel");
+        assert_eq!(record, 0);
+        let children = s.get_children(parent).await.unwrap();
+        assert!(children.contains(&leg_id));
+        assert!(children.contains(&new_id));
+        assert_eq!(s.get_node(new_id).await.unwrap().1, 2);
+        assert_eq!(s.get_node(leg_id).await.unwrap().1, 1);
+    }
 
-        #[tokio::test]
-        async fn test_add_state() {
-            let mut s = new_test_storage().await;
-            let id = s.add_state("a").await.unwrap();
-            assert_eq!(id, 1, "first real state gets ID 1");
-            assert_eq!(s.num_states().await.unwrap(), 2);
-        }
+    #[tokio::test]
+    async fn test_tx_nodes_invisible_before_commit() {
+        let s = InMemoryStorage::default();
+        let mut tx = s.new_tx();
+        let id = tx.new_node(b"pending".to_vec(), 9).await.unwrap();
+        // Trước commit, node chưa materialize → get_node lỗi BranchOutOfRange.
+        assert!(s.get_node(id).await.is_err());
+        tx.commit().await.unwrap();
+        assert_eq!(s.get_node(id).await.unwrap().1, 9);
+    }
 
-        #[tokio::test]
-        async fn test_label() {
-            let mut s = new_test_storage().await;
-            let id = s.add_state("hello").await.unwrap();
-            assert_eq!(s.get_label(id).await.unwrap(), "hello");
-            assert_eq!(s.get_label(0).await.unwrap(), "");
-        }
+    #[tokio::test]
+    async fn test_tx_move_child_migrates() {
+        let mut s = InMemoryStorage::default();
+        let parent = s.new_node(b"aaaaaa".to_vec(), 0).await.unwrap();
+        let child = s.new_node(b"0".to_vec(), 1).await.unwrap();
+        let mut seed = s.new_tx();
+        seed.add_child(parent, child).await.unwrap();
+        seed.commit().await.unwrap();
 
-        #[tokio::test]
-        async fn test_transitions() {
-            let mut s = new_test_storage().await;
-            let s1 = s.add_state("a").await.unwrap();
-            let s2 = s.add_state("b").await.unwrap();
-            s.set_transition(0, "x", s1).await.unwrap();
-            s.set_transition(s1, "y", s2).await.unwrap();
+        let mut tx = s.new_tx();
+        let leg = tx.new_node(b"a".to_vec(), 0).await.unwrap();
+        tx.move_child(parent, leg, child).await.unwrap();
+        tx.add_child(parent, leg).await.unwrap();
+        tx.commit().await.unwrap();
 
-            let t0 = s.get_transitions(0).await.unwrap();
-            assert!(t0.contains(&("x".into(), s1)));
+        assert!(!s.get_children(parent).await.unwrap().contains(&child));
+        assert!(s.get_children(leg).await.unwrap().contains(&child));
+    }
 
-            let t1 = s.get_transitions(s1).await.unwrap();
-            assert!(t1.contains(&("y".into(), s2)));
-        }
+    #[tokio::test]
+    async fn test_edge_data_roundtrip() {
+        let mut s = InMemoryStorage::default();
+        // Chưa có edge → None.
+        assert_eq!(s.get_edge_data(7).await.unwrap(), None);
+        s.set_edge_data(7, b"call-site").await.unwrap();
+        assert_eq!(
+            s.get_edge_data(7).await.unwrap().as_deref(),
+            Some(b"call-site".as_slice())
+        );
+        // Ghi đè dữ liệu edge.
+        s.set_edge_data(7, b"updated").await.unwrap();
+        assert_eq!(
+            s.get_edge_data(7).await.unwrap().as_deref(),
+            Some(b"updated".as_slice())
+        );
+        // Edge khác không ảnh hưởng.
+        assert_eq!(s.get_edge_data(8).await.unwrap(), None);
 
-        #[tokio::test]
-        async fn test_failure() {
-            let mut s = new_test_storage().await;
-            let id = s.add_state("test").await.unwrap();
-            assert_eq!(s.get_failure(id).await.unwrap(), 0);
-            s.set_failure(id, 42).await.unwrap();
-            assert_eq!(s.get_failure(id).await.unwrap(), 42);
-        }
+        // Clear → sạch toàn bộ.
+        s.set_edge_data(9, b"x").await.unwrap();
+        s.clear_edges().await.unwrap();
+        assert_eq!(s.get_edge_data(7).await.unwrap(), None);
+        assert_eq!(s.get_edge_data(9).await.unwrap(), None);
+    }
 
-        #[tokio::test]
-        async fn test_output() {
-            let mut s = new_test_storage().await;
-            let id = s.add_state("term").await.unwrap();
-            assert_eq!(s.get_output(id).await.unwrap(), None);
-            s.set_output(id, 7).await.unwrap();
-            assert_eq!(s.get_output(id).await.unwrap(), Some(7));
-        }
+    #[tokio::test]
+    async fn test_node_meta_roundtrip() {
+        let mut s = InMemoryStorage::default();
+        assert_eq!(s.get_node_meta(3).await.unwrap(), None);
+        s.set_node_meta(3, b"node-json").await.unwrap();
+        assert_eq!(
+            s.get_node_meta(3).await.unwrap().as_deref(),
+            Some(b"node-json".as_slice())
+        );
+        s.set_node_meta(3, b"node-json-2").await.unwrap();
+        assert_eq!(
+            s.get_node_meta(3).await.unwrap().as_deref(),
+            Some(b"node-json-2".as_slice())
+        );
+        assert_eq!(s.get_node_meta(4).await.unwrap(), None);
+        s.clear_node_meta().await.unwrap();
+        assert_eq!(s.get_node_meta(3).await.unwrap(), None);
+    }
 
-        #[tokio::test]
-        async fn test_root_inputs() {
-            let mut s = new_test_storage().await;
-            let s1 = s.add_state("s1").await.unwrap();
-            let s2 = s.add_state("s2").await.unwrap();
-            s.add_root_input(s1).await.unwrap();
-            s.add_root_input(s2).await.unwrap();
-
-            let inputs = s.get_root_inputs().await.unwrap();
-            assert_eq!(inputs, vec![s1, s2]);
-        }
+    #[tokio::test]
+    async fn test_chains_roundtrip() {
+        let mut s = InMemoryStorage::default();
+        assert_eq!(s.get_chain(9).await.unwrap(), None);
+        s.set_chain(9, &[1, 2, 3]).await.unwrap();
+        assert_eq!(s.get_chain(9).await.unwrap(), Some(vec![1, 2, 3]));
+        s.set_chain(9, &[4]).await.unwrap();
+        assert_eq!(s.get_chain(9).await.unwrap(), Some(vec![4]));
+        assert_eq!(s.get_chain(10).await.unwrap(), None);
+        s.clear_chains().await.unwrap();
+        assert_eq!(s.get_chain(9).await.unwrap(), None);
     }
 }

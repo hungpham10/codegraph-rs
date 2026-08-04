@@ -2,14 +2,14 @@
 
 mod protocol;
 mod tools;
+mod usage;
 
 pub use protocol::{ErrorObj, JsonRpcMessage, Response};
 pub use tools::tool_definitions;
 
-use codegraph_db::Db;
-use codegraph_graph::Traversal;
+use codegraph_graph::SharedGraphIndex;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub const SERVER_INSTRUCTIONS: &str = include_str!("server-instructions.md");
@@ -18,12 +18,18 @@ pub const SERVER_NAME: &str = "codegraph";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct McpServer {
-    db: Arc<Db>,
+    shared_index: Arc<SharedGraphIndex>,
+    /// Telemetry cho `codegraph_query_usage_report`.
+    usage: Arc<Mutex<usage::UsageStats>>,
 }
 
 impl McpServer {
-    pub fn new(db: Arc<Db>) -> Self {
-        Self { db }
+    pub async fn new(index_path: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let shared_index = Arc::new(SharedGraphIndex::open(index_path).await?);
+        Ok(Self {
+            shared_index,
+            usage: Arc::new(Mutex::new(usage::UsageStats::default())),
+        })
     }
 
     pub async fn run_stdio(self) -> anyhow::Result<()> {
@@ -91,7 +97,43 @@ impl McpServer {
     async fn handle_tool_call(&self, params: Value) -> anyhow::Result<Value> {
         let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-        let text = tools::dispatch(&self.db, name, args).await?;
+
+        // Telemetry tool — đọc/ghi trực tiếp từ usage stats, không qua GraphApi.
+        if name == "codegraph_query_usage_report" {
+            let reset = args.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let mut u = self.usage.lock().unwrap();
+            let report = u.report(limit);
+            if reset {
+                u.reset();
+            }
+            let text = serde_json::to_string_pretty(&report)?;
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }));
+        }
+
+        let api = codegraph_api::GraphApi::new_with_index(self.shared_index.clone());
+        let text = match tools::dispatch_with_api(&api, name, args).await {
+            Ok(t) => t,
+            Err(e) => {
+                self.usage
+                    .lock()
+                    .unwrap()
+                    .record(name, e.to_string().len() as u64, 0, true);
+                return Err(anyhow::Error::from(e));
+            }
+        };
+        // Ước lượng source bytes mà answer "thay thế" (file refs trong answer).
+        let source_bytes = match serde_json::from_str::<Value>(&text) {
+            Ok(v) => usage::estimate_source_bytes(&api, &v).await,
+            Err(_) => 0,
+        };
+        self.usage
+            .lock()
+            .unwrap()
+            .record(name, text.len() as u64, source_bytes, false);
         Ok(json!({
             "content": [{ "type": "text", "text": text }],
             "isError": false,
@@ -108,9 +150,4 @@ async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
     w.write_all(b"\n").await?;
     w.flush().await?;
     Ok(())
-}
-
-// Re-export for binary use without exposing Traversal lifetime annoyances.
-pub fn traversal_for(db: &Db) -> Traversal<'_> {
-    Traversal::new(db)
 }
