@@ -60,7 +60,7 @@ fn run(root: Utf8PathBuf, db_path: Utf8PathBuf) -> Result<()> {
         let db_str = db_path.as_str().to_string();
         let result = handle.block_on(async {
             let mut idx = GraphIndex::open(&db_str).await?;
-            orch.index_all(&root, &mut idx).await
+            orch.index_all(&root, &mut idx, None).await
         });
         match result {
             Ok(s) if s.files > 0 => tracing::info!(

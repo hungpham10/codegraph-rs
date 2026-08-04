@@ -288,7 +288,7 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
         }
         "codegraph_class_methods" => {
             let target = resolve_target(
-                &api,
+                api,
                 &args,
                 "id",
                 "class_name",
@@ -337,7 +337,7 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
         }
         "codegraph_class" => {
             let target = resolve_target(
-                &api,
+                api,
                 &args,
                 "id",
                 "class_name",
@@ -385,7 +385,7 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
             .map_err(|e| Error::Invalid(e.to_string()))
         }
         "codegraph_function_scope" => {
-            let target = resolve_target(&api, &args, "id", "func_name", &[]).await?;
+            let target = resolve_target(api, &args, "id", "func_name", &[]).await?;
             match target {
                 Target::Ambiguous(v) => Ok(json_str(v)),
                 Target::Symbol(sym) => match api.function_scope(sym.id).await {

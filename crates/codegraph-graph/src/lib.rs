@@ -1141,12 +1141,12 @@ impl GraphIndex {
         let fields: Vec<MemberInfo> = members
             .iter()
             .filter(|s| matches!(s.kind, SymbolKind::Field | SymbolKind::Variable | SymbolKind::Constant))
-            .map(|s| MemberInfo::from_symbol(s))
+            .map(MemberInfo::from_symbol)
             .collect();
         let methods: Vec<MemberInfo> = members
             .iter()
             .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
-            .map(|s| MemberInfo::from_symbol(s))
+            .map(MemberInfo::from_symbol)
             .collect();
         Some(ClassInfo {
             class,
@@ -1236,7 +1236,7 @@ impl GraphIndex {
         // (`svc.validate` → `type.validate`) đẩy cùng site vào nhiều key — mỗi
         // call site chỉ tính một lần, dùng tên thô để rút module prefix.
         let mut seen: HashSet<(u64, u32, String)> = HashSet::new();
-        for (_, sites) in &self.call_names {
+        for sites in self.call_names.values() {
             for site in sites {
                 if !seen.insert((site.caller_id, site.line, site.call_name.clone())) {
                     continue;

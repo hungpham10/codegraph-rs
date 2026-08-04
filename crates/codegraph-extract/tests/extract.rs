@@ -14,7 +14,7 @@ fn fixture_root() -> Utf8PathBuf {
 async fn index_fixtures() -> (GraphIndex, codegraph_extract::ExtractStats) {
     let mut index = GraphIndex::in_memory();
     let orch = Orchestrator::with_registry();
-    let stats = orch.index_all(&fixture_root(), &mut index).await.unwrap();
+    let stats = orch.index_all(&fixture_root(), &mut index, None).await.unwrap();
     (index, stats)
 }
 

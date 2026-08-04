@@ -8,6 +8,7 @@ use crate::{walker, LangParser};
 use camino::Utf8Path;
 use codegraph_core::Result;
 use codegraph_graph::{GraphIndex, ParseResult};
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -34,11 +35,47 @@ impl Orchestrator {
     }
 
     /// Walk `root` → parse song song → ingest (full re-index).
-    pub async fn index_all(&self, root: &Utf8Path, index: &mut GraphIndex) -> Result<ExtractStats> {
+    pub async fn index_all(
+        &self,
+        root: &Utf8Path,
+        index: &mut GraphIndex,
+        progress: Option<Arc<ProgressBar>>,
+    ) -> Result<ExtractStats> {
         let config = ExtractConfig::load(root);
         let files = walker::walk(root, &self.parsers, &config);
 
-        let results: Vec<_> = files.par_iter().map(parse_one).collect();
+        // Create progress bar if requested.
+        let pb = if let Some(ref bar) = progress {
+            bar.clone()
+        } else {
+            // Dummy hidden bar when no progress requested – we just skip.
+            // Use a zero-length bar to avoid allocations.
+            Arc::new(ProgressBar::hidden())
+        };
+        // Set total length for real bar.
+        if progress.is_some() {
+            pb.set_length(files.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%)")
+                    .expect("valid progress bar template")
+                    .progress_chars("#>-"),
+            );
+        }
+
+        // Use a clone of the progress bar for thread-safe updates.
+        let progress_opt = progress.clone();
+        let results: Vec<_> = files
+            .par_iter()
+            .map(|fm| {
+                let res = parse_one(fm);
+                if let Some(ref bar) = progress_opt {
+                    bar.inc(1);
+                    bar.set_message(fm.path.to_string());
+                }
+                res
+            })
+            .collect();
         let mut parsed = Vec::new();
         let mut skipped = 0u64;
         for r in results {
@@ -50,6 +87,10 @@ impl Orchestrator {
         }
 
         index.ingest(&parsed).await?;
+        // Finish the progress bar on success.
+        if let Some(bar) = progress {
+            bar.finish_with_message("Indexing complete");
+        }
         Ok(stats_of(&parsed, skipped))
     }
 }

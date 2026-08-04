@@ -36,13 +36,18 @@ enum Cmd {
     /// Initialize .codegraph/ in the current directory and index immediately.
     /// Pass --no-index to skip indexing.
     Init {
-        #[arg(long)]
+        #[arg(long, default_value_t = false, help = "Disable indexing")]
         no_index: bool,
+        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        progress: bool,
     },
     /// Remove the .codegraph/ directory.
     Uninit,
     /// Full re-index.
-    Index,
+    Index {
+        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        progress: bool,
+    },
     /// Show index health.
     Status,
     /// Search symbols (substring, case-insensitive).
@@ -114,9 +119,9 @@ fn main() -> Result<()> {
         }
     };
     match cmd {
-        Cmd::Init { no_index } => cmd_init(&root, !no_index),
+        Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress),
         Cmd::Uninit => cmd_uninit(&root),
-        Cmd::Index => cmd_index(&root),
+        Cmd::Index { progress } => cmd_index(&root, progress),
         Cmd::Status => cmd_status(&root),
         Cmd::Query { query, limit } => cmd_query(&root, &query, limit),
         Cmd::Files { prefix } => cmd_files(&root, prefix.as_deref()),
@@ -201,7 +206,7 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
         style("codegraph status").green()
     );
     eprintln!(
-        "         • {}     Search for symbols in the codebase",
+        "         • {}    Search for symbols in the codebase",
         style("codegraph query <text>").green()
     );
     eprintln!(
@@ -253,7 +258,7 @@ fn ensure_initialized(root: &Utf8Path) -> Result<()> {
 }
 
 /// Full re-index: mở sqlite → `Orchestrator::index_all` (ingest = full re-index).
-fn block_on_index(root: &Utf8Path, db_path: &Utf8Path) -> Result<ExtractStats> {
+fn block_on_index(root: &Utf8Path, db_path: &Utf8Path, progress: bool) -> Result<ExtractStats> {
     let root = root.to_path_buf();
     let db_str = db_path.as_str().to_string();
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -261,15 +266,28 @@ fn block_on_index(root: &Utf8Path, db_path: &Utf8Path) -> Result<ExtractStats> {
         .build()?;
     rt.block_on(async {
         let mut idx = GraphIndex::open(&db_str).await?;
+        // Create progress bar if requested.
+        let progress_bar = if progress {
+            let bar = indicatif::ProgressBar::new(0);
+            bar.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%)")
+                    .expect("valid progress bar template")
+                    .progress_chars("#>-"),
+            );
+            Some(std::sync::Arc::new(bar))
+        } else {
+            None
+        };
         Ok::<_, anyhow::Error>(
             Orchestrator::with_registry()
-                .index_all(&root, &mut idx)
+                .index_all(&root, &mut idx, progress_bar)
                 .await?,
         )
     })
 }
 
-fn cmd_init(root: &Utf8Path, do_index: bool) -> Result<()> {
+fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
     let dir = root.join(CODEGRAPH_DIR);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join(".gitignore"), "*\n")?;
@@ -281,7 +299,7 @@ fn cmd_init(root: &Utf8Path, do_index: bool) -> Result<()> {
     eprintln!("initialized {}", dir);
 
     if do_index {
-        let stats = block_on_index(root, &db_path(root))?;
+        let stats = block_on_index(root, &db_path(root), show_progress)?;
         eprintln!(
             "indexed {} files, {} symbols, {} chains, {} edges",
             stats.files, stats.symbols, stats.chains, stats.calls
@@ -392,9 +410,9 @@ fn cmd_uninit(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_index(root: &Utf8Path) -> Result<()> {
+fn cmd_index(root: &Utf8Path, progress: bool) -> Result<()> {
     ensure_initialized(root)?;
-    let stats = block_on_index(root, &db_path(root))?;
+    let stats = block_on_index(root, &db_path(root), progress)?;
     eprintln!(
         "indexed {} files, {} symbols, {} chains, {} calls (skipped {})",
         stats.files, stats.symbols, stats.chains, stats.calls, stats.skipped
@@ -523,7 +541,6 @@ fn cmd_visualize(
     use codegraph_viz::{BootConfig, VizConfig};
 
     ensure_initialized(root).context("init the index before visualize")?;
-    // Index sống trong chính db.sqlite — không cần sidecar (bỏ cũ {db}.idx).
     let db_path = db_path(root);
     let config = VizConfig {
         port,
