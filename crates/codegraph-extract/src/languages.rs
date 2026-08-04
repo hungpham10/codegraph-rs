@@ -1,6 +1,7 @@
-//! Per-language extractor modules.
+//! Per-language parser modules.
 
 pub mod common;
+pub mod effects;
 
 #[cfg(feature = "lang-c")]
 pub mod c;

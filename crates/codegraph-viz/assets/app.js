@@ -4,24 +4,20 @@ const KIND_COLORS = {
   function: '#5eead4',
   method: '#2dd4bf',
   class: '#818cf8',
-  struct: '#a78bfa',
   interface: '#c084fc',
-  trait: '#e879f9',
+  enum: '#fb923c',
   module: '#f472b6',
+  file: '#64748b',
   variable: '#94a3b8',
   constant: '#fbbf24',
-  enum: '#fb923c',
-  import: '#64748b',
-  component: '#38bdf8',
+  field: '#38bdf8',
+  parameter: '#22d3ee',
+  config: '#a3e635',
   default: '#64748b',
 };
 
 const EDGE_COLORS = {
   calls: '#5eead4',
-  imports: '#818cf8',
-  extends: '#c084fc',
-  implements: '#a78bfa',
-  references: '#94a3b8',
   default: '#3d465c',
 };
 
@@ -412,7 +408,7 @@ function renderDetail() {
   const n = graphData().nodes.find((x) => x.id === id)?.raw;
   if (!n) {
     content.innerHTML = '<p class="muted empty-hint">Loading…</p>';
-    api(`/api/node/${id}`).then(showDetail);
+    api(`/api/symbol/${id}`).then(showDetail);
     return;
   }
   showDetail(n);
@@ -424,11 +420,24 @@ function showDetail(n) {
   content.innerHTML = `
     ${kindTag(n.kind)}
     <div class="node-title">${escapeHtml(n.name)}</div>
-    ${n.qualified_name ? `<p class="muted">${escapeHtml(n.qualified_name)}</p>` : ''}
-    <code>${escapeHtml(n.file)}:${n.start_line}</code>
+    <code>${escapeHtml(n.file)}:${n.line}</code>
     ${n.signature ? `<code>${escapeHtml(n.signature)}</code>` : ''}
-    ${n.docstring ? `<p style="margin-top:.5rem">${escapeHtml(n.docstring)}</p>` : ''}
+    ${n.doc ? `<p style="margin-top:.5rem">${escapeHtml(n.doc)}</p>` : ''}
+    <div id="flow-chain" style="margin-top:.5rem"></div>
   `;
+  // Call chain (flow) — marker + callee names, hiển thị tối giản.
+  api(`/api/flow/${n.id}`)
+    .then((f) => {
+      const el = document.getElementById('flow-chain');
+      if (!el) return;
+      const desc = f.chain_desc || [];
+      if (!desc.length) return;
+      el.innerHTML =
+        '<div class="flow-title">Flow</div><code class="flow-line">' +
+        desc.map(escapeHtml).join(' → ') +
+        '</code>';
+    })
+    .catch(() => {});
 }
 
 function selectNode(id) {
@@ -493,7 +502,7 @@ async function loadStatus() {
   try {
     const s = await api('/api/status');
     document.getElementById('status-bar').textContent =
-      `${s.files.toLocaleString()} files · ${s.nodes.toLocaleString()} nodes · ${s.edges.toLocaleString()} edges · schema v${s.schema_version}`;
+      `${s.files.toLocaleString()} files · ${s.symbols.toLocaleString()} symbols · ${s.chains.toLocaleString()} chains · ${s.edges.toLocaleString()} edges`;
   } catch (_) {}
 }
 

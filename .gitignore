@@ -5,3 +5,56 @@ Cargo.lock.bak
 .DS_Store
 .idea/
 bun.lock
+
+# Compiled and build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.out
+
+# Dependencies
+target/
+**/target/
+
+# Rust-specific
+Cargo.lock
+**/Cargo.lock
+*.rs.bk
+*.rlib
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+```
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-*/
+venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/

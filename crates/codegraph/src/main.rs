@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
-use codegraph_db::Db;
-use codegraph_extract::Orchestrator;
+use codegraph_extract::{ExtractStats, Orchestrator};
+use codegraph_graph::GraphIndex;
 use codegraph_mcp::McpServer;
 use std::sync::Arc;
 
@@ -36,18 +36,21 @@ enum Cmd {
     /// Initialize .codegraph/ in the current directory and index immediately.
     /// Pass --no-index to skip indexing.
     Init {
-        #[arg(long)]
+        #[arg(long, default_value_t = false, help = "Disable indexing")]
         no_index: bool,
+        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        progress: bool,
     },
     /// Remove the .codegraph/ directory.
     Uninit,
     /// Full re-index.
-    Index,
-    /// Incremental sync of changed files.
-    Sync,
+    Index {
+        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        progress: bool,
+    },
     /// Show index health.
     Status,
-    /// Search nodes (FTS).
+    /// Search symbols (substring, case-insensitive).
     Query {
         query: String,
         #[arg(long, default_value_t = 20)]
@@ -116,10 +119,9 @@ fn main() -> Result<()> {
         }
     };
     match cmd {
-        Cmd::Init { no_index } => cmd_init(&root, !no_index),
+        Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress),
         Cmd::Uninit => cmd_uninit(&root),
-        Cmd::Index => cmd_index(&root),
-        Cmd::Sync => cmd_sync(&root),
+        Cmd::Index { progress } => cmd_index(&root, progress),
         Cmd::Status => cmd_status(&root),
         Cmd::Query { query, limit } => cmd_query(&root, &query, limit),
         Cmd::Files { prefix } => cmd_files(&root, prefix.as_deref()),
@@ -172,8 +174,14 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
     }
 
     use console::style;
-    let db = Db::open(&db_path(root))?;
-    let s = db.stats()?;
+    let db_str = db_path(root).as_str().to_string();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let s = rt.block_on(async {
+        let idx = GraphIndex::open(&db_str).await?;
+        Ok::<_, anyhow::Error>(idx.stats())
+    })?;
     eprintln!();
     eprintln!(
         "  {} {}",
@@ -188,12 +196,9 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
     eprintln!();
     eprintln!("     📊  {}", style("Database Statistics:").bold());
     eprintln!("         • {} indexed files", style(s.files).cyan());
-    eprintln!("         • {} nodes (symbols)", style(s.nodes).cyan());
-    eprintln!("         • {} edges (references)", style(s.edges).cyan());
-    eprintln!(
-        "         • {} db size",
-        style(format!("{} KB", s.size_bytes / 1024)).dim()
-    );
+    eprintln!("         • {} symbols", style(s.symbols).cyan());
+    eprintln!("         • {} chains", style(s.chains).cyan());
+    eprintln!("         • {} edges", style(s.edges).cyan());
     eprintln!();
     eprintln!("     🚀  {}", style("Quick Commands:").bold());
     eprintln!(
@@ -201,12 +206,8 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
         style("codegraph status").green()
     );
     eprintln!(
-        "         • {}     Search for symbols in the codebase",
+        "         • {}    Search for symbols in the codebase",
         style("codegraph query <text>").green()
-    );
-    eprintln!(
-        "         • {}             Incremental sync of changed files",
-        style("codegraph sync").green()
     );
     eprintln!(
         "         • {}            Configure/install AI agent integrations",
@@ -256,7 +257,37 @@ fn ensure_initialized(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(root: &Utf8Path, do_index: bool) -> Result<()> {
+/// Full re-index: mở sqlite → `Orchestrator::index_all` (ingest = full re-index).
+fn block_on_index(root: &Utf8Path, db_path: &Utf8Path, progress: bool) -> Result<ExtractStats> {
+    let root = root.to_path_buf();
+    let db_str = db_path.as_str().to_string();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let mut idx = GraphIndex::open(&db_str).await?;
+        // Create progress bar if requested.
+        let progress_bar = if progress {
+            let bar = indicatif::ProgressBar::new(0);
+            bar.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%)")
+                    .expect("valid progress bar template")
+                    .progress_chars("#>-"),
+            );
+            Some(std::sync::Arc::new(bar))
+        } else {
+            None
+        };
+        Ok::<_, anyhow::Error>(
+            Orchestrator::with_registry()
+                .index_all(&root, &mut idx, progress_bar)
+                .await?,
+        )
+    })
+}
+
+fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
     let dir = root.join(CODEGRAPH_DIR);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join(".gitignore"), "*\n")?;
@@ -265,14 +296,13 @@ fn cmd_init(root: &Utf8Path, do_index: bool) -> Result<()> {
     if !config_path.exists() {
         std::fs::write(&config_path, codegraph_extract::DEFAULT_CONFIG_TOML)?;
     }
-    let db = Db::open(&db_path(root))?;
     eprintln!("initialized {}", dir);
 
     if do_index {
-        let stats = Orchestrator::with_registry().index_all(root, &db)?;
+        let stats = block_on_index(root, &db_path(root), show_progress)?;
         eprintln!(
-            "indexed {} files, {} nodes, {} edges",
-            stats.files, stats.nodes, stats.edges
+            "indexed {} files, {} symbols, {} chains, {} edges",
+            stats.files, stats.symbols, stats.chains, stats.calls
         );
     }
 
@@ -380,44 +410,44 @@ fn cmd_uninit(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_index(root: &Utf8Path) -> Result<()> {
+fn cmd_index(root: &Utf8Path, progress: bool) -> Result<()> {
     ensure_initialized(root)?;
-    let db = Db::open(&db_path(root))?;
-    let stats = Orchestrator::with_registry().index_all(root, &db)?;
+    let stats = block_on_index(root, &db_path(root), progress)?;
     eprintln!(
-        "indexed {} files, {} nodes, {} edges (skipped {})",
-        stats.files, stats.nodes, stats.edges, stats.skipped
-    );
-    Ok(())
-}
-
-fn cmd_sync(root: &Utf8Path) -> Result<()> {
-    ensure_initialized(root)?;
-    let db = Db::open(&db_path(root))?;
-    let stats = Orchestrator::with_registry().sync(root, &db)?;
-    eprintln!(
-        "synced {} files (skipped {}), nodes={} edges={}",
-        stats.files, stats.skipped, stats.nodes, stats.edges
+        "indexed {} files, {} symbols, {} chains, {} calls (skipped {})",
+        stats.files, stats.symbols, stats.chains, stats.calls, stats.skipped
     );
     Ok(())
 }
 
 fn cmd_status(root: &Utf8Path) -> Result<()> {
     ensure_initialized(root)?;
-    let db = Db::open(&db_path(root))?;
-    let s = db.stats()?;
-    println!("schema: v{}", s.schema_version);
-    println!("files:  {}", s.files);
-    println!("nodes:  {}", s.nodes);
-    println!("edges:  {}", s.edges);
-    println!("size:   {} bytes", s.size_bytes);
+    let db_str = db_path(root).as_str().to_string();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let s = rt.block_on(async {
+        let idx = GraphIndex::open(&db_str).await?;
+        Ok::<_, anyhow::Error>(idx.stats())
+    })?;
+    println!("files:   {}", s.files);
+    println!("symbols: {}", s.symbols);
+    println!("chains:  {}", s.chains);
+    println!("edges:   {}", s.edges);
     Ok(())
 }
 
 fn cmd_query(root: &Utf8Path, q: &str, limit: u32) -> Result<()> {
     ensure_initialized(root)?;
-    let db = Db::open(&db_path(root))?;
-    let hits = db.search_nodes(q, limit)?;
+    let db_str = db_path(root).as_str().to_string();
+    let q = q.to_string();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let hits = rt.block_on(async {
+        let idx = GraphIndex::open(&db_str).await?;
+        Ok::<_, anyhow::Error>(idx.search_symbol(&q, None, limit as usize).await?)
+    })?;
     for h in hits {
         println!(
             "[{}] {}  {}  {}:{}",
@@ -425,7 +455,7 @@ fn cmd_query(root: &Utf8Path, q: &str, limit: u32) -> Result<()> {
             h.kind.as_str(),
             h.name,
             h.file,
-            h.start_line
+            h.line
         );
     }
     Ok(())
@@ -435,9 +465,22 @@ fn cmd_files(root: &Utf8Path, prefix: Option<&str>) -> Result<()> {
     use std::io::Write;
 
     ensure_initialized(root)?;
-    let db = Db::open(&db_path(root))?;
+    let db_str = db_path(root).as_str().to_string();
+    let prefix = prefix.unwrap_or("").to_string();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let files = rt.block_on(async {
+        let idx = GraphIndex::open(&db_str).await?;
+        let all = idx.files();
+        Ok::<_, anyhow::Error>(if prefix.is_empty() {
+            all
+        } else {
+            all.into_iter().filter(|f| f.path.starts_with(&prefix)).collect()
+        })
+    })?;
     let mut out = std::io::stdout().lock();
-    for f in db.files_under(prefix.unwrap_or(""))? {
+    for f in files {
         if writeln!(out, "{}  ({})", f.path, f.language).is_err() {
             break;
         }
@@ -447,7 +490,7 @@ fn cmd_files(root: &Utf8Path, prefix: Option<&str>) -> Result<()> {
 
 fn cmd_context(root: &Utf8Path, target: &str, depth: u32, include_source: bool) -> Result<()> {
     ensure_initialized(root)?;
-    let db = Db::open(&db_path(root))?;
+    let db_path = db_path(root);
     let req = codegraph_context::ContextRequest {
         query: target.into(),
         depth,
@@ -455,7 +498,16 @@ fn cmd_context(root: &Utf8Path, target: &str, depth: u32, include_source: bool) 
         limit: 5,
         format: codegraph_context::Format::Markdown,
     };
-    print!("{}", codegraph_context::build(&db, &req)?);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let output = rt.block_on(async {
+        let sgi = Arc::new(
+            codegraph_graph::SharedGraphIndex::open(Some(db_path.into_std_path_buf())).await?,
+        );
+        codegraph_context::build(&sgi, &req).await
+    })?;
+    print!("{}", output);
     Ok(())
 }
 
@@ -464,13 +516,14 @@ fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
         return Err(anyhow!("only --mcp transport supported"));
     }
     ensure_initialized(root).context("init the index before serving")?;
-    let db = Arc::new(Db::open(&db_path(root))?);
+    let db_path = db_path(root);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
-        watcher::spawn(root.to_path_buf(), db.clone());
-        McpServer::new(db).run_stdio().await
+        watcher::spawn(root.to_path_buf(), db_path.clone());
+        let mcp_server = McpServer::new(Some(db_path.into_std_path_buf())).await?;
+        mcp_server.run_stdio().await
     })?;
     Ok(())
 }
@@ -488,7 +541,7 @@ fn cmd_visualize(
     use codegraph_viz::{BootConfig, VizConfig};
 
     ensure_initialized(root).context("init the index before visualize")?;
-    let db = Arc::new(Db::open_read_only(&db_path(root))?);
+    let db_path = db_path(root);
     let config = VizConfig {
         port,
         open_browser: open && !no_browser,
@@ -501,6 +554,6 @@ fn cmd_visualize(
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(codegraph_viz::run(db, config))?;
+    rt.block_on(codegraph_viz::run(db_path.into_std_path_buf(), config))?;
     Ok(())
 }

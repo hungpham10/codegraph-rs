@@ -1,25 +1,24 @@
 use anyhow::Result;
 use camino::Utf8PathBuf;
-use codegraph_db::Db;
 use codegraph_extract::Orchestrator;
+use codegraph_graph::GraphIndex;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebouncedEvent};
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::Duration;
 
-/// Spawn a debounced watcher that re-syncs the workspace on file changes.
+/// Spawn a debounced watcher that full re-indexes the workspace on file changes.
 /// Runs on a background tokio task; cancellation when the runtime drops.
-pub fn spawn(root: Utf8PathBuf, db: Arc<Db>) {
+pub fn spawn(root: Utf8PathBuf, db_path: Utf8PathBuf) {
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = run(root, db) {
+        if let Err(e) = run(root, db_path) {
             tracing::error!("watcher error: {e}");
         }
     });
 }
 
-fn run(root: Utf8PathBuf, db: Arc<Db>) -> Result<()> {
+fn run(root: Utf8PathBuf, db_path: Utf8PathBuf) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DebouncedEvent>>();
     let mut debouncer = new_debouncer(
         Duration::from_millis(500),
@@ -42,10 +41,11 @@ fn run(root: Utf8PathBuf, db: Arc<Db>) -> Result<()> {
     });
 
     let orch = Orchestrator::with_registry();
+    let handle = tokio::runtime::Handle::current();
     while let Ok(events) = rx.recv() {
         let mut batch = events;
         // Coalesce any batches that arrive while we're about to process one -
-        // avoids back-to-back sync passes when the debouncer fires repeatedly
+        // avoids back-to-back re-indexes when the debouncer fires repeatedly
         // in quick succession (e.g. during a large rescan).
         while let Ok(more) = rx.try_recv() {
             batch.extend(more);
@@ -55,12 +55,23 @@ fn run(root: Utf8PathBuf, db: Arc<Db>) -> Result<()> {
         if paths.is_empty() {
             continue;
         }
-        match orch.sync_paths(&root, &db, &paths) {
-            Ok(s) if s.files > 0 => {
-                tracing::info!("watch sync: {} files, {} edges", s.files, s.edges)
-            }
+        // Full re-index (đã chốt — bỏ incremental): bất kỳ thay đổi nào cũng
+        // index lại toàn bộ (ingest reset + rebuild engine).
+        let db_str = db_path.as_str().to_string();
+        let result = handle.block_on(async {
+            let mut idx = GraphIndex::open(&db_str).await?;
+            orch.index_all(&root, &mut idx, None).await
+        });
+        match result {
+            Ok(s) if s.files > 0 => tracing::info!(
+                "watch re-index: {} files, {} symbols, {} chains, {} calls",
+                s.files,
+                s.symbols,
+                s.chains,
+                s.calls
+            ),
             Ok(_) => {}
-            Err(e) => tracing::warn!("sync failed: {e}"),
+            Err(e) => tracing::warn!("re-index failed: {e}"),
         }
     }
     Ok(())

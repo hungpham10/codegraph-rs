@@ -1,187 +1,64 @@
-use crate::{parse_err, ExtractResult, Extractor, LocalEdge, PendingCall, RawImport};
-use codegraph_core::{EdgeKind, NodeKind, Result};
-use codegraph_db::NodeDraft;
-use tree_sitter::{Node, Parser, Tree};
+use crate::languages::common::{CallRule, LangSpec};
+use codegraph_core::SymbolKind;
 
-pub struct RustExtractor {
-    lang: tree_sitter::Language,
-}
-impl Default for RustExtractor {
-    fn default() -> Self {
-        Self::new()
-    }
+fn ts_language() -> tree_sitter::Language {
+    tree_sitter_rust::LANGUAGE.into()
 }
 
-impl RustExtractor {
-    pub fn new() -> Self {
-        Self {
-            lang: tree_sitter_rust::LANGUAGE.into(),
-        }
-    }
-}
+pub static SPEC: LangSpec = LangSpec {
+    language_name: "rust",
+    extensions: &["rs"],
+    ts_language,
+    decls: &[
+        ("function_item", SymbolKind::Function),
+        ("struct_item", SymbolKind::Class),
+        ("enum_item", SymbolKind::Enum),
+        ("trait_item", SymbolKind::Interface),
+        ("impl_item", SymbolKind::Class),
+        ("mod_item", SymbolKind::Module),
+        ("const_item", SymbolKind::Constant),
+        ("static_item", SymbolKind::Variable),
+        ("type_item", SymbolKind::Class),
+    ],
+    func_kinds: &["function_item"],
+    class_kinds: &["struct_item", "enum_item", "trait_item", "impl_item", "mod_item"],
+    param_kinds: &[],
+    annotation_kinds: &[],
+    // `impl Foo` không có name field — tên nằm ở field `type`.
+    name_type_fallback: true,
+    calls: &[CallRule {
+        kind: "call_expression",
+        callee_field: "function",
+        arguments_field: "arguments",
+        name_fn: None,
+        target_fn: None,
+    }],
+    class_type_name: None,
+    if_kinds: &["if_expression", "if_let_expression"],
+    elif_kinds: &[],
+    if_block_kinds: &[],
+    loop_kinds: &[
+        "loop_expression",
+        "while_expression",
+        "while_let_expression",
+        "for_expression",
+    ],
+    switch_kinds: &["match_expression"],
+    switch_block_kinds: &["match_block"],
+    switch_case_kinds: &["match_arm"],
+    switch_default_kinds: &[],
+    return_kinds: &["return_expression"],
+    break_kinds: &["break_expression"],
+    continue_kinds: &["continue_expression"],
+    throw_kinds: &[],
+    try_kinds: &[],
+    except_kinds: &[],
+    try_else_kinds: &[],
+    finally_kinds: &[],
+    if_cond_field: "condition",
+    if_cons_field: "consequence",
+    if_alt_field: "alternative",
+    body_field: "body",
+};
 
-impl Extractor for RustExtractor {
-    fn language(&self) -> &'static str {
-        "rust"
-    }
-    fn extensions(&self) -> &'static [&'static str] {
-        &["rs"]
-    }
-    fn ts_language(&self) -> tree_sitter::Language {
-        self.lang.clone()
-    }
-    fn extract(&self, source: &str) -> Result<ExtractResult> {
-        let mut p = Parser::new();
-        p.set_language(&self.lang)
-            .map_err(|e| parse_err(format!("set_language: {e}")))?;
-        let tree: Tree = p
-            .parse(source, None)
-            .ok_or_else(|| parse_err("parse failed"))?;
-        let mut ctx = Ctx {
-            src: source.as_bytes(),
-            result: ExtractResult::default(),
-            parent_idx: None,
-        };
-        walk(&tree.root_node(), &mut ctx);
-        Ok(ctx.result)
-    }
-}
-
-struct Ctx<'a> {
-    src: &'a [u8],
-    result: ExtractResult,
-    parent_idx: Option<usize>,
-}
-
-fn walk(node: &Node, ctx: &mut Ctx) {
-    let mut pushed: Option<usize> = None;
-    match node.kind() {
-        "function_item" => {
-            pushed = push_named(ctx, node, NodeKind::Function);
-        }
-        "struct_item" => {
-            pushed = push_named(ctx, node, NodeKind::Struct);
-        }
-        "enum_item" => {
-            pushed = push_named(ctx, node, NodeKind::Enum);
-        }
-        "trait_item" => {
-            pushed = push_named(ctx, node, NodeKind::Trait);
-        }
-        "impl_item" => {
-            // Treat impls as containers via the type name.
-            pushed = push_named(ctx, node, NodeKind::Namespace);
-        }
-        "mod_item" => {
-            pushed = push_named(ctx, node, NodeKind::Module);
-        }
-        "const_item" => {
-            pushed = push_named(ctx, node, NodeKind::Constant);
-        }
-        "static_item" => {
-            pushed = push_named(ctx, node, NodeKind::Variable);
-        }
-        "type_item" => {
-            pushed = push_named(ctx, node, NodeKind::TypeAlias);
-        }
-        "use_declaration" => {
-            emit_use(node, ctx);
-        }
-        "call_expression" => {
-            emit_call(node, ctx);
-        }
-        _ => {}
-    }
-
-    let prev = ctx.parent_idx;
-    if let Some(idx) = pushed {
-        if let Some(p) = prev {
-            ctx.result.edges.push(LocalEdge {
-                from_idx: p,
-                to_idx: idx,
-                kind: EdgeKind::Contains,
-                line: None,
-            });
-        }
-        ctx.parent_idx = Some(idx);
-    }
-
-    let mut c = node.walk();
-    for ch in node.children(&mut c) {
-        walk(&ch, ctx);
-    }
-    ctx.parent_idx = prev;
-}
-
-fn push_named(ctx: &mut Ctx, node: &Node, kind: NodeKind) -> Option<usize> {
-    let name_node = node
-        .child_by_field_name("name")
-        .or_else(|| node.child_by_field_name("type"))?;
-    let name = name_node.utf8_text(ctx.src).ok()?.to_string();
-    if name.is_empty() {
-        return None;
-    }
-    let start = node.start_position().row as u32 + 1;
-    let end = node.end_position().row as u32 + 1;
-    let body = node
-        .child_by_field_name("body")
-        .map(|b| b.start_byte())
-        .unwrap_or(node.end_byte());
-    let sig = std::str::from_utf8(&ctx.src[node.start_byte()..body.min(ctx.src.len())])
-        .ok()
-        .map(|s| s.trim().lines().next().unwrap_or("").to_string());
-
-    ctx.result.nodes.push(NodeDraft {
-        kind,
-        name,
-        qualified_name: None,
-        start_line: start,
-        end_line: end,
-        signature: sig,
-        docstring: None,
-        language: "rust".into(),
-    });
-    Some(ctx.result.nodes.len() - 1)
-}
-
-fn emit_call(node: &Node, ctx: &mut Ctx) {
-    let Some(callee) = node.child_by_field_name("function") else {
-        return;
-    };
-    let name = match callee.kind() {
-        "identifier" => callee.utf8_text(ctx.src).ok().map(|s| s.to_string()),
-        "field_expression" => callee
-            .child_by_field_name("field")
-            .and_then(|f| f.utf8_text(ctx.src).ok())
-            .map(|s| s.to_string()),
-        "scoped_identifier" => callee
-            .child_by_field_name("name")
-            .and_then(|n| n.utf8_text(ctx.src).ok())
-            .map(|s| s.to_string()),
-        _ => None,
-    };
-    let Some(n) = name else { return };
-    let Some(from) = ctx.parent_idx else { return };
-    ctx.result.pending_calls.push(PendingCall {
-        from_idx: from,
-        target_name: n,
-        line: node.start_position().row as u32 + 1,
-    });
-}
-
-fn emit_use(node: &Node, ctx: &mut Ctx) {
-    if let Ok(text) = node.utf8_text(ctx.src) {
-        // Crude: take token after "use " up to ; or as.
-        let s = text.trim().trim_start_matches("use ").trim_end_matches(';');
-        let module = s.split_whitespace().next().unwrap_or(s).to_string();
-        let from = ctx.parent_idx.unwrap_or(usize::MAX);
-        if from == usize::MAX {
-            return;
-        }
-        ctx.result.imports.push(RawImport {
-            from_idx: from,
-            module,
-            line: node.start_position().row as u32 + 1,
-        });
-    }
-}
+crate::lang_parser!(RustParser, SPEC);

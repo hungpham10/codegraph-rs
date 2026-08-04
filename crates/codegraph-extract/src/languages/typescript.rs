@@ -1,257 +1,115 @@
-use crate::{parse_err, ExtractResult, Extractor, LocalEdge, PendingCall, RawImport};
-use codegraph_core::{EdgeKind, NodeKind, Result};
-use codegraph_db::NodeDraft;
-use tree_sitter::{Node, Parser, Tree};
+use crate::languages::common::{named_children, text, CallRule, LangSpec};
+use codegraph_core::SymbolKind;
+use tree_sitter::Node;
 
-pub struct TypeScriptExtractor {
-    lang: tree_sitter::Language,
-}
-pub struct TsxExtractor {
-    lang: tree_sitter::Language,
+fn typescript_ts_language() -> tree_sitter::Language {
+    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
 }
 
-impl Default for TypeScriptExtractor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl Default for TsxExtractor {
-    fn default() -> Self {
-        Self::new()
-    }
+fn tsx_ts_language() -> tree_sitter::Language {
+    tree_sitter_typescript::LANGUAGE_TSX.into()
 }
 
-impl TypeScriptExtractor {
-    pub fn new() -> Self {
-        Self {
-            lang: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        }
-    }
-}
-impl TsxExtractor {
-    pub fn new() -> Self {
-        Self {
-            lang: tree_sitter_typescript::LANGUAGE_TSX.into(),
-        }
-    }
-}
-
-impl Extractor for TypeScriptExtractor {
-    fn language(&self) -> &'static str {
-        "typescript"
-    }
-    fn extensions(&self) -> &'static [&'static str] {
-        &["ts", "mts", "cts"]
-    }
-    fn ts_language(&self) -> tree_sitter::Language {
-        self.lang.clone()
-    }
-    fn extract(&self, source: &str) -> Result<ExtractResult> {
-        extract_ts(self.lang.clone(), source, "typescript")
-    }
-}
-
-impl Extractor for TsxExtractor {
-    fn language(&self) -> &'static str {
-        "tsx"
-    }
-    fn extensions(&self) -> &'static [&'static str] {
-        &["tsx"]
-    }
-    fn ts_language(&self) -> tree_sitter::Language {
-        self.lang.clone()
-    }
-    fn extract(&self, source: &str) -> Result<ExtractResult> {
-        extract_ts(self.lang.clone(), source, "tsx")
-    }
-}
-
-fn extract_ts(lang: tree_sitter::Language, source: &str, lang_name: &str) -> Result<ExtractResult> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&lang)
-        .map_err(|e| parse_err(format!("set_language: {e}")))?;
-    let tree: Tree = parser
-        .parse(source, None)
-        .ok_or_else(|| parse_err("parse failed"))?;
-    let mut ctx = Ctx {
-        src: source.as_bytes(),
-        lang_name,
-        result: ExtractResult::default(),
-        parent_idx: None,
-    };
-    walk(&tree.root_node(), &mut ctx);
-    Ok(ctx.result)
-}
-
-struct Ctx<'a> {
-    src: &'a [u8],
-    lang_name: &'a str,
-    result: ExtractResult,
-    parent_idx: Option<usize>,
-}
-
-fn walk(node: &Node, ctx: &mut Ctx) {
-    let kind = node.kind();
-    let mut pushed: Option<usize> = None;
-
-    match kind {
-        "function_declaration" | "function_expression" | "arrow_function" => {
-            if let Some(idx) = push_named(ctx, node, NodeKind::Function) {
-                pushed = Some(idx);
+/// Heritage: `class Foo extends Bar` / `interface Foo extends Bar, Baz` /
+/// `implements A, B` — type đầu tiên làm type_name.
+pub fn class_type_name(node: &Node, src: &[u8]) -> Option<String> {
+    for ch in named_children(node) {
+        match ch.kind() {
+            "class_heritage" => {
+                for cc in named_children(&ch) {
+                    if cc.kind() == "extends_clause" {
+                        return cc
+                            .child_by_field_name("name")
+                            .and_then(|n| text(&n, src));
+                    }
+                }
             }
-        }
-        "method_definition" | "method_signature" => {
-            if let Some(idx) = push_named(ctx, node, NodeKind::Method) {
-                pushed = Some(idx);
+            "extends_clause" | "implements_clause" => {
+                if let Some(name) = ch.child_by_field_name("name") {
+                    return text(&name, src);
+                }
             }
-        }
-        "class_declaration" | "class" => {
-            if let Some(idx) = push_named(ctx, node, NodeKind::Class) {
-                pushed = Some(idx);
-                emit_heritage(node, ctx, idx);
-            }
-        }
-        "interface_declaration" => {
-            if let Some(idx) = push_named(ctx, node, NodeKind::Interface) {
-                pushed = Some(idx);
-            }
-        }
-        "type_alias_declaration" => {
-            if let Some(idx) = push_named(ctx, node, NodeKind::TypeAlias) {
-                pushed = Some(idx);
-            }
-        }
-        "enum_declaration" => {
-            if let Some(idx) = push_named(ctx, node, NodeKind::Enum) {
-                pushed = Some(idx);
-            }
-        }
-        "variable_declarator" => {
-            if let Some(idx) = push_named(ctx, node, NodeKind::Variable) {
-                pushed = Some(idx);
-            }
-        }
-        "import_statement" => {
-            emit_import(node, ctx);
-        }
-        "call_expression" => {
-            emit_call(node, ctx);
-        }
-        _ => {}
-    }
-
-    let prev = ctx.parent_idx;
-    if let Some(idx) = pushed {
-        if let Some(parent) = prev {
-            ctx.result.edges.push(LocalEdge {
-                from_idx: parent,
-                to_idx: idx,
-                kind: EdgeKind::Contains,
-                line: None,
-            });
-        }
-        ctx.parent_idx = Some(idx);
-    }
-
-    let mut c = node.walk();
-    for child in node.children(&mut c) {
-        walk(&child, ctx);
-    }
-
-    ctx.parent_idx = prev;
-}
-
-fn push_named(ctx: &mut Ctx, node: &Node, kind: NodeKind) -> Option<usize> {
-    let name_node = node
-        .child_by_field_name("name")
-        .or_else(|| find_first_identifier(node));
-    let name = name_node
-        .and_then(|n| n.utf8_text(ctx.src).ok())?
-        .to_string();
-    if name.is_empty() {
-        return None;
-    }
-    let start = node.start_position().row as u32 + 1;
-    let end = node.end_position().row as u32 + 1;
-    let sig_end = node
-        .child_by_field_name("body")
-        .map(|b| b.start_byte())
-        .unwrap_or(node.end_byte());
-    let sig = std::str::from_utf8(&ctx.src[node.start_byte()..sig_end.min(ctx.src.len())])
-        .ok()
-        .map(|s| s.trim().lines().next().unwrap_or("").to_string());
-
-    ctx.result.nodes.push(NodeDraft {
-        kind,
-        name,
-        qualified_name: None,
-        start_line: start,
-        end_line: end,
-        signature: sig,
-        docstring: None,
-        language: ctx.lang_name.to_string(),
-    });
-    Some(ctx.result.nodes.len() - 1)
-}
-
-fn find_first_identifier<'a>(n: &Node<'a>) -> Option<Node<'a>> {
-    let mut c = n.walk();
-    let mut found = None;
-    for ch in n.children(&mut c) {
-        if matches!(
-            ch.kind(),
-            "identifier" | "type_identifier" | "property_identifier"
-        ) {
-            found = Some(ch);
-            break;
+            _ => {}
         }
     }
-    found
+    None
 }
 
-fn emit_call(node: &Node, ctx: &mut Ctx) {
-    let Some(callee) = node.child_by_field_name("function") else {
-        return;
-    };
-    let target = match callee.kind() {
-        "identifier" => callee.utf8_text(ctx.src).ok().map(|s| s.to_string()),
-        "member_expression" => callee
-            .child_by_field_name("property")
-            .and_then(|p| p.utf8_text(ctx.src).ok())
-            .map(|s| s.to_string()),
-        _ => None,
-    };
-    let Some(name) = target else { return };
-    let Some(from) = ctx.parent_idx else { return };
-    ctx.result.pending_calls.push(PendingCall {
-        from_idx: from,
-        target_name: name,
-        line: node.start_position().row as u32 + 1,
-    });
-}
+pub static SPEC: LangSpec = LangSpec {
+    language_name: "typescript",
+    extensions: &["ts", "mts", "cts"],
+    ts_language: typescript_ts_language,
+    decls: &[
+        ("function_declaration", SymbolKind::Function),
+        ("generator_function_declaration", SymbolKind::Function),
+        ("function_expression", SymbolKind::Function),
+        ("arrow_function", SymbolKind::Function),
+        ("method_definition", SymbolKind::Method),
+        ("method_signature", SymbolKind::Method),
+        ("class_declaration", SymbolKind::Class),
+        ("class", SymbolKind::Class),
+        ("interface_declaration", SymbolKind::Interface),
+        ("enum_declaration", SymbolKind::Enum),
+        ("type_alias_declaration", SymbolKind::Class),
+        ("internal_module", SymbolKind::Module),
+        ("variable_declarator", SymbolKind::Variable),
+    ],
+    func_kinds: &[
+        "function_declaration",
+        "generator_function_declaration",
+        "function_expression",
+        "arrow_function",
+        "method_definition",
+        "method_signature",
+    ],
+    class_kinds: &[
+        "class_declaration",
+        "class",
+        "interface_declaration",
+        "enum_declaration",
+        "internal_module",
+    ],
+    param_kinds: &[],
+    annotation_kinds: &[],
+    name_type_fallback: false,
+    calls: &[
+        CallRule {
+            kind: "call_expression",
+            callee_field: "function",
+            arguments_field: "arguments",
+            name_fn: None,
+            target_fn: None,
+        },
+        CallRule {
+            kind: "new_expression",
+            callee_field: "constructor",
+            arguments_field: "arguments",
+            name_fn: None,
+            target_fn: None,
+        },
+    ],
+    class_type_name: Some(class_type_name),
+    if_kinds: &["if_statement"],
+    elif_kinds: &[],
+    if_block_kinds: &[],
+    loop_kinds: &["for_statement", "for_in_statement", "for_of_statement", "while_statement", "do_statement"],
+    switch_kinds: &["switch_statement"],
+    switch_block_kinds: &["switch_body"],
+    switch_case_kinds: &["switch_case"],
+    switch_default_kinds: &["switch_default"],
+    return_kinds: &["return_statement"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    throw_kinds: &["throw_statement"],
+    try_kinds: &["try_statement"],
+    except_kinds: &["catch_clause"],
+    try_else_kinds: &[],
+    finally_kinds: &["finally_clause"],
+    if_cond_field: "condition",
+    if_cons_field: "consequence",
+    if_alt_field: "alternative",
+    body_field: "body",
+};
 
-fn emit_import(node: &Node, ctx: &mut Ctx) {
-    let Some(src) = node.child_by_field_name("source") else {
-        return;
-    };
-    let Ok(text) = src.utf8_text(ctx.src) else {
-        return;
-    };
-    let module = text
-        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
-        .to_string();
-    let from = ctx.parent_idx.unwrap_or(usize::MAX);
-    if from == usize::MAX {
-        return;
-    }
-    ctx.result.imports.push(RawImport {
-        from_idx: from,
-        module,
-        line: node.start_position().row as u32 + 1,
-    });
-}
-
-fn emit_heritage(_node: &Node, _ctx: &mut Ctx, _class_idx: usize) {
-    // TODO: emit extends/implements pending references for the resolver.
-}
+crate::lang_parser!(TypeScriptParser, SPEC);
+crate::lang_parser!(TsxParser, SPEC, "tsx", &["tsx"], tsx_ts_language);

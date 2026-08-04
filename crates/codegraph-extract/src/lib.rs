@@ -1,98 +1,116 @@
-//! Tree-sitter extraction orchestrator + per-language extractors.
+//! Tree-sitter extractor — parse từng file ra `ParseResult` cho `GraphIndex::ingest`.
+//!
+//! Mọi ngôn ngữ chạy chung một generic engine (`languages::common::run_spec`)
+//! được khai báo qua `LangSpec` (declaration nodes, call rules, marker rules).
+//! Pipeline 2 pass: symbol pass (id local ≥ `SYMBOL_BASE`, scope stack) → chain
+//! pass (marker + placeholder 0 + CallRecord). Resolve call được `GraphIndex`
+//! làm sau khi `ingest` gom toàn bộ file.
 
 pub mod config;
 pub mod languages;
 mod orchestrator;
 mod walker;
 
-pub use config::{ExtractConfig, HeaderLanguage, DEFAULT_CONFIG_TOML};
 pub use orchestrator::{ExtractStats, Orchestrator};
+pub use config::{ExtractConfig, HeaderLanguage, DEFAULT_CONFIG_TOML};
 
-use codegraph_core::{Error, NodeKind, Result};
-use codegraph_db::NodeDraft;
+use codegraph_core::{Error, Result};
+use codegraph_graph::ParseResult;
 use std::sync::Arc;
 
-/// Local edge using node-indices into the same ExtractResult.nodes vec.
-#[derive(Debug, Clone)]
-pub struct LocalEdge {
-    pub from_idx: usize,
-    pub to_idx: usize,
-    pub kind: codegraph_core::EdgeKind,
-    pub line: Option<u32>,
-}
-
-/// Unresolved call site: target is a name; resolved post-pass by name-matcher.
-#[derive(Debug, Clone)]
-pub struct PendingCall {
-    pub from_idx: usize, // index into ExtractResult.nodes
-    pub target_name: String,
-    pub line: u32,
-}
-
-/// Raw import for later resolution by codegraph-resolve.
-#[derive(Debug, Clone)]
-pub struct RawImport {
-    pub from_idx: usize,
-    pub module: String,
-    pub line: u32,
-}
-
-#[derive(Debug, Default)]
-pub struct ExtractResult {
-    pub nodes: Vec<NodeDraft>,
-    pub edges: Vec<LocalEdge>,
-    pub pending_calls: Vec<PendingCall>,
-    pub imports: Vec<RawImport>,
-}
-
-pub trait Extractor: Send + Sync {
-    fn language(&self) -> &'static str;
+/// Parser một ngôn ngữ — mỗi ngôn ngữ là một `LangSpec` + wrap struct.
+pub trait LangParser: Send + Sync {
+    fn name(&self) -> &'static str;
     fn extensions(&self) -> &'static [&'static str];
     fn ts_language(&self) -> tree_sitter::Language;
-    fn extract(&self, source: &str) -> Result<ExtractResult>;
+    fn parse_file(&self, path: &str, source: &str) -> Result<ParseResult>;
 }
 
-pub fn registry() -> Vec<Arc<dyn Extractor>> {
-    let mut v: Vec<Arc<dyn Extractor>> = Vec::new();
+/// Registry toàn bộ parser theo feature flags.
+pub fn registry() -> Vec<Arc<dyn LangParser>> {
+    let mut v: Vec<Arc<dyn LangParser>> = Vec::new();
     #[cfg(feature = "lang-typescript")]
     {
-        v.push(Arc::new(languages::typescript::TypeScriptExtractor::new()));
-        v.push(Arc::new(languages::typescript::TsxExtractor::new()));
+        v.push(Arc::new(languages::typescript::TypeScriptParser::new()));
+        v.push(Arc::new(languages::typescript::TsxParser::new()));
     }
     #[cfg(feature = "lang-javascript")]
-    v.push(Arc::new(languages::javascript::JavaScriptExtractor::new()));
+    v.push(Arc::new(languages::javascript::JavaScriptParser::new()));
     #[cfg(feature = "lang-python")]
-    v.push(Arc::new(languages::python::PythonExtractor::new()));
+    v.push(Arc::new(languages::python::PythonParser::new()));
     #[cfg(feature = "lang-rust")]
-    v.push(Arc::new(languages::rust::RustExtractor::new()));
+    v.push(Arc::new(languages::rust::RustParser::new()));
     #[cfg(feature = "lang-go")]
-    v.push(Arc::new(languages::go::GoExtractor::new()));
+    v.push(Arc::new(languages::go::GoParser::new()));
     #[cfg(feature = "lang-java")]
-    v.push(Arc::new(languages::java::JavaExtractor::new()));
+    v.push(Arc::new(languages::java::JavaParser::new()));
     #[cfg(feature = "lang-c")]
-    v.push(Arc::new(languages::c::CExtractor::new()));
+    v.push(Arc::new(languages::c::CParser::new()));
     #[cfg(feature = "lang-cpp")]
-    v.push(Arc::new(languages::cpp::CppExtractor::new()));
+    v.push(Arc::new(languages::cpp::CppParser::new()));
     #[cfg(feature = "lang-csharp")]
-    v.push(Arc::new(languages::csharp::CSharpExtractor::new()));
+    v.push(Arc::new(languages::csharp::CSharpParser::new()));
     #[cfg(feature = "lang-ruby")]
-    v.push(Arc::new(languages::ruby::RubyExtractor::new()));
+    v.push(Arc::new(languages::ruby::RubyParser::new()));
     #[cfg(feature = "lang-php")]
-    v.push(Arc::new(languages::php::PhpExtractor::new()));
+    v.push(Arc::new(languages::php::PhpParser::new()));
     #[cfg(feature = "lang-scala")]
-    v.push(Arc::new(languages::scala::ScalaExtractor::new()));
+    v.push(Arc::new(languages::scala::ScalaParser::new()));
     #[cfg(feature = "lang-swift")]
-    v.push(Arc::new(languages::swift::SwiftExtractor::new()));
+    v.push(Arc::new(languages::swift::SwiftParser::new()));
     #[cfg(feature = "lang-lua")]
-    v.push(Arc::new(languages::lua::LuaExtractor::new()));
+    v.push(Arc::new(languages::lua::LuaParser::new()));
     v
+}
+
+/// Tạo một `LangParser` wrapper quanh một `&'static LangSpec`.
+///
+/// Dạng 1 đối số: lấy name/extensions/ts_language từ chính `SPEC`. Dạng 5 đối số
+/// cho phép override (VD TSX: cùng SPEC nhưng tên `tsx`, extension `.tsx`).
+#[macro_export]
+macro_rules! lang_parser {
+    ($ty:ident, $spec:expr) => {
+        $crate::lang_parser!(
+            $ty,
+            $spec,
+            $spec.language_name,
+            $spec.extensions,
+            $spec.ts_language
+        );
+    };
+    ($ty:ident, $spec:expr, $name:expr, $ext:expr, $ts:expr) => {
+        #[derive(Clone, Copy)]
+        pub struct $ty;
+
+        impl $ty {
+            pub fn new() -> Self {
+                Self
+            }
+        }
+
+        impl Default for $ty {
+            fn default() -> Self {
+                Self
+            }
+        }
+
+        impl $crate::LangParser for $ty {
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                $ext
+            }
+            fn ts_language(&self) -> tree_sitter::Language {
+                ($ts)()
+            }
+            fn parse_file(&self, path: &str, source: &str) -> codegraph_core::Result<codegraph_graph::ParseResult> {
+                $crate::languages::common::run_spec(&$spec, path, $name, source)
+            }
+        }
+    };
 }
 
 pub(crate) fn parse_err(s: impl Into<String>) -> Error {
     Error::Parse(s.into())
-}
-
-#[allow(dead_code)]
-pub(crate) fn _node_kind_smoke() -> NodeKind {
-    NodeKind::Function
 }
