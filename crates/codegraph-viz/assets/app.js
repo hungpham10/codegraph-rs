@@ -512,7 +512,11 @@ async function doSearch() {
     document.getElementById('search-results').classList.add('hidden');
     return;
   }
-  const hits = await api(`/api/search?q=${encodeURIComponent(q)}&limit=30`);
+  const kind = document.getElementById('search-kind').value;
+  const qs = new URLSearchParams({ q, limit: '30' });
+  if (kind) qs.set('kind', kind);
+  if (document.getElementById('search-exact').checked) qs.set('match', 'exact');
+  const hits = await api(`/api/search?${qs}`);
   const panel = document.getElementById('search-results');
   if (!hits.length) {
     panel.innerHTML = '<div class="item muted">No results</div>';
@@ -538,9 +542,11 @@ async function doSearch() {
 }
 
 function mergeHits(hits, rootId) {
+  // callers/callees trả bare array; subgraph/neighbors trả {nodes, edges}.
+  const list = Array.isArray(hits) ? { nodes: hits, edges: [] } : hits;
   const ids = new Set(state.graph.nodes.map((n) => n.id));
   if (state.graph.seed) ids.add(state.graph.seed.id);
-  hits.nodes.forEach((n) => {
+  list.nodes.forEach((n) => {
     if (!ids.has(n.id)) {
       state.graph.nodes.push(n);
       ids.add(n.id);
@@ -548,10 +554,10 @@ function mergeHits(hits, rootId) {
   });
   const edgeKey = (e) => `${e.from}-${e.to}-${e.kind}`;
   const keys = new Set(state.graph.edges.map(edgeKey));
-  hits.edges.forEach((e) => {
+  list.edges.forEach((e) => {
     if (!keys.has(edgeKey(e))) state.graph.edges.push(e);
   });
-  state.graph.truncated = state.graph.truncated || hits.truncated;
+  state.graph.truncated = state.graph.truncated || list.truncated;
   state.selectedId = rootId;
   renderAll();
   if (state.activeView === 'graph2d' && state.graph2d) {

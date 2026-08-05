@@ -5,8 +5,8 @@ use axum::{
     Json,
 };
 use codegraph_api::GraphApi;
-use codegraph_core::Symbol;
-use codegraph_graph::SharedGraphIndex;
+use codegraph_core::{Symbol, SymbolKind, SymbolMatch};
+use codegraph_graph::{GraphIndex, SharedGraphIndex};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -23,6 +23,11 @@ pub struct SearchParams {
     pub q: String,
     #[serde(default = "default_search_limit")]
     pub limit: u32,
+    /// Lọc theo loại symbol (VD `function`) — `None` = tất cả (hành vi cũ).
+    pub kind: Option<String>,
+    /// Match mode: `contains` | `prefix` | `suffix` | `exact` (mặc định contains).
+    #[serde(rename = "match")]
+    pub mode: Option<String>,
 }
 
 fn default_search_limit() -> u32 {
@@ -68,8 +73,14 @@ pub async fn search(
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
     let api = GraphApi::new_with_index(state.shared_index.clone());
-    match api.search(&params.q, params.limit).await {
-        Ok(hits) => Json(hits).into_response(),
+    let kind = params.kind.as_deref().and_then(SymbolKind::parse);
+    let mode = params
+        .mode
+        .as_deref()
+        .and_then(SymbolMatch::parse)
+        .unwrap_or(SymbolMatch::Contains);
+    match api.search_symbol_paged(&params.q, kind, mode, params.limit, 0).await {
+        Ok((hits, _total)) => Json(hits).into_response(),
         Err(e) => api_error(e),
     }
 }
@@ -146,10 +157,7 @@ pub async fn subgraph(
     let seed = if let Some(id) = params.seed {
         idx.symbol_by_id(id)
     } else if let Some(q) = params.query.as_deref().filter(|q| !q.is_empty()) {
-        idx.search_symbol(q, None, 1)
-            .await
-            .ok()
-            .and_then(|mut v| v.pop())
+        resolve_seed(&idx, q).await
     } else {
         None
     };
@@ -161,6 +169,52 @@ pub async fn subgraph(
             .into_response();
     };
 
+    let (nodes, edges, truncated) = bfs_neighbors(&idx, &seed, depth, limit).await;
+    let nodes: Vec<Symbol> = nodes.into_values().collect();
+    Json(json!({
+        "nodes": nodes,
+        "edges": edges,
+        "seed": seed,
+        "truncated": truncated,
+    }))
+    .into_response()
+}
+
+/// Neighbors quanh id (callers + callees) — shape giống subgraph để UI `mergeHits`
+/// dùng chung (nút "⊕ Expand", `app.js` gọi `/api/neighbors/{id}`).
+pub async fn neighbors(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Query(params): Query<DepthParams>,
+) -> impl IntoResponse {
+    let api = GraphApi::new_with_index(state.shared_index.clone());
+    let idx = api.index().await;
+    let Some(seed) = idx.symbol_by_id(id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "symbol not found" })),
+        )
+            .into_response();
+    };
+    let depth = params.depth.max(1) as usize;
+    let (nodes, edges, truncated) = bfs_neighbors(&idx, &seed, depth, 300).await;
+    let nodes: Vec<Symbol> = nodes.into_values().collect();
+    Json(json!({
+        "nodes": nodes,
+        "edges": edges,
+        "seed": seed,
+        "truncated": truncated,
+    }))
+    .into_response()
+}
+
+/// BFS callers + callees quanh seed (tối đa `depth` hop) → nodes + call edges.
+async fn bfs_neighbors(
+    idx: &GraphIndex,
+    seed: &Symbol,
+    depth: usize,
+    limit: usize,
+) -> (HashMap<u64, Symbol>, Vec<serde_json::Value>, bool) {
     let mut nodes: HashMap<u64, Symbol> = HashMap::new();
     let mut edges: Vec<serde_json::Value> = Vec::new();
     nodes.insert(seed.id, seed.clone());
@@ -200,15 +254,29 @@ pub async fn subgraph(
             break;
         }
     }
+    (nodes, edges, truncated)
+}
 
-    let nodes: Vec<Symbol> = nodes.into_values().collect();
-    Json(json!({
-        "nodes": nodes,
-        "edges": edges,
-        "seed": seed,
-        "truncated": truncated,
-    }))
-    .into_response()
+/// Resolve seed từ query: ưu tiên hàm (Function → Method → Class) để view query
+/// không rơi vào biến/param vô mối gọi (trước đây `search_symbol(q, None, 1)` lấy
+/// match bừa). Với mỗi kind thử exact → prefix → contains; fallback mọi loại để
+/// giữ hành vi substring cũ.
+async fn resolve_seed(idx: &GraphIndex, q: &str) -> Option<Symbol> {
+    for mode in [SymbolMatch::Exact, SymbolMatch::Prefix, SymbolMatch::Contains] {
+        for kind in [
+            Some(SymbolKind::Function),
+            Some(SymbolKind::Method),
+            Some(SymbolKind::Class),
+            None,
+        ] {
+            if let Ok((v, _)) = idx.search_symbol_paged(q, kind, mode, 1, 0).await {
+                if let Some(s) = v.into_iter().next() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub async fn boot(State(state): State<AppState>) -> impl IntoResponse {

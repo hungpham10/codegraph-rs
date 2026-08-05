@@ -125,10 +125,25 @@ pub fn run_spec(spec: &'static LangSpec, path: &str, language: &str, source: &st
         .map(|s| ((s.name.clone(), s.line), s.id))
         .collect();
 
+    // class_index: (name, line) → id — cho chain tối thiểu của class-like node.
+    let class_index: HashMap<(String, u32), u64> = symbols
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.kind,
+                SymbolKind::Class
+                    | SymbolKind::Interface
+                    | SymbolKind::Enum
+                    | SymbolKind::Module
+            )
+        })
+        .map(|s| ((s.name.clone(), s.line), s.id))
+        .collect();
+
     // ── Pass 2: chains ──
     let mut chains: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut calls: Vec<CallRecord> = Vec::new();
-    collect_chains(&root, src, spec, &func_index, &mut chains, &mut calls);
+    collect_chains(&root, src, spec, &func_index, &class_index, &mut chains, &mut calls);
 
     Ok(ParseResult {
         path: path.to_string(),
@@ -405,6 +420,7 @@ fn collect_chains(
     src: &[u8],
     spec: &'static LangSpec,
     func_index: &HashMap<(String, u32), u64>,
+    class_index: &HashMap<(String, u32), u64>,
     chains: &mut HashMap<u64, Vec<u64>>,
     calls: &mut Vec<CallRecord>,
 ) {
@@ -414,9 +430,16 @@ fn collect_chains(
             chains.insert(id, chain);
             calls.append(&mut cs);
         }
+    } else if spec.class_kinds.contains(&root.kind()) {
+        // Class không có chain (chỉ có edge function→class từ phía caller).
+        // Build chain tối thiểu `[class_id]` để `flow`/`search_flow` không bị
+        // "chain not found" — methods của class vẫn có chain riêng của chúng.
+        if let Some(id) = class_id_of(root, src, class_index) {
+            chains.entry(id).or_insert_with(|| vec![id]);
+        }
     }
     for ch in named_children(root) {
-        collect_chains(&ch, src, spec, func_index, chains, calls);
+        collect_chains(&ch, src, spec, func_index, class_index, chains, calls);
     }
 }
 
@@ -432,6 +455,19 @@ fn func_id_of(
     let name = text(&name_node, src)?;
     let line = name_node.start_position().row as u32 + 1;
     func_index.get(&(name, line)).copied()
+}
+
+fn class_id_of(
+    node: &Node,
+    src: &[u8],
+    class_index: &HashMap<(String, u32), u64>,
+) -> Option<u64> {
+    let name_node = node
+        .child_by_field_name("name")
+        .or_else(|| first_identifier(node))?;
+    let name = text(&name_node, src)?;
+    let line = name_node.start_position().row as u32 + 1;
+    class_index.get(&(name, line)).copied()
 }
 
 /// Build chain của một function: `[func_id, marker/call, ...]`.
@@ -562,6 +598,10 @@ fn walk_chain(
         }
         for case in switch_cases(node, ctx.spec) {
             chain_push(ctx, MARKER_SWITCH_CASE);
+            // String-literal case label (`case 'optimize_text':`) — dispatch key
+            // không phải identifier call; emit call-name ảo để search_by_call
+            // tìm được function chứa switch.
+            emit_case_label_call(ctx, &case, in_loop, condition.clone());
             walk_block(ctx, &case, depth + 1, in_loop, condition.clone());
             chain_push(ctx, MARKER_SWITCH_END);
         }
@@ -776,6 +816,70 @@ fn switch_cases<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Vec<Node<'a>> {
         }
     }
     out
+}
+
+/// Case label là string literal (`case 'optimize_text':`) — dispatch key theo
+/// chuỗi, không phải call thật. Emit placeholder `0` + CallRecord với
+/// `call_name = literal` (bỏ quote) để `search_by_call` index được. Không có
+/// symbol tương ứng trong repo → không resolve được → giữ unresolved call.
+fn emit_case_label_call(
+    ctx: &mut ChainCtx,
+    case: &Node,
+    in_loop: u32,
+    condition: Option<String>,
+) {
+    // Field `value` là expression của case (`case X:` → X). Fallback: named child
+    // đầu tiên (một số grammar không đặt field).
+    let value = case
+        .child_by_field_name("value")
+        .or_else(|| named_children(case).into_iter().next());
+    let Some(value) = value else { return };
+    if !is_string_literal_kind(value.kind()) {
+        return;
+    }
+    let Some(lit) = text(&value, ctx.src) else { return };
+    let Some(name) = string_literal_value(&lit) else { return };
+    if name.is_empty() {
+        return;
+    }
+    let position = ctx.chain.len();
+    ctx.chain.push(0);
+    let (effect, effect_desc) = classify_effect(&name);
+    ctx.calls.push(CallRecord {
+        caller_id: ctx.func_id,
+        call_name: name,
+        position,
+        arg_exprs: Vec::new(),
+        line: value.start_position().row as u32 + 1,
+        condition,
+        is_loop_body: in_loop > 0,
+        effect,
+        effect_desc: effect_desc.map(|s| s.to_string()),
+        target_class: None,
+        target_method: None,
+    });
+}
+
+/// Node kind của một string literal — chấp nhận các tên theo từng grammar
+/// (TS `string`, Java `string_literal`, Go `interpreted_string_literal`...).
+fn is_string_literal_kind(kind: &str) -> bool {
+    kind.contains("string")
+        || matches!(
+            kind,
+            "template_string" | "template_literal" | "char_literal" | "quoted_string"
+        )
+}
+
+/// Rút giá trị chuỗi từ source literal: `'opt'`/`"opt"`/`` `opt` `` → `opt`.
+fn string_literal_value(lit: &str) -> Option<String> {
+    let l = lit.trim();
+    let b = l.as_bytes();
+    if b.len() < 2 {
+        return None;
+    }
+    let (open, close) = (b[0] as char, b[b.len() - 1] as char);
+    let matched = matches!((open, close), ('\'', '\'') | ('"', '"') | ('`', '`'));
+    matched.then(|| l[1..l.len() - 1].to_string())
 }
 
 /// Emit placeholder `0` + CallRecord cho một call site.

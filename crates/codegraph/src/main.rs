@@ -8,9 +8,6 @@ use std::sync::Arc;
 
 mod watcher;
 
-pub(crate) const CODEGRAPH_DIR: &str = ".codegraph";
-const DB_FILE: &str = "db.sqlite";
-
 #[derive(Parser, Debug)]
 #[command(
     name = "codegraph",
@@ -223,7 +220,7 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
 }
 
 fn db_path(root: &Utf8Path) -> Utf8PathBuf {
-    root.join(CODEGRAPH_DIR).join(DB_FILE)
+    codegraph_extract::project_db_path(root)
 }
 
 fn ensure_initialized(root: &Utf8Path) -> Result<()> {
@@ -288,14 +285,7 @@ fn block_on_index(root: &Utf8Path, db_path: &Utf8Path, progress: bool) -> Result
 }
 
 fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
-    let dir = root.join(CODEGRAPH_DIR);
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(".gitignore"), "*\n")?;
-    std::fs::write(dir.join("version"), env!("CARGO_PKG_VERSION"))?;
-    let config_path = dir.join("config.toml");
-    if !config_path.exists() {
-        std::fs::write(&config_path, codegraph_extract::DEFAULT_CONFIG_TOML)?;
-    }
+    let dir = codegraph_extract::init_project(root)?;
     eprintln!("initialized {}", dir);
 
     if do_index {
@@ -402,7 +392,7 @@ fn cmd_agents(root: &Utf8Path) -> Result<()> {
 }
 
 fn cmd_uninit(root: &Utf8Path) -> Result<()> {
-    let dir = root.join(CODEGRAPH_DIR);
+    let dir = codegraph_extract::project_dir(root);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
         eprintln!("removed {}", dir);
@@ -522,7 +512,7 @@ fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
         .build()?;
     rt.block_on(async {
         watcher::spawn(root.to_path_buf(), db_path.clone());
-        let mcp_server = McpServer::new(Some(db_path.into_std_path_buf())).await?;
+        let mcp_server = McpServer::new(root.to_path_buf(), Some(db_path.into_std_path_buf())).await?;
         mcp_server.run_stdio().await
     })?;
     Ok(())

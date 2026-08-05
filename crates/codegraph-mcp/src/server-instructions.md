@@ -33,6 +33,8 @@ file-reading sub-task repeats work codegraph already did.
 | "Show me this symbol by id / exact name." | `codegraph_symbol` |
 | "What's in directory X?" | `codegraph_files` |
 | "Is the index ready / what's its size?" | `codegraph_status` |
+| "Set up / (re)build the index" | `codegraph_init` (idempotent; index=true by default) |
+| "Re-index the workspace" | `codegraph_index` |
 
 ## Disambiguating duplicate names
 

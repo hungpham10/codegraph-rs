@@ -25,6 +25,16 @@
     <div id="search-bar">
       <span class="search-icon">⌕</span>
       <input id="search-input" type="search" placeholder="Search symbols…" autocomplete="off" />
+      <select id="search-kind" title="Filter by symbol kind">
+        <option value="">All</option>
+        <option value="function">Function</option>
+        <option value="method">Method</option>
+        <option value="class">Class</option>
+      </select>
+      <label class="exact-wrap" title="Match exact name">
+        <input id="search-exact" type="checkbox" />
+        <span>Exact</span>
+      </label>
     </div>
 
     <div id="controls">

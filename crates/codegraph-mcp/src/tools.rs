@@ -1,6 +1,9 @@
+use camino::Utf8Path;
 use codegraph_api::GraphApi;
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
+use codegraph_extract::{init_project, project_db_path, project_dir, ExtractStats, Orchestrator};
+use codegraph_graph::GraphIndex;
 use serde_json::{json, Value};
 
 pub fn tool_definitions() -> Vec<Value> {
@@ -84,6 +87,19 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "codegraph_status",
             "Index health: symbol / chain / edge / file counts.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        // ── Admin tools (init / index) — thao tác trên workspace root của server ──
+        tool(
+            "codegraph_init",
+            "Initialize the workspace for CodeGraph (idempotent): creates .codegraph/ with .gitignore, version, and config.toml. Pass index=false to skip the full re-index that runs by default.",
+            json!({ "type": "object", "properties": {
+                "index": { "type": "boolean", "default": true }
+            } }),
+        ),
+        tool(
+            "codegraph_index",
+            "Full re-index of the workspace into .codegraph/db.sqlite. Requires the workspace to be initialized (run codegraph_init first).",
             json!({ "type": "object", "properties": {} }),
         ),
         // ── Enhanced symbol search (semgraph_search_symbol) ──
@@ -529,4 +545,63 @@ fn arg_u64(v: &Value, k: &str) -> Result<u64> {
     v.get(k)
         .and_then(|x| x.as_u64())
         .ok_or_else(|| Error::Invalid(format!("missing int arg: {k}")))
+}
+
+// ── Admin tools (codegraph_init / codegraph_index) ──
+// Cần workspace root (không qua GraphApi) — server lưu `root` và gọi hàm này.
+
+pub async fn dispatch_admin(root: &Utf8Path, name: &str, args: Value) -> Result<String> {
+    match name {
+        "codegraph_init" => {
+            let dir = init_project(root)?;
+            let do_index = args.get("index").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut out = json!({ "initialized": dir.as_str() });
+            if do_index {
+                match run_index(root).await {
+                    Ok(stats) => {
+                        out["indexed"] = stats_json(&stats);
+                    }
+                    Err(e) => {
+                        return Err(Error::Invalid(format!(
+                            "initialized {}, but indexing failed: {e}",
+                            dir
+                        )));
+                    }
+                }
+            }
+            serde_json::to_string_pretty(&out).map_err(|e| Error::Invalid(e.to_string()))
+        }
+        "codegraph_index" => {
+            if !project_dir(root).exists() {
+                return Err(Error::Invalid(
+                    "workspace not initialized: missing .codegraph/. Run codegraph_init first."
+                        .into(),
+                ));
+            }
+            let stats = run_index(root).await?;
+            serde_json::to_string_pretty(&stats_json(&stats))
+                .map_err(|e| Error::Invalid(e.to_string()))
+        }
+        _ => Err(Error::Invalid(format!("unknown admin tool: {name}"))),
+    }
+}
+
+/// Full re-index: mở sqlite → `Orchestrator::index_all` (ingest = full re-index).
+/// Không progress bar — MCP transport là stdout, tránh nhiễu JSON-RPC.
+async fn run_index(root: &Utf8Path) -> Result<ExtractStats> {
+    let db_str = project_db_path(root).as_str().to_string();
+    let mut idx = GraphIndex::open(&db_str).await?;
+    Orchestrator::with_registry()
+        .index_all(root, &mut idx, None)
+        .await
+}
+
+fn stats_json(s: &ExtractStats) -> Value {
+    json!({
+        "files": s.files,
+        "symbols": s.symbols,
+        "chains": s.chains,
+        "calls": s.calls,
+        "skipped": s.skipped,
+    })
 }

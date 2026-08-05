@@ -9,10 +9,12 @@
 pub mod config;
 pub mod languages;
 mod orchestrator;
+mod project;
 mod walker;
 
 pub use orchestrator::{ExtractStats, Orchestrator};
 pub use config::{ExtractConfig, HeaderLanguage, DEFAULT_CONFIG_TOML};
+pub use project::{init_project, project_db_path, project_dir, CODEGRAPH_DIR};
 
 use codegraph_core::{Error, Result};
 use codegraph_graph::ParseResult;

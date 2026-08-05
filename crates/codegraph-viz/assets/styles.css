@@ -124,6 +124,17 @@ header {
   outline: none;
 }
 #search-input::placeholder { color: #5c6578; }
+.exact-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--border);
+}
+#search-exact { accent-color: var(--accent2); }
 
 #controls {
   display: flex;

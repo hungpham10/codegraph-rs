@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 codegraph-api    = { path = "../codegraph-api" }
 codegraph-core    = { path = "../codegraph-core" }
+codegraph-extract = { path = "../codegraph-extract" }
 codegraph-graph   = { path = "../codegraph-graph", features = ["sqlite"] }
 codegraph-context = { path = "../codegraph-context" }
 serde = { workspace = true }

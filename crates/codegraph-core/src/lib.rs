@@ -3,16 +3,10 @@
 //! Model cũ (`Node`/`Edge`/`NodeKind`/`EdgeKind`) đang dần bị thay bằng model
 //! semgraph (`semgraph` module) — wire breaking đã chốt ở plan.
 
-pub mod drafts;
-pub mod error;
-pub mod kinds;
-pub mod model;
-pub mod semgraph;
+mod semgraph;
+mod error;
 
-pub use drafts::{DbStats, EdgeDraft, FileRow, NodeDraft};
 pub use error::{Error, Result};
-pub use kinds::{EdgeKind, InvalidKind, NodeKind};
-pub use model::{Edge, Node, NodeId};
 pub use semgraph::{
     is_marker, marker_id, marker_name, Annotation, CallRecord, CallSite, CallSiteResult,
     ClassInfo, DbStats as SemgraphStats, Dependency, DependenciesReport, EdgeMeta, EffectType,

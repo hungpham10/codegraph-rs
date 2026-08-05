@@ -33,6 +33,7 @@ pub async fn serve(db_path: PathBuf, config: VizConfig) -> anyhow::Result<()> {
         .route("/api/files", get(api::files))
         .route("/api/callers/{id}", get(api::callers))
         .route("/api/callees/{id}", get(api::callees))
+        .route("/api/neighbors/{id}", get(api::neighbors))
         .route("/api/boot", get(api::boot))
         .fallback(static_handler)
         .layer(CompressionLayer::new())

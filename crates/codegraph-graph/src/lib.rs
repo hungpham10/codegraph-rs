@@ -55,6 +55,18 @@ mod shared;
 
 pub use shared::SharedGraphIndex;
 
+/// Báo tiến độ cho `GraphIndex::ingest_with_progress`.
+///
+/// Graph crate không phụ thuộc indicatif — caller (CLI orchestrator / MCP) dựng
+/// một impl translate các event này sang `ProgressBar` của nó. `total = 0` (chỉ
+/// `phase`, không advance) nghĩa là phase không biết trước số đơn vị.
+pub trait IngestProgress: Send + Sync {
+    /// Bắt đầu một phase mới — `total` là số đơn vị sẽ `advance` (0 = không biết).
+    fn phase(&self, name: &'static str, total: usize);
+    /// Tiến thêm `n` đơn vị trong phase hiện tại.
+    fn advance(&self, n: usize);
+}
+
 /// Số shard mặc định cho chain engine (`element % sharding`).
 const CHAIN_SHARDING: usize = 64;
 
@@ -253,8 +265,8 @@ impl GraphIndex {
         self.rebuild_edges(&recs);
 
         // Engines.
-        self.rebuild_chain_engine().await?;
-        self.rebuild_name_engine().await?;
+        self.rebuild_chain_engine(None).await?;
+        self.rebuild_name_engine(None).await?;
         Ok(())
     }
 
@@ -318,10 +330,13 @@ impl GraphIndex {
     }
 
     /// Rebuild chain engine từ `chains_map` (clear + insert tuần tự).
-    async fn rebuild_chain_engine(&mut self) -> Result<()> {
+    async fn rebuild_chain_engine(&mut self, progress: Option<&dyn IngestProgress>) -> Result<()> {
         self.chains.clear().await.map_err(serr_search)?;
         let mut funcs: Vec<u64> = self.chains_map.keys().copied().collect();
         funcs.sort_unstable();
+        if let Some(p) = progress {
+            p.phase("rebuild call-chain engine", funcs.len());
+        }
         for func_id in funcs {
             let chain = &self.chains_map[&func_id];
             // Mọi element meta = None → không ghi node stream (record = func id
@@ -331,16 +346,22 @@ impl GraphIndex {
                 .insert_chain(func_id as usize, chain, &metas)
                 .await
                 .map_err(serr_search)?;
+            if let Some(p) = progress {
+                p.advance(1);
+            }
         }
         Ok(())
     }
 
     /// Rebuild name engine từ `name_index` (clear + insert mỗi tên distinct).
-    async fn rebuild_name_engine(&mut self) -> Result<()> {
+    async fn rebuild_name_engine(&mut self, progress: Option<&dyn IngestProgress>) -> Result<()> {
         self.names.clear().await.map_err(serr_search)?;
         self.name_records.clear();
         let mut distinct: Vec<&String> = self.name_index.keys().collect();
         distinct.sort();
+        if let Some(p) = progress {
+            p.phase("rebuild name-search engine", distinct.len());
+        }
         let mut record = 0usize;
         for name in distinct {
             record += 1;
@@ -350,6 +371,9 @@ impl GraphIndex {
                 .await
                 .map_err(serr_search)?;
             self.name_records.push(name.clone());
+            if let Some(p) = progress {
+                p.advance(1);
+            }
         }
         Ok(())
     }
@@ -358,8 +382,22 @@ impl GraphIndex {
 
     /// Ingest toàn bộ parse results — **full re-index**: xoá dữ liệu cũ, register
     /// symbol (id global) + remap, resolve placeholder 0, build edges + call-name
-    /// index, persist + bump version.
+    /// index, persist + bump version. Không báo tiến độ — dùng
+    /// [`ingest_with_progress`](Self::ingest_with_progress) nếu cần.
     pub async fn ingest(&mut self, results: &[ParseResult]) -> Result<()> {
+        self.ingest_with_progress(results, None).await
+    }
+
+    /// Như [`ingest`](Self::ingest), nhưng báo tiến độ qua `IngestProgress`
+    /// (phase + số đơn vị). Graph crate không phụ thuộc indicatif — caller nối
+    /// các event này vào ProgressBar của nó.
+    pub async fn ingest_with_progress(
+        &mut self,
+        results: &[ParseResult],
+        progress: Option<Arc<dyn IngestProgress>>,
+    ) -> Result<()> {
+        let p = progress.as_deref();
+
         // ── Reset ──
         self.storage
             .write()
@@ -380,6 +418,10 @@ impl GraphIndex {
         self.next_id = SYMBOL_BASE;
 
         // ── Phase 1: register + remap ──
+        let total_symbols: usize = results.iter().map(|r| r.symbols.len()).sum();
+        if let Some(p) = p {
+            p.phase("register symbols", total_symbols);
+        }
         let mut all_calls: Vec<CallRecord> = Vec::new();
         for result in results {
             let mut id_map: HashMap<u64, u64> = HashMap::new();
@@ -414,6 +456,9 @@ impl GraphIndex {
                 }
                 all_calls.push(c2);
             }
+            if let Some(p) = p {
+                p.advance(result.symbols.len());
+            }
         }
         // Scope index chỉ rebuild sau khi toàn bộ scope id đã là global.
         self.rebuild_scope_index();
@@ -422,9 +467,12 @@ impl GraphIndex {
         self.resolve_calls(&all_calls);
 
         // ── Phase 3: build edges + call records + call-name index ──
-        self.build_edges_from_calls(&all_calls).await?;
+        self.build_edges_from_calls(&all_calls, p).await?;
 
         // ── Phase 4: files ──
+        if let Some(p) = p {
+            p.phase("save files", results.len());
+        }
         for result in results {
             let f = FileInfo {
                 path: result.path.clone(),
@@ -439,32 +487,36 @@ impl GraphIndex {
                 .await
                 .map_err(serr)?;
             self.files.push(f);
+            if let Some(p) = p {
+                p.advance(1);
+            }
         }
 
         // ── Phase 5: engines + version bump ──
-        self.rebuild_chain_engine().await?;
-        self.rebuild_name_engine().await?;
+        self.rebuild_chain_engine(p).await?;
+        self.rebuild_name_engine(p).await?;
         self.version += 1;
-        self.storage
-            .write()
-            .await
-            .set_version(self.version)
-            .await
-            .map_err(serr)?;
+        {
+            let mut st = self.storage.write().await;
+            st.save_next_id(self.next_id).await.map_err(serr)?;
+            st.set_version(self.version).await.map_err(serr)?;
+        }
         Ok(())
     }
 
     /// Gán id global cho symbol, lưu storage + index tên. Không đụng scope index
     /// — scope id còn local, `rebuild_scope_index` chạy sau khi remap.
+    /// `next_id` không save per-symbol (chậm) — `ingest` persist 1 lần ở cuối.
     async fn register(&mut self, mut sym: Symbol) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
         sym.id = id;
-        {
-            let mut st = self.storage.write().await;
-            st.save_symbol(&sym).await.map_err(serr)?;
-            st.save_next_id(self.next_id).await.map_err(serr)?;
-        }
+        self.storage
+            .write()
+            .await
+            .save_symbol(&sym)
+            .await
+            .map_err(serr)?;
         if !sym.name.is_empty() {
             self.name_index
                 .entry(sym.name.to_lowercase())
@@ -538,29 +590,43 @@ impl GraphIndex {
     /// Ưu tiên: structural hint (TargetClass/TargetMethod — VD Java class
     /// literal) → exact name → short name (phần sau dấu chấm) → best-candidate
     /// (@Override +10 / has-chain +5 / same-file +3).
-    fn resolve_call_placeholder(&self, call: &CallRecord, caller_id: u64) -> Option<u64> {
-        if let (Some(tc), Some(tm)) = (&call.target_class, &call.target_method)
-            && let Some(id) = self.lookup_method_of_class(tc, tm)
-        {
-            return Some(id);
-        }
-
-        let mut candidates: Vec<u64> = self
-            .name_index
-            .get(&call.call_name.to_lowercase())
-            .cloned()
-            .unwrap_or_default();
-        if candidates.is_empty() {
-            let short = call.call_name.rsplit('.').next().unwrap_or("").to_lowercase();
-            if !short.is_empty() {
-                candidates = self.name_index.get(&short).cloned().unwrap_or_default();
+        fn resolve_call_placeholder(&self, call: &CallRecord, caller_id: u64) -> Option<u64> {
+            // 1. Try class/method target hints (used mainly for Java).
+            if let (Some(tc), Some(tm)) = (&call.target_class, &call.target_method)
+                && let Some(id) = self.lookup_method_of_class(tc, tm)
+            {
+                return Some(id);
             }
+
+            // 2. Direct name lookup (full qualified name).
+            let mut candidates: Vec<u64> = self
+                .name_index
+                .get(&call.call_name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+
+            // 3. Short name fallback (after last dot).
+            if candidates.is_empty() {
+                let short = call.call_name.rsplit('.').next().unwrap_or("").to_lowercase();
+                if !short.is_empty() {
+                    candidates = self.name_index.get(&short).cloned().unwrap_or_default();
+                }
+            }
+
+            // 4. Go/Import alias handling: try to resolve using the caller's variable type
+            //    information. `alias_qualified_name` produces a fully qualified name like
+            //    "myservice.validate" based on a variable's type_name. If that name
+            //    exists in the index, use it as an additional candidate set.
+            if candidates.is_empty()
+                && let Some(qualified) = self.alias_qualified_name(caller_id, &call.call_name) {
+                    candidates = self.name_index.get(&qualified).cloned().unwrap_or_default();
+                }
+
+            if candidates.is_empty() {
+                return None;
+            }
+            Some(self.pick_best_candidate(&candidates, caller_id))
         }
-        if candidates.is_empty() {
-            return None;
-        }
-        Some(self.pick_best_candidate(&candidates, caller_id))
-    }
 
     /// Tìm method của class theo tên (scope_id == class id).
     fn lookup_method_of_class(&self, class_name: &str, method_name: &str) -> Option<u64> {
@@ -617,7 +683,11 @@ impl GraphIndex {
     /// Edge model: mọi symbol element trong chain là một callee (thống nhất với
     /// `rebuild_edges` khi reopen) — call record chỉ bổ sung metadata theo
     /// position. Chain dựng thẳng (không qua placeholder) vẫn sinh edge đủ.
-    async fn build_edges_from_calls(&mut self, calls: &[CallRecord]) -> Result<()> {
+    async fn build_edges_from_calls(
+        &mut self,
+        calls: &[CallRecord],
+        progress: Option<&dyn IngestProgress>,
+    ) -> Result<()> {
         let mut recs_by_caller: HashMap<u64, Vec<CallRecord>> = HashMap::new();
         for c in calls {
             let caller = c.caller_id;
@@ -678,6 +748,11 @@ impl GraphIndex {
         }
 
         // Persist call records (gom theo caller).
+        if let Some(p) = progress
+            && !recs_by_caller.is_empty()
+        {
+            p.phase("save call records", recs_by_caller.len());
+        }
         for (caller, recs) in recs_by_caller {
             let bytes = serde_json::to_vec(&recs).map_err(|e| Error::Search(e.to_string()))?;
             self.storage
@@ -686,8 +761,16 @@ impl GraphIndex {
                 .set_call_records(caller, &bytes)
                 .await
                 .map_err(serr)?;
+            if let Some(p) = progress {
+                p.advance(1);
+            }
         }
         // Persist call-name index.
+        if let Some(p) = progress
+            && !self.call_names.is_empty()
+        {
+            p.phase("save call-name index", self.call_names.len());
+        }
         for (name, sites) in &self.call_names {
             let bytes = serde_json::to_vec(sites).map_err(|e| Error::Search(e.to_string()))?;
             self.storage
@@ -696,6 +779,9 @@ impl GraphIndex {
                 .set_call_name_index(name, &bytes)
                 .await
                 .map_err(serr)?;
+            if let Some(p) = progress {
+                p.advance(1);
+            }
         }
         Ok(())
     }

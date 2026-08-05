@@ -19,26 +19,37 @@ pub const SYMBOL_BASE: u64 = 100;
 
 /// Marker: bắt đầu loop body.
 pub const MARKER_LOOP: u64 = 1;
+
 /// Marker: recursive call (gọi lại chính function đang xét) — dự trữ.
 pub const MARKER_REC_CALL: u64 = 2;
+
 /// Marker: nhánh khi điều kiện đúng.
 pub const MARKER_IF_TRUE: u64 = 3;
+
 /// Marker: nhánh khi điều kiện sai.
 pub const MARKER_IF_FALSE: u64 = 4;
+
 /// Marker: kết thúc một nhánh if/else.
 pub const MARKER_BRANCH_END: u64 = 5;
+
 /// Marker: return statement.
 pub const MARKER_RETURN: u64 = 6;
+
 /// Marker: loop back edge (quay lại đầu loop).
 pub const MARKER_LOOP_BACK: u64 = 7;
+
 /// Marker: case trong switch.
 pub const MARKER_SWITCH_CASE: u64 = 8;
+
 /// Marker: kết thúc switch.
 pub const MARKER_SWITCH_END: u64 = 9;
+
 /// Marker: break statement.
 pub const MARKER_BREAK: u64 = 10;
+
 /// Marker: continue statement.
 pub const MARKER_CONTINUE: u64 = 11;
+
 /// Marker: throw/raise exception.
 pub const MARKER_THROW: u64 = 12;
 
@@ -412,6 +423,7 @@ pub struct MemberInfo {
     pub name: String,
     pub kind: SymbolKind,
     pub line: u32,
+
     /// Dòng khai báo đầu tiên (VD `getOrders(userId int) (Order, error)`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,

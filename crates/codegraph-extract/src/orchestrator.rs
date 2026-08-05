@@ -7,7 +7,7 @@ use crate::config::ExtractConfig;
 use crate::{walker, LangParser};
 use camino::Utf8Path;
 use codegraph_core::Result;
-use codegraph_graph::{GraphIndex, ParseResult};
+use codegraph_graph::{GraphIndex, IngestProgress, ParseResult};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -86,12 +86,36 @@ impl Orchestrator {
             }
         }
 
-        index.ingest(&parsed).await?;
+        // Đưa ProgressBar vào ingest (register → edges → files → engines) — phase
+        // index chiếm phần lớn thời gian, không thể để im trong lúc `GraphIndex`
+        // ghi sqlite.
+        let ingest_progress: Option<Arc<dyn IngestProgress>> = progress
+            .as_ref()
+            .map(|bar| Arc::new(IngestBar(bar.clone())) as Arc<dyn IngestProgress>);
+        index.ingest_with_progress(&parsed, ingest_progress).await?;
         // Finish the progress bar on success.
         if let Some(bar) = progress {
             bar.finish_with_message("Indexing complete");
         }
         Ok(stats_of(&parsed, skipped))
+    }
+}
+
+/// Nối `IngestProgress` (graph crate) vào `indicatif::ProgressBar` của CLI:
+/// `phase` reset bar về 0 + set length theo số đơn vị phase (không hiện chữ —
+/// template chỉ `pos/len/percent`), `advance` tăng pos.
+struct IngestBar(Arc<ProgressBar>);
+
+impl IngestProgress for IngestBar {
+    fn phase(&self, _name: &'static str, total: usize) {
+        if total > 0 {
+            self.0.set_length(total as u64);
+            self.0.set_position(0);
+        }
+    }
+
+    fn advance(&self, n: usize) {
+        self.0.inc(n as u64);
     }
 }
 

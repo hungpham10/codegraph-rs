@@ -42,3 +42,5 @@ bloom-search = []
 
 [dev-dependencies]
 tempfile = "3"
+codegraph-extract = { path = "../codegraph-extract" }
+codegraph-core = { path = "../codegraph-core" }
