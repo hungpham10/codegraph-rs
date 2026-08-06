@@ -114,6 +114,7 @@ struct Lower<'a> {
 }
 
 impl<'a> Lower<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mut fb: FunctionBuilder<'a>,
         callee_refs: &'a HashMap<SymbolId, FuncRef>,
