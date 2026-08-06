@@ -4,7 +4,7 @@
 use std::io::Write;
 
 use camino::Utf8PathBuf;
-use codegraph_bench::{orchestrator, sample_query_names, BenchOptions};
+use codegraph_bench::{BenchOptions, orchestrator, sample_query_names};
 
 /// Dựng fixture repo temp với vài ngôn ngữ, trả `(dir, root)`.
 fn fixture() -> (tempfile::TempDir, Utf8PathBuf) {
@@ -38,11 +38,18 @@ fn pipeline_runs_all_three_phases() {
     let (_dir, root) = fixture();
     let opts = BenchOptions::default();
     let orch = orchestrator(&opts);
-    let repo = codegraph_bench::Repo { name: "fixture".into(), root };
+    let repo = codegraph_bench::Repo {
+        name: "fixture".into(),
+        root,
+    };
 
     let times = codegraph_bench::measure_repo(&orch, &opts, &repo).unwrap();
 
-    assert!(times.files >= 3, "phải parse được 3 file, thực tế {}", times.files);
+    assert!(
+        times.files >= 3,
+        "phải parse được 3 file, thực tế {}",
+        times.files
+    );
     assert!(times.symbols > 0);
     assert!(times.extract_ms >= 0.0);
     assert!(times.index_ms >= 0.0);

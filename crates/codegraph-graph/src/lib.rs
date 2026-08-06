@@ -163,7 +163,9 @@ impl GraphIndex {
 
         #[allow(unreachable_code)]
         {
-            Err(Error::Db("Phải bật ít nhất feature 'sqlite' hoặc 'redis'".into()))
+            Err(Error::Db(
+                "Phải bật ít nhất feature 'sqlite' hoặc 'redis'".into(),
+            ))
         }
     }
 

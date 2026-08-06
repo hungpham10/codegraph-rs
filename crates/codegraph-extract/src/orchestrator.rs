@@ -195,10 +195,16 @@ mod tests {
         assert_eq!(parsed.len(), 2, "phải parse được cả lib.rs + main.go");
         assert_eq!(stats.files, 2);
         assert_eq!(stats.skipped, 0);
-        assert!(parsed.iter().all(|p| !p.symbols.is_empty()), "mỗi file phải có symbol");
+        assert!(
+            parsed.iter().all(|p| !p.symbols.is_empty()),
+            "mỗi file phải có symbol"
+        );
         assert!(stats.symbols > 0, "tổng symbol > 0");
         // stats khớp với chính parsed (không ingest thêm gì).
-        assert_eq!(stats.symbols, parsed.iter().map(|p| p.symbols.len() as u64).sum::<u64>());
+        assert_eq!(
+            stats.symbols,
+            parsed.iter().map(|p| p.symbols.len() as u64).sum::<u64>()
+        );
     }
 
     /// File không đọc được / quá lớn / không UTF-8 → bị đếm vào `skipped`.

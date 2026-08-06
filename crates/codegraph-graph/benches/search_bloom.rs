@@ -13,7 +13,7 @@
 //!   (đây là nơi bloom prune nhánh rỗng và phát huy nhất).
 
 use codegraph_graph::Search;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 const N: usize = 4000;
 
@@ -40,7 +40,9 @@ const HITS: &[&[u8]] = &[b"alpha", b"beta_000", b"lph", b"000042", b"elta"];
 const MISSES: &[&[u8]] = &[b"alpha_999999", b"betazzz", b"gamma_q", b"qwerty", b"zzzz"];
 
 fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread().build().unwrap()
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
 }
 
 fn build_index(n: usize) -> Search<u8> {

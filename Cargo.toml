@@ -7,7 +7,6 @@ members = [
     "crates/codegraph-context",
     "crates/codegraph-api",
     "crates/codegraph-mcp",
-    "crates/codegraph-viz",
     "crates/codegraph-bench",
     "crates/codegraph-installer",
     "crates/codegraph",

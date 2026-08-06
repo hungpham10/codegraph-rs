@@ -274,13 +274,15 @@ impl Storage for SqliteStorage {
     #[cfg(feature = "bloom-search")]
     async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        sqlx::query("INSERT INTO rt_node_blooms (id, bloom) VALUES (?1, ?2) \
-                     ON CONFLICT(id) DO UPDATE SET bloom = excluded.bloom")
-            .bind(id as i64)
-            .bind(bloom)
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO rt_node_blooms (id, bloom) VALUES (?1, ?2) \
+                     ON CONFLICT(id) DO UPDATE SET bloom = excluded.bloom",
+        )
+        .bind(id as i64)
+        .bind(bloom)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 

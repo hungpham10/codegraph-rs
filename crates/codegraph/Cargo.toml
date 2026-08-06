@@ -17,7 +17,6 @@ codegraph-graph     = { path = "../codegraph-graph", features = ["sqlite"] }
 codegraph-context   = { path = "../codegraph-context" }
 codegraph-mcp       = { path = "../codegraph-mcp" }
 codegraph-installer = { path = "../codegraph-installer" }
-codegraph-viz       = { path = "../codegraph-viz", optional = true }
 dirs = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
@@ -33,5 +32,4 @@ console = "0.15"
 indicatif = "0.18.6"
 
 [features]
-default = ["visualize"]
-visualize = ["dep:codegraph-viz"]
+default = []

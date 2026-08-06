@@ -10,7 +10,6 @@
 //!
 //! Chạy:
 //! - CI:  `cargo codspeed build -p codegraph-bench --features codspeed`
-//!        `cargo codspeed run`
 //! - Local: `CODEGRAPH_BENCH_REPOS_LIST=repos.txt cargo bench -p codegraph-bench
 //!   --bench codspeed --features codspeed` — không có runner thì compat chạy
 //!   như Criterion thường (wall-time).
@@ -22,7 +21,7 @@ use criterion as crit;
 
 use camino::Utf8PathBuf;
 use codegraph_bench::{
-    extract, index, orchestrator, run_queries, sample_query_names, BenchOptions, Repo,
+    BenchOptions, Repo, extract, index, orchestrator, run_queries, sample_query_names,
 };
 
 fn push_repo(out: &mut Vec<Repo>, path: Utf8PathBuf) {
@@ -37,33 +36,19 @@ fn load_repos() -> Vec<Repo> {
     let mut out = Vec::new();
 
     // 1) Danh sách rõ ràng từ env (ưu tiên — CI dùng `CODEGRAPH_BENCH_REPOS_LIST`).
-    if let Ok(list_file) = std::env::var("CODEGRAPH_BENCH_REPOS_LIST") {
-        if let Ok(body) = std::fs::read_to_string(&list_file) {
-            for line in body.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                push_repo(&mut out, Utf8PathBuf::from(line));
+    if let Ok(list_file) = std::env::var("CODEGRAPH_BENCH_REPOS_LIST")
+        && let Ok(body) = std::fs::read_to_string(&list_file) 
+    {
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
             }
+            push_repo(&mut out, Utf8PathBuf::from(line));
         }
     }
 
-    // 2) Quét thư mục checkout do `fetch_repos.sh` tạo (chạy local).
-    if out.is_empty() {
-        if let Ok(entries) = std::fs::read_dir("benches/repos/checkout") {
-            let mut dirs: Vec<_> = entries
-                .flatten()
-                .filter_map(|e| Utf8PathBuf::from_path_buf(e.path()).ok())
-                .collect();
-            dirs.sort();
-            for d in dirs {
-                push_repo(&mut out, d);
-            }
-        }
-    }
-
-    // 3) Fallback cuối: tự bench source của workspace.
+    // 2) Fallback cuối: tự bench source của workspace.
     if out.is_empty() {
         push_repo(&mut out, Utf8PathBuf::from("crates"));
     }

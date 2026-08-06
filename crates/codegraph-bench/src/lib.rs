@@ -5,8 +5,8 @@
 //! `main.rs` lướt CLI (danh sách repo) + chạy Criterion; còn các hàm phase ở đây
 //! được integration test dùng mà không cần Criterion.
 
-use std::time::{Duration, Instant};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use codegraph_core::{Error, SymbolKind};

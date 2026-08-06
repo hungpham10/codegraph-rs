@@ -9,11 +9,14 @@ use std::time::Duration;
 use camino::Utf8PathBuf;
 use clap::Parser;
 use codegraph_bench::{
-    extract, index, orchestrator, run_queries, sample_query_names, BenchOptions, Repo, RepoTimes,
+    BenchOptions, Repo, RepoTimes, extract, index, orchestrator, run_queries, sample_query_names,
 };
 
 #[derive(Parser)]
-#[command(name = "codegraph-bench", about = "Benchmark codegraph-extract + codegraph-graph trên các repo thật")]
+#[command(
+    name = "codegraph-bench",
+    about = "Benchmark codegraph-extract + codegraph-graph trên các repo thật"
+)]
 struct Cli {
     /// Folder repo cần benchmark (nhiều được).
     #[arg(value_name = "REPO")]
@@ -82,7 +85,10 @@ fn main() -> anyhow::Result<()> {
 
     let opts = BenchOptions {
         langs: cli.langs.as_ref().map(|s| {
-            s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
         }),
         queries: cli.queries,
         with_flow: cli.flow,
@@ -95,7 +101,10 @@ fn main() -> anyhow::Result<()> {
         print!("{} ... ", r.name);
         std::io::Write::flush(&mut std::io::stdout())?;
         let t = codegraph_bench::measure_repo(&orch, &opts, r)?;
-        println!("extract {:7.1}ms  index {:7.1}ms  query {:6.1}ms", t.extract_ms, t.index_ms, t.query_ms);
+        println!(
+            "extract {:7.1}ms  index {:7.1}ms  query {:6.1}ms",
+            t.extract_ms, t.index_ms, t.query_ms
+        );
         rows.push((r.clone(), t));
     }
     render_table(&rows);
@@ -156,7 +165,15 @@ fn render_table(rows: &[(Repo, RepoTimes)]) {
         total_query += t.query_ms;
         println!(
             "{:<24} {:>8} {:>8} {:>8} {:>8} {:>10.1} {:>10.1} {:>10.1} {:>8}",
-            r.name, t.files, t.symbols, t.chains, t.calls, t.extract_ms, t.index_ms, t.query_ms, t.query_ops
+            r.name,
+            t.files,
+            t.symbols,
+            t.chains,
+            t.calls,
+            t.extract_ms,
+            t.index_ms,
+            t.query_ms,
+            t.query_ops
         );
     }
     println!(
@@ -177,7 +194,10 @@ fn render_json(rows: &[(Repo, RepoTimes)]) {
             total.extract_ms += t.extract_ms;
             total.index_ms += t.index_ms;
             total.query_ms += t.query_ms;
-            RepoJson { repo: r.name.clone(), times: t.clone() }
+            RepoJson {
+                repo: r.name.clone(),
+                times: t.clone(),
+            }
         })
         .collect();
     let out = serde_json::json!({ "repos": items, "total": total });
@@ -201,7 +221,7 @@ fn criterion_pass(repos: &[Repo], opts: &BenchOptions, cli: &Cli) {
         let name = repo.name.clone();
         // extract.
         {
-            let mut g = c.benchmark_group(&format!("{name}/extract"));
+            let mut g = c.benchmark_group(format!("{name}/extract"));
             let orch = &orch;
             let root = repo.root.clone();
             g.bench_function("walk+parse", |b| {
@@ -220,7 +240,7 @@ fn criterion_pass(repos: &[Repo], opts: &BenchOptions, cli: &Cli) {
         let names = sample_query_names(&parsed, opts.queries);
         // index.
         {
-            let mut g = c.benchmark_group(&format!("{name}/index"));
+            let mut g = c.benchmark_group(format!("{name}/index"));
             let parsed = &parsed;
             g.bench_function("ingest", |b| {
                 b.iter(|| {
@@ -230,7 +250,7 @@ fn criterion_pass(repos: &[Repo], opts: &BenchOptions, cli: &Cli) {
         }
         // query.
         {
-            let mut g = c.benchmark_group(&format!("{name}/query"));
+            let mut g = c.benchmark_group(format!("{name}/query"));
             let names = &names;
             let with_flow = opts.with_flow;
             if let Ok(idx) = index(&parsed) {

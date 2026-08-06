@@ -16,7 +16,7 @@ permissions:
 env:
   # Danh sách repo (1 path/dòng) sẽ được bench — do benches/fetch_repos.sh ghi ra
   # từ benches/repos/sources.txt. codegraph-bench đọc env này khi chạy.
-  CODEGRAPH_BENCH_REPOS_LIST: benches/repos/list.txt
+  CODEGRAPH_BENCH_REPOS_LIST: .github/benches/repos/list.txt
 
 jobs:
   # Performance benchmarks: extract → index → query trên danh sách repo thật
@@ -37,7 +37,7 @@ jobs:
       # Clone các repo pinned trong benches/repos/sources.txt về
       # benches/repos/checkout/ và ghi benches/repos/list.txt.
       - name: Fetch bench repos
-        run: bash benches/fetch_repos.sh
+        run: bash .github/benches/fetch_repos.sh
 
       - name: Build benchmark targets
         run: cargo codspeed build -p codegraph-bench --features codspeed
@@ -47,5 +47,5 @@ jobs:
       - name: Run benchmarks
         uses: CodSpeedHQ/action@v4
         with:
-          mode: benchmark
+          mode: simulation
           run: cargo codspeed run

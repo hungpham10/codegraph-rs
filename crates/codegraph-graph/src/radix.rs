@@ -420,6 +420,61 @@ impl<T: Element> Radix<T> {
         Err(Error::NotFound)
     }
 
+    /// Theo dõi `key` từ root → trả `Vec<usize>` node id dọc theo đường đi
+    /// (node đầu là root của shard). Chỉ dùng trong test để biết node con
+    /// trên đường đi khi muốn `search_dfs` bắt đầu từ một node giữa.
+    #[cfg(test)]
+    pub async fn follow_path(&self, key: &[T]) -> Result<Vec<usize>> {
+        if key.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut node_id = self
+            .storage
+            .read()
+            .await
+            .get_root(shard_of(key[0], self.sharding))
+            .await?;
+        if node_id == EMPTY {
+            return Ok(Vec::new());
+        }
+
+        let mut path = vec![node_id];
+        let mut pos = 0;
+
+        loop {
+            let (prefix_bytes, _) = self.storage.read().await.get_node(node_id).await?;
+            let node_prefix = Self::to_vec(&prefix_bytes);
+            let common = node_prefix
+                .iter()
+                .zip(key[pos..].iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+
+            pos += common;
+            if pos == key.len() || common < node_prefix.len() {
+                return Ok(path);
+            }
+
+            let next_elem = key[pos];
+            let children = self.storage.read().await.get_children(node_id).await?;
+            let mut found = false;
+            for &child in &children {
+                let (cp_bytes, _) = self.storage.read().await.get_node(child).await?;
+                let cp = Self::to_vec(&cp_bytes);
+                if !cp.is_empty() && cp[0] == next_elem {
+                    node_id = child;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Ok(path);
+            }
+            path.push(node_id);
+        }
+    }
+
     /// Tìm tất cả `(full_key, record)` có key bắt đầu bằng `prefix`.
     pub async fn search_prefix(&self, begin: usize, prefix: &[T]) -> Result<Vec<(Vec<T>, usize)>> {
         if prefix.is_empty() {
@@ -560,10 +615,7 @@ impl<T: Element> Radix<T> {
             self.storage
                 .read()
                 .await
-                .get_root(shard_of(
-                    pattern[0], 
-                    self.sharding,
-                ))
+                .get_root(shard_of(pattern[0], self.sharding))
                 .await?
         } else {
             begin
@@ -573,13 +625,7 @@ impl<T: Element> Radix<T> {
             return Ok(Vec::new());
         }
 
-        self.search_dfs_iter(
-                node_id, 
-                pattern, 
-                matcher, 
-                0, 
-                &mut records,
-            )
+        self.search_dfs_iter(node_id, pattern, matcher, 0, &mut records)
             .await?;
         Ok(records)
     }
