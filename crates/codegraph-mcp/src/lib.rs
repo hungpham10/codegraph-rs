@@ -18,15 +18,21 @@ pub const SERVER_NAME: &str = "codegraph";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct McpServer {
+    /// Workspace root — dùng cho admin tools (`codegraph_init` / `codegraph_index`).
+    root: camino::Utf8PathBuf,
     shared_index: Arc<SharedGraphIndex>,
     /// Telemetry cho `codegraph_query_usage_report`.
     usage: Arc<Mutex<usage::UsageStats>>,
 }
 
 impl McpServer {
-    pub async fn new(index_path: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
+    pub async fn new(
+        root: camino::Utf8PathBuf,
+        index_path: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<Self> {
         let shared_index = Arc::new(SharedGraphIndex::open(index_path).await?);
         Ok(Self {
+            root,
             shared_index,
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
         })
@@ -115,7 +121,23 @@ impl McpServer {
         }
 
         let api = codegraph_api::GraphApi::new_with_index(self.shared_index.clone());
-        let text = match tools::dispatch_with_api(&api, name, args).await {
+        // Admin tools (init/index) cần workspace root; sandbox cần root (config +
+        // mock dirs) + snapshot index — dispatch riêng, không qua GraphApi.
+        let dispatch = if name == "codegraph_init" || name == "codegraph_index" {
+            tools::dispatch_admin(&self.root, name, args.clone()).await
+        } else if name == "codegraph_sandbox" {
+            tools::dispatch_sandbox(&self.root, self.shared_index.clone(), args.clone()).await
+        } else if name == "codegraph_diff" {
+            tools::dispatch_diff(&self.root, self.shared_index.clone(), args.clone()).await
+        } else if name == "codegraph_diff_simulate" {
+            tools::dispatch_diff_simulate(&self.root, self.shared_index.clone(), args.clone()).await
+        } else if name == "codegraph_origin_simulate" {
+            tools::dispatch_origin_simulate(&self.root, self.shared_index.clone(), args.clone())
+                .await
+        } else {
+            tools::dispatch_with_api(&api, name, args).await
+        };
+        let text = match dispatch {
             Ok(t) => t,
             Err(e) => {
                 self.usage

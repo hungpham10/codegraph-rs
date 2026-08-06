@@ -23,7 +23,8 @@ fn call_name(node: &Node, src: &[u8]) -> Option<String> {
 
 /// Class Ruby `class Foo < Bar` — superclass làm type_name.
 fn class_type_name(node: &Node, src: &[u8]) -> Option<String> {
-    node.child_by_field_name("superclass").and_then(|s| text(&s, src))
+    node.child_by_field_name("superclass")
+        .and_then(|s| text(&s, src))
 }
 
 pub static SPEC: LangSpec = LangSpec {

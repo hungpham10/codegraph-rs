@@ -16,7 +16,11 @@ pub static SPEC: LangSpec = LangSpec {
         ("variable_declaration", SymbolKind::Variable),
         ("local_variable_declaration", SymbolKind::Variable),
     ],
-    func_kinds: &["function_declaration", "function_definition", "local_function"],
+    func_kinds: &[
+        "function_declaration",
+        "function_definition",
+        "local_function",
+    ],
     class_kinds: &[],
     param_kinds: &[],
     annotation_kinds: &[],

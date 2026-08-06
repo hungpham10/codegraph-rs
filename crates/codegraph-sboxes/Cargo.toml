@@ -1,0 +1,28 @@
+[package]
+name = "codegraph-sboxes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+codegraph-core = { path = "../codegraph-core" }
+codegraph-graph = { path = "../codegraph-graph" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+cranelift-codegen = { version = "0.116" }
+cranelift-frontend = { version = "0.116" }
+cranelift-module = { version = "0.116" }
+cranelift-jit = { version = "0.116" }
+cranelift-native = { version = "0.116" }
+target-lexicon = "0.13"
+rhai = { version = "1", features = ["sync"] }
+camino = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[features]
+default = []

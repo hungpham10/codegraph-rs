@@ -3,7 +3,7 @@
 //! Chain của 1 hàm = `[owner_id, m1, callee, m2, ...]`; assertion dưới đây render
 //! phần walk (bỏ owner) thành tên marker (`[LOOP]`, `[IF_TRUE]`, ...) và tên callee.
 
-use codegraph_core::marker_name;
+use codegraph_core::{marker_name, SymbolKind};
 use codegraph_extract::registry;
 
 fn walk(lang: &str, src: &str) -> Vec<String> {
@@ -12,13 +12,27 @@ fn walk(lang: &str, src: &str) -> Vec<String> {
         .find(|p| p.name() == lang)
         .unwrap_or_else(|| panic!("no parser {lang}"));
     let res = parser.parse_file("golden.test", src).expect("parse");
+    // Class-like symbol giờ cũng có chain tối thiểu `[owner]` — golden test này
+    // chỉ xét chain của function/method nên lọc theo owner kind.
+    let func_owner: std::collections::HashSet<u64> = res
+        .symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
+        .map(|s| s.id)
+        .collect();
+    let func_chains: Vec<&Vec<u64>> = res
+        .chains
+        .iter()
+        .filter(|(id, _)| func_owner.contains(id))
+        .map(|(_, c)| c)
+        .collect();
     assert_eq!(
-        res.chains.len(),
+        func_chains.len(),
         1,
         "{lang}: expected exactly 1 function chain, got {:?}",
-        res.chains.keys().collect::<Vec<_>>()
+        func_chains
     );
-    let chain = res.chains.values().next().unwrap();
+    let chain = func_chains[0];
     // Placeholder 0 chưa resolve — render qua CallRecord (position = index trong chain).
     let name_at = |i: usize, id: u64| -> String {
         if let Some(m) = marker_name(id) {
@@ -59,7 +73,16 @@ def process(x):
     );
     assert_eq!(
         c,
-        ["[LOOP]", "[IF_TRUE]", "save", "[IF_FALSE]", "skip", "[BRANCH_END]", "[LOOP_BACK]", "[RETURN]"]
+        [
+            "[LOOP]",
+            "[IF_TRUE]",
+            "save",
+            "[IF_FALSE]",
+            "skip",
+            "[BRANCH_END]",
+            "[LOOP_BACK]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -107,7 +130,14 @@ def process(x):
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "one", "[SWITCH_END]", "[SWITCH_CASE]", "other", "[SWITCH_END]"]
+        [
+            "[SWITCH_CASE]",
+            "one",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "other",
+            "[SWITCH_END]"
+        ]
     );
 }
 
@@ -130,7 +160,14 @@ class Foo {
     );
     assert_eq!(
         c,
-        ["obj.run", "[IF_TRUE]", "this.helper", "[IF_FALSE]", "fallback", "[BRANCH_END]"]
+        [
+            "obj.run",
+            "[IF_TRUE]",
+            "this.helper",
+            "[IF_FALSE]",
+            "fallback",
+            "[BRANCH_END]"
+        ]
     );
 }
 
@@ -188,7 +225,15 @@ end
     );
     assert_eq!(
         c,
-        ["[IF_TRUE]", "validate", "[IF_TRUE]", "warn", "fail", "[BRANCH_END]", "[BRANCH_END]"]
+        [
+            "[IF_TRUE]",
+            "validate",
+            "[IF_TRUE]",
+            "warn",
+            "fail",
+            "[BRANCH_END]",
+            "[BRANCH_END]"
+        ]
     );
 }
 
@@ -327,7 +372,15 @@ fn f(x: i32) -> i32 {
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "one", "[SWITCH_END]", "[SWITCH_CASE]", "other", "[SWITCH_END]", "[RETURN]"]
+        [
+            "[SWITCH_CASE]",
+            "one",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "other",
+            "[SWITCH_END]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -348,7 +401,15 @@ class Foo {
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "a", "[BREAK]", "[SWITCH_END]", "[SWITCH_CASE]", "b", "[SWITCH_END]"]
+        [
+            "[SWITCH_CASE]",
+            "a",
+            "[BREAK]",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "b",
+            "[SWITCH_END]"
+        ]
     );
 }
 
@@ -372,7 +433,17 @@ end
     );
     assert_eq!(
         c,
-        ["[IF_TRUE]", "validate", "[IF_FALSE]", "fail", "[BRANCH_END]", "[LOOP]", "save", "[LOOP_BACK]", "[RETURN]"]
+        [
+            "[IF_TRUE]",
+            "validate",
+            "[IF_FALSE]",
+            "fail",
+            "[BRANCH_END]",
+            "[LOOP]",
+            "save",
+            "[LOOP_BACK]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -394,7 +465,14 @@ function process($x) {
     );
     assert_eq!(
         c,
-        ["[LOOP]", "save", "[LOOP_BACK]", "obj.method", "self.run", "[RETURN]"]
+        [
+            "[LOOP]",
+            "save",
+            "[LOOP_BACK]",
+            "obj.method",
+            "self.run",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -414,7 +492,15 @@ def f(x: Int) = {
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "one", "[SWITCH_END]", "[SWITCH_CASE]", "other", "[SWITCH_END]", "[RETURN]"]
+        [
+            "[SWITCH_CASE]",
+            "one",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "other",
+            "[SWITCH_END]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -434,7 +520,14 @@ int add(int a, int b) {
     );
     assert_eq!(
         c,
-        ["[IF_TRUE]", "[RETURN]", "compute", "[IF_FALSE]", "[RETURN]", "[BRANCH_END]"]
+        [
+            "[IF_TRUE]",
+            "[RETURN]",
+            "compute",
+            "[IF_FALSE]",
+            "[RETURN]",
+            "[BRANCH_END]"
+        ]
     );
 }
 
@@ -484,10 +577,7 @@ int f(int x) {
 }
 "#,
     );
-    assert_eq!(
-        c,
-        ["[LOOP]", "e", "a", "b", "c", "[LOOP_BACK]", "[RETURN]"]
-    );
+    assert_eq!(c, ["[LOOP]", "e", "a", "b", "c", "[LOOP_BACK]", "[RETURN]"]);
 }
 
 /// Text condition của `if` được giữ làm metadata (CallRecord.condition của call
@@ -575,10 +665,7 @@ func f() {
 }
 "#,
     );
-    assert_eq!(
-        c,
-        ["[LOOP]", "a", "b", "c", "d", "[LOOP_BACK]", "[RETURN]"]
-    );
+    assert_eq!(c, ["[LOOP]", "a", "b", "c", "d", "[LOOP_BACK]", "[RETURN]"]);
 }
 
 /// Switch discriminant (`switch (getType(x))`) cũng vào chain trước các case.
@@ -629,4 +716,204 @@ class Foo {
 "#,
     );
     assert_eq!(c, ["[RETURN]", "a.run(abc.class).exec", "a.run"]);
+}
+
+/// Bug A: string-literal case labels (`case 'optimize_text':`) — dispatch key
+/// theo chuỗi không phải identifier call. Emit thành call-name ảo (placeholder
+/// `0` + CallRecord) để `search_by_call` index được. `default` không có value →
+/// không emit.
+#[test]
+fn ts_switch_string_case_labels_captured_as_call_names() {
+    let c = walk(
+        "typescript",
+        r#"
+function dispatch(name: string): number {
+    switch (name) {
+        case 'optimize_text': return 1;
+        case "get_cached": return 2;
+        default: return 0;
+    }
+}
+"#,
+    );
+    assert_eq!(
+        c,
+        [
+            "[SWITCH_CASE]",
+            "optimize_text",
+            "[RETURN]",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "get_cached",
+            "[RETURN]",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "[RETURN]",
+            "[SWITCH_END]",
+        ]
+    );
+}
+
+/// Bug B: class có chain tối thiểu `[class_id]` — `flow`/`search_flow` không bị
+/// "chain not found" (trước đây chỉ có edge function→class từ phía caller).
+/// Methods của class vẫn có chain riêng.
+#[test]
+fn ts_class_has_minimal_chain() {
+    let parser = registry()
+        .into_iter()
+        .find(|p| p.name() == "typescript")
+        .expect("ts parser");
+    let res = parser
+        .parse_file(
+            "golden.test",
+            r#"
+class Store {
+    save(k: string): void {}
+    get(k: string): string { return ""; }
+}
+"#,
+        )
+        .expect("parse");
+    let class_id = res
+        .symbols
+        .iter()
+        .find(|s| s.name == "Store" && matches!(s.kind, SymbolKind::Class))
+        .expect("Store class symbol")
+        .id;
+    let chain = res.chains.get(&class_id).expect("class chain");
+    assert_eq!(chain, &vec![class_id]);
+}
+
+/// Cùng tên method (`save`) trong 2 class khác nhau — `func_index` key theo
+/// `(name, line)` nên mỗi method có id riêng (đúng scope_id của class nó); mỗi
+/// method và mỗi class đều có chain riêng, không hoà trộn.
+#[test]
+fn ts_duplicate_method_name_across_two_classes() {
+    let parser = registry()
+        .into_iter()
+        .find(|p| p.name() == "typescript")
+        .expect("ts parser");
+    let res = parser
+        .parse_file(
+            "golden.test",
+            r#"
+class ServiceA {
+    save(k: string): void {}
+    load(k: string): string { return ""; }
+}
+class ServiceB {
+    save(k: string): void {}
+    load(k: string): string { return ""; }
+}
+"#,
+        )
+        .expect("parse");
+
+    let classes: Vec<&codegraph_core::Symbol> = res
+        .symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Class))
+        .collect();
+    assert_eq!(classes.len(), 2, "exactly 2 classes");
+
+    // Mỗi method `save`/`load` có id riêng và thuộc đúng class của nó.
+    let saves: Vec<&codegraph_core::Symbol> = res
+        .symbols
+        .iter()
+        .filter(|s| s.name == "save" && matches!(s.kind, SymbolKind::Method))
+        .collect();
+    assert_eq!(saves.len(), 2);
+    assert_ne!(saves[0].id, saves[1].id);
+    assert_ne!(saves[0].scope_id, saves[1].scope_id);
+    assert!([classes[0].id, classes[1].id].contains(&saves[0].scope_id));
+    assert!([classes[0].id, classes[1].id].contains(&saves[1].scope_id));
+
+    // Mỗi method đều có chain riêng bắt đầu bằng id chính nó.
+    for s in saves {
+        let chain = res.chains.get(&s.id).expect("method chain");
+        assert_eq!(chain.first(), Some(&s.id));
+    }
+    // Mỗi class có chain tối thiểu `[class_id]` riêng biệt.
+    for c in &classes {
+        let chain = res.chains.get(&c.id).expect("class chain");
+        assert_eq!(chain, &vec![c.id]);
+    }
+    assert_ne!(classes[0].id, classes[1].id);
+}
+
+/// Cùng tên class (`Registry`) khai báo 2 lần ở 2 line khác nhau — key
+/// `(name, line)` phân biệt được; mỗi class có chain riêng.
+#[test]
+fn ts_duplicate_class_name_different_lines() {
+    let parser = registry()
+        .into_iter()
+        .find(|p| p.name() == "typescript")
+        .expect("ts parser");
+    let res = parser
+        .parse_file(
+            "golden.test",
+            r#"
+class Registry {
+    put(k: string): void {}
+}
+class Registry {
+    get(k: string): void {}
+}
+"#,
+        )
+        .expect("parse");
+    let registries: Vec<&codegraph_core::Symbol> = res
+        .symbols
+        .iter()
+        .filter(|s| s.name == "Registry" && matches!(s.kind, SymbolKind::Class))
+        .collect();
+    assert_eq!(registries.len(), 2, "both Registry declarations indexed");
+    assert_ne!(registries[0].id, registries[1].id);
+    let mut chains: Vec<u64> = registries
+        .iter()
+        .filter_map(|c| res.chains.get(&c.id))
+        .map(|chain| chain[0])
+        .collect();
+    chains.sort_unstable();
+    let mut expected = vec![registries[0].id, registries[1].id];
+    expected.sort_unstable();
+    assert_eq!(chains, expected);
+}
+
+/// Mirror `OptimizationStorageTool.run` (Bug A): dispatch theo string-literal
+/// operation (`case 'store'` / `case 'retrieve'`) — case label vừa được emit
+/// thành call-name ảo, vừa không che member call thật bên trong body
+/// (`s.save`/`s.get`) + `break`. `default` không có value → không emit call.
+#[test]
+fn ts_switch_string_operation_dispatch_with_member_calls() {
+    let c = walk(
+        "typescript",
+        r#"
+function runStorage(op: string, s: Store): void {
+    switch (op) {
+        case 'store': s.save(k); break;
+        case 'retrieve': s.get(k); break;
+        default: break;
+    }
+}
+"#,
+    );
+    assert_eq!(
+        c,
+        [
+            "[SWITCH_CASE]",
+            "store",
+            "s.save",
+            "[BREAK]",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "retrieve",
+            "s.get",
+            "[BREAK]",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "[BREAK]",
+            "[SWITCH_END]",
+        ]
+    );
 }

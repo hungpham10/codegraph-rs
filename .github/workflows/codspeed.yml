@@ -1,0 +1,52 @@
+name: CodSpeed
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+  # `workflow_dispatch` cho phép CodSpeed trigger backtest performance
+  # để sinh dữ liệu ban đầu.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OpenID Connect auth với CodSpeed
+
+env:
+  # Danh sách repo (1 path/dòng) sẽ được bench — do .github/benches/fetch_repos.sh
+  # ghi ra từ .github/benches/repos/sources.txt. codegraph-bench đọc env này khi chạy.
+  # Dùng path TUYỆT ĐỐI để không phụ thuộc CWD của `cargo codspeed run`.
+  CODEGRAPH_BENCH_REPOS_LIST: ${{ github.workspace }}/.github/benches/repos/list.txt
+
+jobs:
+  # Performance benchmarks: extract → index → query trên danh sách repo thật
+  # (xem crates/codegraph-bench, bench target `codspeed`).
+  codspeed:
+    name: Bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup rust toolchain, cache and cargo-codspeed binary
+        uses: moonrepo/setup-rust@v0
+        with:
+          channel: stable
+          cache-target: release
+          bins: cargo-codspeed
+
+      # Clone các repo pinned trong benches/repos/sources.txt về
+      # benches/repos/checkout/ và ghi benches/repos/list.txt.
+      - name: Fetch bench repos
+        run: bash .github/benches/fetch_repos.sh
+
+      - name: Build benchmark targets
+        run: cargo codspeed build -p codegraph-bench --features codspeed
+
+      # `mode: benchmark` đẩy kết quả lên CodSpeed Cloud (auto-provision bằng OIDC)
+      # để theo dõi trend. Muốn chạy khô (không lưu baseline) thì đổi `simulation`.
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: simulation
+          run: cargo codspeed run

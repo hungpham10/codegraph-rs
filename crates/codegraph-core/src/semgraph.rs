@@ -19,26 +19,37 @@ pub const SYMBOL_BASE: u64 = 100;
 
 /// Marker: bắt đầu loop body.
 pub const MARKER_LOOP: u64 = 1;
+
 /// Marker: recursive call (gọi lại chính function đang xét) — dự trữ.
 pub const MARKER_REC_CALL: u64 = 2;
+
 /// Marker: nhánh khi điều kiện đúng.
 pub const MARKER_IF_TRUE: u64 = 3;
+
 /// Marker: nhánh khi điều kiện sai.
 pub const MARKER_IF_FALSE: u64 = 4;
+
 /// Marker: kết thúc một nhánh if/else.
 pub const MARKER_BRANCH_END: u64 = 5;
+
 /// Marker: return statement.
 pub const MARKER_RETURN: u64 = 6;
+
 /// Marker: loop back edge (quay lại đầu loop).
 pub const MARKER_LOOP_BACK: u64 = 7;
+
 /// Marker: case trong switch.
 pub const MARKER_SWITCH_CASE: u64 = 8;
+
 /// Marker: kết thúc switch.
 pub const MARKER_SWITCH_END: u64 = 9;
+
 /// Marker: break statement.
 pub const MARKER_BREAK: u64 = 10;
+
 /// Marker: continue statement.
 pub const MARKER_CONTINUE: u64 = 11;
+
 /// Marker: throw/raise exception.
 pub const MARKER_THROW: u64 = 12;
 
@@ -195,6 +206,46 @@ impl EffectType {
             Self::Log => "log",
         }
     }
+
+    /// Parse snake_case string (case-insensitive) ngược lại thành `EffectType`.
+    /// Trùng giá trị `as_str()` của từng variant; chuỗi không biết → `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Self::None,
+            "sql_query" => Self::SqlQuery,
+            "sql_write" => Self::SqlWrite,
+            "cache_read" => Self::CacheRead,
+            "cache_write" => Self::CacheWrite,
+            "http_call" => Self::HttpCall,
+            "event_emit" => Self::EventEmit,
+            "file_read" => Self::FileRead,
+            "file_write" => Self::FileWrite,
+            "log" => Self::Log,
+            _ => return None,
+        })
+    }
+}
+
+/// Match pattern của một effect rule — schema chung cho `config.toml`
+/// (`[[effect_rules]]`) dùng bởi cả `codegraph-extract` (classify lúc parse)
+/// và `codegraph-sboxes` (Piece 3: state delta theo effect).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EffectCallPattern {
+    /// Tên call bắt đầu bằng chuỗi (`call = { prefix = "db." }`).
+    Prefix { prefix: String },
+    /// Tên call chứa chuỗi ở bất kỳ đâu.
+    Contains { contains: String },
+    /// Tên call khớp chính xác (case-sensitive).
+    Exact { exact: String },
+}
+
+/// Một effect rule từ `[[effect_rules]]` trong config.toml.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectRule {
+    #[serde(rename = "call")]
+    pub call: EffectCallPattern,
+    pub effect: EffectType,
 }
 
 // ==================== Entities ====================
@@ -412,6 +463,7 @@ pub struct MemberInfo {
     pub name: String,
     pub kind: SymbolKind,
     pub line: u32,
+
     /// Dòng khai báo đầu tiên (VD `getOrders(userId int) (Order, error)`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
@@ -538,5 +590,30 @@ mod tests {
     #[test]
     fn effect_type_default_is_none() {
         assert_eq!(EffectType::default(), EffectType::None);
+    }
+
+    #[test]
+    fn effect_type_parse_round_trips_as_str() {
+        for e in [
+            EffectType::None,
+            EffectType::SqlQuery,
+            EffectType::SqlWrite,
+            EffectType::CacheRead,
+            EffectType::CacheWrite,
+            EffectType::HttpCall,
+            EffectType::EventEmit,
+            EffectType::FileRead,
+            EffectType::FileWrite,
+            EffectType::Log,
+        ] {
+            assert_eq!(EffectType::parse(e.as_str()), Some(e));
+        }
+        // Case-insensitive + trim.
+        assert_eq!(
+            EffectType::parse("  SQL_QUERY "),
+            Some(EffectType::SqlQuery)
+        );
+        assert_eq!(EffectType::parse("sql_query"), Some(EffectType::SqlQuery));
+        assert_eq!(EffectType::parse("bogus"), None);
     }
 }

@@ -117,7 +117,12 @@ impl SharedGraphIndex {
             Some(p) => GraphIndex::open(&p.display().to_string()).await?,
             None => GraphIndex::in_memory(),
         };
-        #[cfg(not(feature = "sqlite"))]
+        #[cfg(all(feature = "redis", not(feature = "sqlite")))]
+        let index = match &self.path {
+            Some(p) => GraphIndex::open(&p.display().to_string()).await?,
+            None => GraphIndex::in_memory(),
+        };
+        #[cfg(not(any(feature = "sqlite", feature = "redis")))]
         let index = GraphIndex::in_memory();
 
         let version = index.version();
@@ -133,7 +138,7 @@ impl SharedGraphIndex {
 mod tests {
     use super::*;
     use crate::ParseResult;
-    use codegraph_core::{CallRecord, Symbol, SymbolKind, SYMBOL_BASE};
+    use codegraph_core::{CallRecord, SYMBOL_BASE, Symbol, SymbolKind};
 
     // Chỉ test sqlite dùng — build không feature này vẫn compile.
     #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
@@ -209,11 +214,7 @@ mod tests {
         // Re-index lại (full re-index → version bump, dữ liệu đổi).
         {
             let mut idx = GraphIndex::open(&db_str).await.unwrap();
-            let r = mk_result(
-                "b.ts",
-                vec![sym("x", SYMBOL_BASE)],
-                vec![SYMBOL_BASE],
-            );
+            let r = mk_result("b.ts", vec![sym("x", SYMBOL_BASE)], vec![SYMBOL_BASE]);
             idx.ingest(&[r]).await.unwrap();
         }
         let idx2 = sgi.ensure_fresh().await;

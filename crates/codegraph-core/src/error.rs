@@ -18,6 +18,8 @@ pub enum Error {
     Invalid(String),
     #[error("not initialized: run `codegraph init` first")]
     NotInitialized,
+    #[error("link failed — no mock configured for callee(s): {}", .0.join(", "))]
+    MissingMocks(Vec<String>),
     #[error("{0}")]
     Other(String),
 }

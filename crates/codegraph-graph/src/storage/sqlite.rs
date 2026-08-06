@@ -135,6 +135,10 @@ impl SqliteStorage {
                 record INTEGER PRIMARY KEY,
                 chain BLOB NOT NULL
             )",
+            "CREATE TABLE IF NOT EXISTS rt_node_blooms (
+                id INTEGER PRIMARY KEY,
+                bloom BLOB NOT NULL
+            )",
             "CREATE TABLE IF NOT EXISTS rt_counter (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 next INTEGER NOT NULL
@@ -267,6 +271,36 @@ impl Storage for SqliteStorage {
         Ok(out)
     }
 
+    #[cfg(feature = "bloom-search")]
+    async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO rt_node_blooms (id, bloom) VALUES (?1, ?2) \
+                     ON CONFLICT(id) DO UPDATE SET bloom = excluded.bloom",
+        )
+        .bind(id as i64)
+        .bind(bloom)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "bloom-search")]
+    async fn get_node_bloom(&self, id: usize) -> Result<Option<Vec<u8>>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let row = sqlx::query("SELECT bloom FROM rt_node_blooms WHERE id = ?1")
+            .bind(id as i64)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let bloom: Vec<u8> = row.try_get(0).map_err(db_err)?;
+        Ok(Some(bloom))
+    }
+
     async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         sqlx::query(
@@ -305,11 +339,10 @@ impl Storage for SqliteStorage {
         f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
     ) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let rows: Vec<(i64, Vec<u8>)> =
-            sqlx::query_as("SELECT id, data FROM rt_edges ORDER BY id")
-                .fetch_all(&mut *conn)
-                .await
-                .map_err(db_err)?;
+        let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT id, data FROM rt_edges ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?;
         for (id, data) in rows {
             f(id as usize, &data)?;
         }
@@ -406,19 +439,16 @@ impl Storage for SqliteStorage {
             .fetch_optional(&mut *conn)
             .await
             .map_err(db_err)?;
-        data.map(|d| {
-            serde_json::from_slice(&d).map_err(|e| StorageError::Internal(e.to_string()))
-        })
-        .transpose()
+        data.map(|d| serde_json::from_slice(&d).map_err(|e| StorageError::Internal(e.to_string())))
+            .transpose()
     }
 
     async fn load_all_symbols(&self) -> Result<Vec<Symbol>> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let rows: Vec<Vec<u8>> =
-            sqlx::query_scalar("SELECT data FROM sg_symbols ORDER BY id")
-                .fetch_all(&mut *conn)
-                .await
-                .map_err(db_err)?;
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT data FROM sg_symbols ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?;
         rows.into_iter()
             .map(|d| serde_json::from_slice(&d).map_err(|e| StorageError::Internal(e.to_string())))
             .collect()

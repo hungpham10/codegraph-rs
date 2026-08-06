@@ -1,134 +1,228 @@
-//! Effect classification cho call names.
+//! Effect classification cho call names — configurable classifier.
 //!
 //! Port nhẹ từ `walle/pkgs/rules/extraction/defaults.go` (DefaultRules) — bảng
 //! pattern áp dụng mọi ngôn ngữ, first-match-wins theo thứ tự: pattern cụ thể
 //! (framework/library) trước, generic fallback cuối. Không dùng imports để chọn
 //! library rule (bản nhẹ) — classify theo call name là đủ cho impact/flow render.
+//!
+//! Project có thể bổ sung rule qua `.codegraph/config.toml` `[[effect_rules]]`
+//! (schema `EffectRule` trong codegraph-core). Rule config được xét TRƯỚC bảng
+//! default → override được, phần còn lại vẫn rơi về defaults.
+//!
+//! Classifier là "ambient config": `Orchestrator` install classifier của project
+//! vào thread-local trước vòng parse song song; leaf `classify_effect` đọc từ
+//! thread-local (chưa install → dùng bảng default — test/đường dẫn đơn file).
 
-use codegraph_core::EffectType;
+use codegraph_core::{EffectCallPattern, EffectRule, EffectType};
+use std::cell::RefCell;
+use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Copy)]
+/// Cách match một rule lên call name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatchTy {
     Prefix,
     Contains,
+    Exact,
 }
 
-#[derive(Clone, Copy)]
-struct Pattern {
+/// Một rule cụ thể — chuyển từ `EffectRule` (config) hoặc bảng default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClassifierRule {
     matcher: MatchTy,
-    text: &'static str,
+    text: String,
     effect: EffectType,
 }
 
-/// Thứ tự quan trọng — đọc từ trên xuống, pattern đầu tiên match sẽ thắng.
-const PATTERNS: &[Pattern] = &[
+/// Bảng default — thứ tự quan trọng, đọc từ trên xuống, pattern đầu tiên match
+/// sẽ thắng.
+const DEFAULT_RULES: &[(MatchTy, &str, EffectType)] = &[
     // ── Prefix-based (high precision) ──
-    Pattern { matcher: MatchTy::Prefix, text: "http.", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Prefix, text: "net/http.", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Prefix, text: "log.", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Prefix, text: "slog.", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Prefix, text: "os.", effect: EffectType::FileRead },
-    Pattern { matcher: MatchTy::Prefix, text: "open(", effect: EffectType::FileRead },
+    (MatchTy::Prefix, "http.", EffectType::HttpCall),
+    (MatchTy::Prefix, "net/http.", EffectType::HttpCall),
+    (MatchTy::Prefix, "log.", EffectType::Log),
+    (MatchTy::Prefix, "slog.", EffectType::Log),
+    (MatchTy::Prefix, "os.", EffectType::FileRead),
+    (MatchTy::Prefix, "open(", EffectType::FileRead),
     // ── Java library types ──
-    Pattern { matcher: MatchTy::Contains, text: "RestTemplate", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: "retrofit", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: "WebClient", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: "FileInputStream", effect: EffectType::FileRead },
-    Pattern { matcher: MatchTy::Contains, text: "FileReader", effect: EffectType::FileRead },
-    Pattern { matcher: MatchTy::Contains, text: "BufferedReader", effect: EffectType::FileRead },
-    Pattern { matcher: MatchTy::Contains, text: "FileOutputStream", effect: EffectType::FileWrite },
-    Pattern { matcher: MatchTy::Contains, text: "FileWriter", effect: EffectType::FileWrite },
+    (MatchTy::Contains, "RestTemplate", EffectType::HttpCall),
+    (MatchTy::Contains, "retrofit", EffectType::HttpCall),
+    (MatchTy::Contains, "WebClient", EffectType::HttpCall),
+    (MatchTy::Contains, "FileInputStream", EffectType::FileRead),
+    (MatchTy::Contains, "FileReader", EffectType::FileRead),
+    (MatchTy::Contains, "BufferedReader", EffectType::FileRead),
+    (MatchTy::Contains, "FileOutputStream", EffectType::FileWrite),
+    (MatchTy::Contains, "FileWriter", EffectType::FileWrite),
     // ── Messaging / events ──
-    Pattern { matcher: MatchTy::Contains, text: "kafka.", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: "rabbit", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: "amqp", effect: EffectType::EventEmit },
+    (MatchTy::Contains, "kafka.", EffectType::EventEmit),
+    (MatchTy::Contains, "rabbit", EffectType::EventEmit),
+    (MatchTy::Contains, "amqp", EffectType::EventEmit),
     // ── SQL — explicit patterns ──
-    Pattern { matcher: MatchTy::Contains, text: ".Query", effect: EffectType::SqlQuery },
-    Pattern { matcher: MatchTy::Contains, text: ".QueryRow", effect: EffectType::SqlQuery },
-    Pattern { matcher: MatchTy::Contains, text: ".Raw", effect: EffectType::SqlQuery },
-    Pattern { matcher: MatchTy::Contains, text: ".Select", effect: EffectType::SqlQuery },
-    Pattern { matcher: MatchTy::Contains, text: ".Find", effect: EffectType::SqlQuery },
-    Pattern { matcher: MatchTy::Contains, text: ".First", effect: EffectType::SqlQuery },
-    Pattern { matcher: MatchTy::Contains, text: ".Model(", effect: EffectType::SqlQuery },
-    Pattern { matcher: MatchTy::Contains, text: ".Exec", effect: EffectType::SqlWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Insert", effect: EffectType::SqlWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Update", effect: EffectType::SqlWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Delete(", effect: EffectType::SqlWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Create(", effect: EffectType::SqlWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Save(", effect: EffectType::SqlWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Session", effect: EffectType::SqlWrite },
+    (MatchTy::Contains, ".Query", EffectType::SqlQuery),
+    (MatchTy::Contains, ".QueryRow", EffectType::SqlQuery),
+    (MatchTy::Contains, ".Raw", EffectType::SqlQuery),
+    (MatchTy::Contains, ".Select", EffectType::SqlQuery),
+    (MatchTy::Contains, ".Find", EffectType::SqlQuery),
+    (MatchTy::Contains, ".First", EffectType::SqlQuery),
+    (MatchTy::Contains, ".Model(", EffectType::SqlQuery),
+    (MatchTy::Contains, ".Exec", EffectType::SqlWrite),
+    (MatchTy::Contains, ".Insert", EffectType::SqlWrite),
+    (MatchTy::Contains, ".Update", EffectType::SqlWrite),
+    (MatchTy::Contains, ".Delete(", EffectType::SqlWrite),
+    (MatchTy::Contains, ".Create(", EffectType::SqlWrite),
+    (MatchTy::Contains, ".Save(", EffectType::SqlWrite),
+    (MatchTy::Contains, ".Session", EffectType::SqlWrite),
     // ── HTTP method calls ──
-    Pattern { matcher: MatchTy::Prefix, text: "requests.", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: ".Get(", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: ".Post(", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: ".Put(", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: ".Delete(", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: ".Patch(", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: ".Do(", effect: EffectType::HttpCall },
-    Pattern { matcher: MatchTy::Contains, text: ".NewRequest", effect: EffectType::HttpCall },
+    (MatchTy::Prefix, "requests.", EffectType::HttpCall),
+    (MatchTy::Contains, ".Get(", EffectType::HttpCall),
+    (MatchTy::Contains, ".Post(", EffectType::HttpCall),
+    (MatchTy::Contains, ".Put(", EffectType::HttpCall),
+    (MatchTy::Contains, ".Delete(", EffectType::HttpCall),
+    (MatchTy::Contains, ".Patch(", EffectType::HttpCall),
+    (MatchTy::Contains, ".Do(", EffectType::HttpCall),
+    (MatchTy::Contains, ".NewRequest", EffectType::HttpCall),
     // ── Event publish/consume ──
-    Pattern { matcher: MatchTy::Contains, text: ".Publish", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".publish", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".Send", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".send", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".Produce", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".produce", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".Consume", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".consume", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".Subscribe", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".subscribe", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".Receive", effect: EffectType::EventEmit },
-    Pattern { matcher: MatchTy::Contains, text: ".receive", effect: EffectType::EventEmit },
+    (MatchTy::Contains, ".Publish", EffectType::EventEmit),
+    (MatchTy::Contains, ".publish", EffectType::EventEmit),
+    (MatchTy::Contains, ".Send", EffectType::EventEmit),
+    (MatchTy::Contains, ".send", EffectType::EventEmit),
+    (MatchTy::Contains, ".Produce", EffectType::EventEmit),
+    (MatchTy::Contains, ".produce", EffectType::EventEmit),
+    (MatchTy::Contains, ".Consume", EffectType::EventEmit),
+    (MatchTy::Contains, ".consume", EffectType::EventEmit),
+    (MatchTy::Contains, ".Subscribe", EffectType::EventEmit),
+    (MatchTy::Contains, ".subscribe", EffectType::EventEmit),
+    (MatchTy::Contains, ".Receive", EffectType::EventEmit),
+    (MatchTy::Contains, ".receive", EffectType::EventEmit),
     // ── Cache ──
-    Pattern { matcher: MatchTy::Contains, text: ".MGet", effect: EffectType::CacheRead },
-    Pattern { matcher: MatchTy::Contains, text: ".MSet", effect: EffectType::CacheWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".HGet", effect: EffectType::CacheRead },
-    Pattern { matcher: MatchTy::Contains, text: ".HSet", effect: EffectType::CacheWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".HGetAll", effect: EffectType::CacheRead },
-    Pattern { matcher: MatchTy::Contains, text: ".Del(", effect: EffectType::CacheWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Expire", effect: EffectType::CacheWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Exists", effect: EffectType::CacheRead },
-    Pattern { matcher: MatchTy::Contains, text: ".TTL", effect: EffectType::CacheRead },
+    (MatchTy::Contains, ".MGet", EffectType::CacheRead),
+    (MatchTy::Contains, ".MSet", EffectType::CacheWrite),
+    (MatchTy::Contains, ".HGet", EffectType::CacheRead),
+    (MatchTy::Contains, ".HSet", EffectType::CacheWrite),
+    (MatchTy::Contains, ".HGetAll", EffectType::CacheRead),
+    (MatchTy::Contains, ".Del(", EffectType::CacheWrite),
+    (MatchTy::Contains, ".Expire", EffectType::CacheWrite),
+    (MatchTy::Contains, ".Exists", EffectType::CacheRead),
+    (MatchTy::Contains, ".TTL", EffectType::CacheRead),
     // ── File I/O ──
-    Pattern { matcher: MatchTy::Contains, text: ".Open", effect: EffectType::FileRead },
-    Pattern { matcher: MatchTy::Contains, text: ".ReadFile", effect: EffectType::FileRead },
-    Pattern { matcher: MatchTy::Contains, text: ".ReadAll", effect: EffectType::FileRead },
-    Pattern { matcher: MatchTy::Contains, text: ".WriteFile", effect: EffectType::FileWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".WriteString", effect: EffectType::FileWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Create", effect: EffectType::FileWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Mkdir", effect: EffectType::FileWrite },
+    (MatchTy::Contains, ".Open", EffectType::FileRead),
+    (MatchTy::Contains, ".ReadFile", EffectType::FileRead),
+    (MatchTy::Contains, ".ReadAll", EffectType::FileRead),
+    (MatchTy::Contains, ".WriteFile", EffectType::FileWrite),
+    (MatchTy::Contains, ".WriteString", EffectType::FileWrite),
+    (MatchTy::Contains, ".Create", EffectType::FileWrite),
+    (MatchTy::Contains, ".Mkdir", EffectType::FileWrite),
     // ── Log ──
-    Pattern { matcher: MatchTy::Contains, text: "logging.", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: "logger.", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Printf", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Println", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Infof", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Info", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Errorf", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Error", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Warnf", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Warn", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Debugf", effect: EffectType::Log },
-    Pattern { matcher: MatchTy::Contains, text: ".Debug", effect: EffectType::Log },
+    (MatchTy::Contains, "logging.", EffectType::Log),
+    (MatchTy::Contains, "logger.", EffectType::Log),
+    (MatchTy::Contains, ".Printf", EffectType::Log),
+    (MatchTy::Contains, ".Println", EffectType::Log),
+    (MatchTy::Contains, ".Infof", EffectType::Log),
+    (MatchTy::Contains, ".Info", EffectType::Log),
+    (MatchTy::Contains, ".Errorf", EffectType::Log),
+    (MatchTy::Contains, ".Error", EffectType::Log),
+    (MatchTy::Contains, ".Warnf", EffectType::Log),
+    (MatchTy::Contains, ".Warn", EffectType::Log),
+    (MatchTy::Contains, ".Debugf", EffectType::Log),
+    (MatchTy::Contains, ".Debug", EffectType::Log),
     // ── Generic fallbacks (no context — last resort) ──
-    Pattern { matcher: MatchTy::Contains, text: ".Set", effect: EffectType::CacheWrite },
-    Pattern { matcher: MatchTy::Contains, text: ".Get", effect: EffectType::SqlQuery },
+    (MatchTy::Contains, ".Set", EffectType::CacheWrite),
+    (MatchTy::Contains, ".Get", EffectType::SqlQuery),
 ];
 
-/// Phân loại effect của một call theo tên callee.
-///
-/// Trả về `(effect, pattern đã match)` — pattern dùng làm effect_desc.
-pub fn classify_effect(call_name: &str) -> (EffectType, Option<&'static str>) {
-    for p in PATTERNS {
-        let hit = match p.matcher {
-            MatchTy::Prefix => call_name.starts_with(p.text),
-            MatchTy::Contains => call_name.contains(p.text),
-        };
-        if hit {
-            return (p.effect, Some(p.text));
+/// Classifier cấu hình được — first-match-wins theo thứ tự `rules`.
+#[derive(Debug, Clone)]
+pub struct EffectClassifier {
+    rules: Vec<ClassifierRule>,
+}
+
+/// Default = bảng built-in (behavior hiện tại khi không có config).
+impl Default for EffectClassifier {
+    fn default() -> Self {
+        Self {
+            rules: DEFAULT_RULES
+                .iter()
+                .map(|&(matcher, text, effect)| ClassifierRule {
+                    matcher,
+                    text: text.to_string(),
+                    effect,
+                })
+                .collect(),
         }
     }
-    (EffectType::None, None)
+}
+
+impl EffectClassifier {
+    /// Rule config xét TRƯỚC bảng default (override), phần còn lại rơi về defaults.
+    pub fn with_config(config_rules: Vec<EffectRule>) -> Self {
+        let mut rules: Vec<ClassifierRule> =
+            config_rules.into_iter().map(Self::from_rule).collect();
+        rules.extend(Self::default().rules);
+        Self { rules }
+    }
+
+    fn from_rule(rule: EffectRule) -> ClassifierRule {
+        let (matcher, text) = match rule.call {
+            EffectCallPattern::Prefix { prefix } => (MatchTy::Prefix, prefix),
+            EffectCallPattern::Contains { contains } => (MatchTy::Contains, contains),
+            EffectCallPattern::Exact { exact } => (MatchTy::Exact, exact),
+        };
+        ClassifierRule {
+            matcher,
+            text,
+            effect: rule.effect,
+        }
+    }
+
+    /// Phân loại theo rule đầu tiên match — `(effect, text của rule đã match)`.
+    pub fn classify(&self, call_name: &str) -> (EffectType, Option<&str>) {
+        for r in &self.rules {
+            let hit = match r.matcher {
+                MatchTy::Prefix => call_name.starts_with(&r.text),
+                MatchTy::Contains => call_name.contains(&r.text),
+                MatchTy::Exact => call_name == r.text,
+            };
+            if hit {
+                return (r.effect, Some(r.text.as_str()));
+            }
+        }
+        (EffectType::None, None)
+    }
+}
+
+// Thread-local classifier hiện tại — `Orchestrator` install trước vòng parse.
+thread_local! {
+    static CURRENT: RefCell<Option<Arc<EffectClassifier>>> = const { RefCell::new(None) };
+}
+
+/// Default classifier dùng chung (khi chưa install / test).
+fn default_classifier() -> &'static EffectClassifier {
+    static DEFAULT: OnceLock<EffectClassifier> = OnceLock::new();
+    DEFAULT.get_or_init(EffectClassifier::default)
+}
+
+/// Install classifier cho thread đang chạy (gọi đầu mỗi job parse). `None` reset
+/// về default.
+pub fn install_current(classifier: Option<Arc<EffectClassifier>>) {
+    CURRENT.with(|slot| *slot.borrow_mut() = classifier);
+}
+
+/// Phân loại effect của một call theo classifier của project (fallback default).
+///
+/// Trả về `(effect, pattern đã match)` — pattern dùng làm effect_desc.
+pub fn classify_effect(call_name: &str) -> (EffectType, Option<String>) {
+    CURRENT.with(|slot| {
+        let borrow = slot.borrow();
+        match borrow.as_ref() {
+            Some(c) => {
+                let (e, m) = c.classify(call_name);
+                (e, m.map(str::to_owned))
+            }
+            None => {
+                let (e, m) = default_classifier().classify(call_name);
+                (e, m.map(str::to_owned))
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -177,5 +271,53 @@ mod tests {
     fn unknown_is_none() {
         assert_eq!(classify_effect("validateUser"), (EffectType::None, None));
         assert_eq!(classify_effect("sendEmail"), (EffectType::None, None));
+    }
+
+    /// Config rule (prefix/contains/exact) được xét trước default → override.
+    #[test]
+    fn config_rules_override_defaults() {
+        let rules = vec![
+            EffectRule {
+                call: EffectCallPattern::Prefix {
+                    prefix: "db.".to_string(),
+                },
+                effect: EffectType::SqlQuery,
+            },
+            EffectRule {
+                call: EffectCallPattern::Exact {
+                    exact: "sendEmail".to_string(),
+                },
+                effect: EffectType::EventEmit,
+            },
+        ];
+        let c = EffectClassifier::with_config(rules);
+        assert_eq!(c.classify("db.Exec").0, EffectType::SqlQuery); // trước default ".Exec"
+        assert_eq!(c.classify("sendEmail").0, EffectType::EventEmit);
+        assert_eq!(
+            c.classify("sendEmail"),
+            (EffectType::EventEmit, Some("sendEmail"))
+        );
+        // Không có rule config → rơi về default.
+        assert_eq!(c.classify("kafka.Produce").0, EffectType::EventEmit);
+        assert_eq!(c.classify("noSuchThing"), (EffectType::None, None));
+    }
+
+    /// Rule config install vào thread-local → `classify_effect` đọc được.
+    #[test]
+    fn installed_classifier_is_used_by_leaf() {
+        let rules = vec![EffectRule {
+            call: EffectCallPattern::Contains {
+                contains: "legacy-".to_string(),
+            },
+            effect: EffectType::FileWrite,
+        }];
+        install_current(Some(Arc::new(EffectClassifier::with_config(rules))));
+        assert_eq!(classify_effect("legacy-writer").0, EffectType::FileWrite);
+        assert_eq!(
+            classify_effect("legacy-writer").1.as_deref(),
+            Some("legacy-")
+        );
+        install_current(None);
+        assert_eq!(classify_effect("legacy-writer").0, EffectType::None);
     }
 }

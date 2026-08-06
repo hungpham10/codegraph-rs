@@ -31,7 +31,7 @@ fn run(root: Utf8PathBuf, db_path: Utf8PathBuf) -> Result<()> {
     )?;
     debouncer.watch(root.as_std_path(), RecursiveMode::Recursive)?;
 
-    let ignored_dirs = [root.join(crate::CODEGRAPH_DIR), root.join(".git")];
+    let ignored_dirs = [codegraph_extract::project_dir(&root), root.join(".git")];
     let mut gitignore_builder = GitignoreBuilder::new(root.as_std_path());
     gitignore_builder.add(root.join(".gitignore"));
     let gitignore = gitignore_builder.build().unwrap_or_else(|_| {

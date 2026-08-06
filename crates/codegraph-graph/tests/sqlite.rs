@@ -7,7 +7,7 @@
 
 #![cfg(feature = "sqlite")]
 
-use codegraph_core::{CallRecord, EffectType, Symbol, SymbolKind, SYMBOL_BASE};
+use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind};
 use codegraph_graph::{GraphIndex, ParseResult, SharedGraphIndex};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -105,10 +105,7 @@ async fn index_ingest_reopen_roundtrip() {
     assert_eq!(flow.calls[0].line, 3);
 
     // search_flow qua chain engine persistent.
-    let sf = idx
-        .search_flow(&[SYMBOL_BASE + 1])
-        .await
-        .unwrap();
+    let sf = idx.search_flow(&[SYMBOL_BASE + 1]).await.unwrap();
     assert_eq!(sf.len(), 1);
     assert_eq!(sf[0].function_name, "a");
 }
@@ -181,4 +178,62 @@ async fn shared_index_rebuilds_on_reindex() {
     assert_eq!(idx2.version(), 2);
     assert_eq!(idx2.stats().symbols, 1);
     assert_eq!(idx2.symbol_by_id(SYMBOL_BASE).unwrap().name, "x");
+}
+
+/// Go: 2 hàm cùng tên (`process`) ở 2 package khác nhau = 2 FILE riêng. Mỗi
+/// file là một `ParseResult` với id local riêng (cùng `SYMBOL_BASE`) — `ingest`
+/// remap sang id global riêng biệt, cả symbol lẫn chain giữ nguyên, không đè
+/// nhau theo tên. Cũng khẳng định thứ tự global id: file đầu tiên chiếm
+/// `SYMBOL_BASE`, file sau `SYMBOL_BASE + 1`.
+#[tokio::test]
+async fn ingest_same_function_name_across_files_stays_distinct() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("db.sqlite");
+    let db_str = db_path.to_string_lossy().into_owned();
+
+    // Hai package khác nhau (`store` và `cache`), mỗi package một hàm `process`.
+    let r_store = result(
+        "store/store.go",
+        vec![sym("store/store.go", "process", SYMBOL_BASE)],
+        HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE])]),
+        vec![],
+    );
+    let r_cache = result(
+        "cache/cache.go",
+        vec![sym("cache/cache.go", "process", SYMBOL_BASE)],
+        HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE])]),
+        vec![],
+    );
+
+    let mut idx = GraphIndex::open(&db_str).await.unwrap();
+    idx.ingest(&[r_store, r_cache]).await.unwrap();
+
+    // Cả 2 symbol cùng tên nhưng id global khác nhau, giữ đúng file.
+    assert_eq!(idx.stats().symbols, 2);
+    let s1 = idx.symbol_by_id(SYMBOL_BASE).unwrap();
+    let s2 = idx.symbol_by_id(SYMBOL_BASE + 1).unwrap();
+    assert_eq!(s1.name, "process");
+    assert_eq!(s2.name, "process");
+    assert_eq!(s1.file, "store/store.go");
+    assert_eq!(s2.file, "cache/cache.go");
+
+    // Cả 2 đều giữ chain riêng → flow không bị "chain not found".
+    assert_eq!(
+        idx.flow(SYMBOL_BASE).await.unwrap().chain_desc,
+        vec!["process"]
+    );
+    assert_eq!(
+        idx.flow(SYMBOL_BASE + 1).await.unwrap().chain_desc,
+        vec!["process"]
+    );
+
+    // Search tên trả đủ 2 kết quả (không hoà trộn thành 1).
+    let hits = idx
+        .search_symbol("process", Some(SymbolKind::Function), 10)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    let mut files: Vec<&str> = hits.iter().map(|s| s.file.as_str()).collect();
+    files.sort_unstable();
+    assert_eq!(files, vec!["cache/cache.go", "store/store.go"]);
 }

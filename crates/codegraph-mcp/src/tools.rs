@@ -1,7 +1,12 @@
+use camino::{Utf8Path, Utf8PathBuf};
 use codegraph_api::GraphApi;
 use codegraph_context::{ContextRequest, Format};
-use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
+use codegraph_core::{is_marker, Error, Result, Symbol, SymbolKind, SymbolMatch};
+use codegraph_extract::{init_project, project_db_path, project_dir, ExtractStats, Orchestrator};
+use codegraph_graph::{GraphIndex, SharedGraphIndex};
+use codegraph_sboxes::{compile_with_mocks, BranchPolicy, SboxConfig};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 pub fn tool_definitions() -> Vec<Value> {
     vec![
@@ -84,6 +89,19 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "codegraph_status",
             "Index health: symbol / chain / edge / file counts.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        // ── Admin tools (init / index) — thao tác trên workspace root của server ──
+        tool(
+            "codegraph_init",
+            "Initialize the workspace for CodeGraph (idempotent): creates .codegraph/ with .gitignore, version, and config.toml. Pass index=false to skip the full re-index that runs by default.",
+            json!({ "type": "object", "properties": {
+                "index": { "type": "boolean", "default": true }
+            } }),
+        ),
+        tool(
+            "codegraph_index",
+            "Full re-index of the workspace into .codegraph/db.sqlite. Requires the workspace to be initialized (run codegraph_init first).",
             json!({ "type": "object", "properties": {} }),
         ),
         // ── Enhanced symbol search (semgraph_search_symbol) ──
@@ -171,6 +189,52 @@ pub fn tool_definitions() -> Vec<Value> {
                 "limit": { "type": "integer", "default": 0 },
                 "reset": { "type": "boolean", "default": false }
             } }),
+        ),
+        // ── Behavior sandbox (compile a flow to machine code + run with mocks) ──
+        tool(
+            "codegraph_sandbox",
+            "Run a sandbox simulation of a function's flow: compile the entry function + its in-flow callees into machine code (Cranelift JIT) and run it with Rhai mocks. `mocks` maps a callee name to a Rhai body (auto-wrapped into `fn <name>(args) { … }` where `args` is the call's i64 array) or a full `fn <name>(args) { … }` script; inline mocks override `[sandbox].mock_dirs` files. Before compiling, every callee that will be mock-dispatched must have a mock (file or `mocks`); if any is unconfigured the call fails with `link failed: no mock configured for callee(s): …`. Returns the entry return value, the ordered mock invocations, control-flow decisions (if/loop/switch taken/skipped), and any callees that still ran without a mock (`missing_mocks`).",
+            json!({ "type": "object", "properties": {
+                "node": { "type": "integer", "description": "Entry function symbol id (from codegraph_search / codegraph_flow)." },
+                "name": { "type": "string", "description": "Entry function name (substring → first function match); used when node is omitted." },
+                "args": { "type": "array", "items": { "type": "integer" }, "description": "Abstract i64 arguments passed to the entry function." },
+                "mocks": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Callee name → Rhai mock body or full `fn` source." },
+                "branch_policy": { "type": "string", "enum": ["if_true", "if_false"], "description": "Override config branch_policy (default from config.toml)." },
+                "loop_cap": { "type": "integer", "description": "Override config loop_cap — max loop iterations, guarantees termination." }
+            } }),
+        ),
+        // ── Diff draft (unified diff → graph impact, read-only) ──
+        tool(
+            "codegraph_diff",
+            "Analyze a unified diff (MR / patch file / `git diff` output) against the indexed graph and produce a DRAFT report of what would change in codegraph-graph: which symbols (functions/methods/classes) are touched (by line overlap), which flows contain call sites on changed lines, the control-flow marker window around each affected call (IF_TRUE/LOOP/BRANCH_END…), and which flows call the touched functions. The index itself is NOT mutated — this is a dry-run assessment you can review before applying the diff.",
+            json!({ "type": "object", "properties": {
+                "diff": { "type": "string", "description": "Unified diff text: `git diff` output, a .patch file content, or the diff from an MR. Supports multi-file diffs, added/removed/renamed files, and `\\ No newline at end of file`." }
+            }, "required": ["diff"] }),
+        ),
+        tool(
+            "codegraph_diff_simulate",
+            "Diff → behavior simulation (draft): take a unified diff, find the functions it touches, then run the sboxes sandbox on the entry flow BOTH on the current index (post-MR) and on a temporary index built from a git ref (`base_ref`, default HEAD = pre-MR), and compare the observed traces (ordered mock calls, condition decisions). The sandbox follows flow STRUCTURE: branch decisions follow `branch_policy` (if_true/if_false, it does not read the guard text), loops run up to `loop_cap`, and mock call order reflects the flow — numeric arithmetic on values is NOT modeled. Requires the workspace to be a git repo (pre-MR tree comes from `git archive`) and the entry flow to be sandbox-friendly (primitive args, library callees mocked via `mocks`). Read-only — the index is never mutated.",
+            json!({ "type": "object", "properties": {
+                "diff": { "type": "string", "description": "Unified diff text (MR / patch / git diff)." },
+                "entry": { "type": "string", "description": "Optional entry function name (substring). Default: first function affected by the diff." },
+                "base_ref": { "type": "string", "description": "Git ref for the BEFORE state (default HEAD)." },
+                "args": { "type": "array", "items": { "type": "integer" }, "description": "Abstract i64 arguments passed to the entry function." },
+                "mocks": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Callee name → Rhai mock body/fn." },
+                "branch_policy": { "type": "string", "enum": ["if_true", "if_false"], "description": "Override config branch_policy." },
+                "loop_cap": { "type": "integer", "description": "Override config loop_cap." }
+            }, "required": ["diff"] }),
+        ),
+        tool(
+            "codegraph_origin_simulate",
+            "Ref vs working tree simulation (draft): run the sboxes sandbox on an entry flow at a git ref (default HEAD, e.g. `origin/main`) — a temporary index built from `git archive <ref>` — AND on the current index (working tree), then compare the observed traces (ordered mock calls, condition decisions). No diff needed: you pick any entry function and immediately see whether local uncommitted edits change its flow's behavior. The sandbox follows flow STRUCTURE: branch decisions follow `branch_policy` (if_true/if_false, guard text is not read), loops run up to `loop_cap`, mock call order reflects the flow — numeric arithmetic on values is NOT modeled. Entry is resolved by NAME in each index (symbol ids differ between ref and working tree). Requires a git repo. Read-only — the index is never mutated.",
+            json!({ "type": "object", "properties": {
+                "entry": { "type": "string", "description": "Entry function name (substring → first function match in each index)." },
+                "ref": { "type": "string", "description": "Git ref for the ORIGIN state (default HEAD). Example: origin/main." },
+                "args": { "type": "array", "items": { "type": "integer" }, "description": "Abstract i64 arguments passed to the entry function." },
+                "mocks": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Callee name → Rhai mock body/fn." },
+                "branch_policy": { "type": "string", "enum": ["if_true", "if_false"], "description": "Override config branch_policy." },
+                "loop_cap": { "type": "integer", "description": "Override config loop_cap." }
+            }, "required": ["entry"] }),
         ),
     ]
 }
@@ -276,7 +340,9 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
                 .unwrap_or(SymbolMatch::Contains);
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let (results, total) = api.search_symbol_paged(q, kind, mode, limit, offset).await?;
+            let (results, total) = api
+                .search_symbol_paged(q, kind, mode, limit, offset)
+                .await?;
             serde_json::to_string_pretty(&json!({
                 "results": results,
                 "total": total,
@@ -346,16 +412,14 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
             .await?;
             match target {
                 Target::Ambiguous(v) => Ok(json_str(v)),
-                Target::Symbol(sym) => {
-                    match api.class_info(sym.id).await {
-                        Some(info) => serde_json::to_string_pretty(&info)
-                            .map_err(|e| Error::Invalid(e.to_string())),
-                        None => Err(Error::Invalid(format!(
-                            "symbol {:?} (id {}) is not a class/interface/enum",
-                            sym.name, sym.id
-                        ))),
-                    }
-                }
+                Target::Symbol(sym) => match api.class_info(sym.id).await {
+                    Some(info) => serde_json::to_string_pretty(&info)
+                        .map_err(|e| Error::Invalid(e.to_string())),
+                    None => Err(Error::Invalid(format!(
+                        "symbol {:?} (id {}) is not a class/interface/enum",
+                        sym.name, sym.id
+                    ))),
+                },
             }
         }
         "codegraph_list_classes" => {
@@ -409,8 +473,9 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
                 .and_then(SymbolKind::parse);
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let (results, total, truncated) =
-                api.search_by_annotation(annotation, kind, offset, limit).await;
+            let (results, total, truncated) = api
+                .search_by_annotation(annotation, kind, offset, limit)
+                .await;
             serde_json::to_string_pretty(&json!({
                 "annotation": annotation,
                 "kind": kind.map(|k| k.as_str()),
@@ -529,4 +594,442 @@ fn arg_u64(v: &Value, k: &str) -> Result<u64> {
     v.get(k)
         .and_then(|x| x.as_u64())
         .ok_or_else(|| Error::Invalid(format!("missing int arg: {k}")))
+}
+
+// ── Admin tools (codegraph_init / codegraph_index) ──
+// Cần workspace root (không qua GraphApi) — server lưu `root` và gọi hàm này.
+
+pub async fn dispatch_admin(root: &Utf8Path, name: &str, args: Value) -> Result<String> {
+    match name {
+        "codegraph_init" => {
+            let dir = init_project(root)?;
+            let do_index = args.get("index").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut out = json!({ "initialized": dir.as_str() });
+            if do_index {
+                match run_index(root).await {
+                    Ok(stats) => {
+                        out["indexed"] = stats_json(&stats);
+                    }
+                    Err(e) => {
+                        return Err(Error::Invalid(format!(
+                            "initialized {}, but indexing failed: {e}",
+                            dir
+                        )));
+                    }
+                }
+            }
+            serde_json::to_string_pretty(&out).map_err(|e| Error::Invalid(e.to_string()))
+        }
+        "codegraph_index" => {
+            if !project_dir(root).exists() {
+                return Err(Error::Invalid(
+                    "workspace not initialized: missing .codegraph/. Run codegraph_init first."
+                        .into(),
+                ));
+            }
+            let stats = run_index(root).await?;
+            serde_json::to_string_pretty(&stats_json(&stats))
+                .map_err(|e| Error::Invalid(e.to_string()))
+        }
+        _ => Err(Error::Invalid(format!("unknown admin tool: {name}"))),
+    }
+}
+
+/// Full re-index: mở sqlite → `Orchestrator::index_all` (ingest = full re-index).
+/// Không progress bar — MCP transport là stdout, tránh nhiễu JSON-RPC.
+async fn run_index(root: &Utf8Path) -> Result<ExtractStats> {
+    let db_str = project_db_path(root).as_str().to_string();
+    let mut idx = GraphIndex::open(&db_str).await?;
+    Orchestrator::with_registry()
+        .index_all(root, &mut idx, None)
+        .await
+}
+
+fn stats_json(s: &ExtractStats) -> Value {
+    json!({
+        "files": s.files,
+        "symbols": s.symbols,
+        "chains": s.chains,
+        "calls": s.calls,
+        "skipped": s.skipped,
+    })
+}
+
+// ── Sandbox tool (codegraph_sandbox) ──
+// Cần workspace root (config.toml `[sandbox]` + mock dirs) và snapshot index,
+// nên dispatch riêng qua `SharedGraphIndex` — không qua `GraphApi`.
+
+/// Chạy sandbox trên flow của entry function.
+///
+/// `node` (symbol id) hoặc `name` (substring → function match đầu tiên) chọn
+/// entry; group = entry + mọi callee trong flow resolve được. `mocks` là map
+/// callee → Rhai source (body được wrap tự động thành `fn <name>(args)`), override
+/// file mock cùng tên — mocks thiếu được ghi vào `missing_mocks`.
+/// Parse các run-options dùng chung giữa `codegraph_sandbox`,
+/// `codegraph_diff_simulate`, `codegraph_origin_simulate`: `args` (i64 array),
+/// `mocks` (callee → rhai source), `branch_policy`, `loop_cap`.
+type SandboxRunOptions = (Vec<i64>, Vec<(String, String)>, SboxConfig);
+fn parse_run_options(root: &Utf8Path, args: &Value) -> Result<SandboxRunOptions> {
+    let mut call_args = Vec::new();
+    if let Some(arr) = args.get("args").and_then(|v| v.as_array()) {
+        for v in arr {
+            call_args.push(
+                v.as_i64()
+                    .ok_or_else(|| Error::Invalid("args must be integers".into()))?,
+            );
+        }
+    }
+    let mut mocks = Vec::new();
+    if let Some(obj) = args.get("mocks").and_then(|v| v.as_object()) {
+        for (name, src) in obj {
+            let src = src
+                .as_str()
+                .ok_or_else(|| Error::Invalid(format!("mock `{name}` must be a rhai string")))?;
+            mocks.push((name.clone(), src.to_string()));
+        }
+    }
+    let mut config = SboxConfig::load(root).unwrap_or_default();
+    if let Some(p) = args.get("branch_policy").and_then(|v| v.as_str()) {
+        config.branch_policy = match p {
+            "if_true" => BranchPolicy::IfTrue,
+            "if_false" => BranchPolicy::IfFalse,
+            other => {
+                return Err(Error::Invalid(format!(
+                    "bad branch_policy `{other}` (expected if_true/if_false)"
+                )));
+            }
+        };
+    }
+    if let Some(c) = args.get("loop_cap").and_then(|v| v.as_u64()) {
+        config.loop_cap = c as usize;
+    }
+    Ok((call_args, mocks, config))
+}
+
+/// So sánh trace sequence giữa hai kết quả `run_sim` (origin/before vs
+/// working_tree/after): liệt kê mock-call/cond-decision nào chỉ xuất hiện một
+/// bên. `present:false` / `link_error` → sequence rỗng, delta vẫn có ý nghĩa.
+fn sequence_delta(before: &Value, after: &Value) -> Value {
+    let seq = |v: &Value| -> Vec<String> {
+        v.get("sequence")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let sb = seq(before);
+    let sa = seq(after);
+    json!({
+        "sequence_added": sa.iter().filter(|s| !sb.contains(s)).cloned().collect::<Vec<_>>(),
+        "sequence_removed": sb.iter().filter(|s| !sa.contains(s)).cloned().collect::<Vec<_>>(),
+    })
+}
+
+pub async fn dispatch_sandbox(
+    root: &Utf8Path,
+    shared: Arc<SharedGraphIndex>,
+    args: Value,
+) -> Result<String> {
+    let idx = shared.ensure_fresh().await;
+
+    // Entry: `node` id, hoặc `name` (substring, function match đầu tiên).
+    let entry_id = if let Some(id) = args.get("node").and_then(|v| v.as_u64()) {
+        id
+    } else {
+        let q = arg_str(&args, "name")?;
+        let hits = idx.search_symbol(q, Some(SymbolKind::Function), 1).await?;
+        hits.first()
+            .map(|s| s.id)
+            .ok_or_else(|| Error::Invalid(format!("no function matching `{q}`")))?
+    };
+
+    // Group: entry + mọi callee trong flow là symbol biết tên (compile thành
+    // machine code); callee không resolve → mock dispatch. Giống cmd_sandbox CLI.
+    let flow = idx.flow(entry_id).await?;
+    let mut ids = vec![entry_id];
+    let mut seen = std::collections::HashSet::from([entry_id]);
+    for &e in &flow.chain {
+        if is_marker(e) {
+            continue;
+        }
+        if e != entry_id && idx.symbol_by_id(e).is_some() && seen.insert(e) {
+            ids.push(e);
+        }
+    }
+    ids.sort_unstable();
+
+    let (call_args, mocks, config) = parse_run_options(root, &args)?;
+
+    let mut module = compile_with_mocks(&idx, &ids, &config, &mocks).await?;
+    let (ret, trace) = module.run(&call_args);
+
+    let group_names: Vec<String> = ids
+        .iter()
+        .filter_map(|id| idx.symbol_by_id(*id).map(|s| s.name))
+        .collect();
+    serde_json::to_string_pretty(&json!({
+        "entry": flow.symbol.name,
+        "entry_id": entry_id,
+        "group": group_names,
+        "args": call_args,
+        "return": ret,
+        "mocks": trace.mocks,
+        "conds": trace.conds,
+        "missing_mocks": trace.missing,
+        "sequence": trace.sequence(),
+    }))
+    .map_err(|e| Error::Invalid(e.to_string()))
+}
+
+/// Phân tích unified diff (MR / patch / `git diff`) thành bản DRAFT tác động
+/// lên graph. Read-only: parse diff, đối chiếu dòng bên new với symbol + call-site
+/// trong index, trả report JSON — không mutate index.
+pub async fn dispatch_diff(
+    root: &Utf8Path,
+    shared: Arc<SharedGraphIndex>,
+    args: Value,
+) -> Result<String> {
+    let diff = arg_str(&args, "diff")?;
+    let parsed = codegraph_graph::diff::parse_unified_diff(diff)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+
+    let idx = shared.ensure_fresh().await;
+    let report = idx.diff_assess(&parsed, Some(root.as_std_path())).await;
+    serde_json::to_string_pretty(&report).map_err(|e| Error::Invalid(e.to_string()))
+}
+
+/// Chạy sandbox trên flow của `entry_name` trong một index cụ thể. Trả JSON
+/// outcome: `present:false` nếu index không có hàm đó, `link_error` nếu thiếu
+/// mock (compile dừng trước khi chạy). Reuse giữa before-index và after-index.
+async fn run_sim(
+    idx: &GraphIndex,
+    entry_name: &str,
+    call_args: &[i64],
+    config: &SboxConfig,
+    mocks: &[(String, String)],
+) -> Result<Value> {
+    let Some(sym) = idx
+        .search_symbol(entry_name, Some(SymbolKind::Function), 1)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(json!({ "present": false }));
+    };
+
+    let mut ids = vec![sym.id];
+    let mut seen = std::collections::HashSet::from([sym.id]);
+    if let Ok(flow) = idx.flow(sym.id).await {
+        for &e in &flow.chain {
+            if is_marker(e) {
+                continue;
+            }
+            if e != sym.id && idx.symbol_by_id(e).is_some() && seen.insert(e) {
+                ids.push(e);
+            }
+        }
+    }
+    ids.sort_unstable();
+
+    let mut module = match compile_with_mocks(idx, &ids, config, mocks).await {
+        Ok(m) => m,
+        Err(e) => return Ok(json!({ "present": true, "link_error": e.to_string() })),
+    };
+    let (ret, trace) = module.run(call_args);
+    Ok(json!({
+        "present": true,
+        "group": ids
+            .iter()
+            .filter_map(|id| idx.symbol_by_id(*id).map(|s| s.name.clone()))
+            .collect::<Vec<_>>(),
+        "return": ret,
+        "sequence": trace.sequence(),
+        "missing_mocks": trace.missing,
+    }))
+}
+
+/// Build index của cây git tại `base_ref` (`git archive` → temp dir →
+/// parse+ingest vào `GraphIndex::in_memory`). Luôn trả kèm tmp dir để caller
+/// dọn dẹp, kể cả khi thất bại (trả `None` + `note` lý do).
+async fn build_before_index(
+    root: &Utf8Path,
+    base_ref: &str,
+) -> Result<(Option<GraphIndex>, Utf8PathBuf, String)> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let tmp = Utf8PathBuf::from_path_buf(
+        std::env::temp_dir().join(format!("codegraph-sim-{}-{millis}", std::process::id())),
+    )
+    .map_err(|p| Error::Invalid(format!("temp path not UTF-8: {p:?}")))?;
+    let tree = tmp.join("tree");
+    let tar = tmp.join("tree.tar");
+    if let Err(e) = std::fs::create_dir_all(&tree) {
+        return Ok((None, tmp, format!("temp dir failed: {e}")));
+    }
+
+    let st = match std::process::Command::new("git")
+        .args(["archive", "--format=tar"])
+        .arg(base_ref)
+        .arg("-o")
+        .arg(&tar)
+        .current_dir(root.as_std_path())
+        .status()
+    {
+        Ok(s) => s,
+        Err(e) => return Ok((None, tmp, format!("git unavailable: {e}"))),
+    };
+    if !st.success() {
+        return Ok((None, tmp, format!("git archive `{base_ref}` failed")));
+    }
+    let ok = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&tar)
+        .arg("-C")
+        .arg(&tree)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return Ok((None, tmp, "tar extract failed".into()));
+    }
+
+    let mut before = GraphIndex::in_memory();
+    match Orchestrator::with_registry()
+        .index_all(&tree, &mut before, None)
+        .await
+    {
+        Ok(_) => Ok((Some(before), tmp, String::new())),
+        Err(e) => Ok((None, tmp, format!("before-index failed: {e}"))),
+    }
+}
+
+/// Diff → simulate: chạy sandbox trên flow entry cho cả bản "trước" (git
+/// archive tại `base_ref`) và bản "sau" (index hiện tại = post-MR), so sánh
+/// trace. Read-only — không mutate index.
+pub async fn dispatch_diff_simulate(
+    root: &Utf8Path,
+    shared: Arc<SharedGraphIndex>,
+    args: Value,
+) -> Result<String> {
+    let diff = arg_str(&args, "diff")?;
+    let parsed = codegraph_graph::diff::parse_unified_diff(diff)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    let base_ref = args
+        .get("base_ref")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HEAD")
+        .to_string();
+
+    let (call_args, mocks, config) = parse_run_options(root, &args)?;
+
+    let idx = shared.ensure_fresh().await;
+    let report = idx.diff_assess(&parsed, Some(root.as_std_path())).await;
+
+    // Hàm bị diff chạm: ưu tiên flow (call-site trên dòng đổi), kèm symbol
+    // Function/Method. Dedupe, giữ thứ tự.
+    let mut affected: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for f in &report.files {
+        for fl in &f.flows {
+            if seen.insert(fl.name.clone()) {
+                affected.push(fl.name.clone());
+            }
+        }
+        for s in &f.symbols {
+            if matches!(s.symbol.kind, SymbolKind::Function | SymbolKind::Method)
+                && seen.insert(s.symbol.name.clone())
+            {
+                affected.push(s.symbol.name.clone());
+            }
+        }
+    }
+
+    let entry = match args.get("entry").and_then(|v| v.as_str()) {
+        Some(e) => e.to_string(),
+        None => affected.first().cloned().ok_or_else(|| {
+            Error::Invalid("no function affected by the diff — pass `entry`".into())
+        })?,
+    };
+
+    // Build index "trước" + tmp dir (caller dọn tmp kể cả khi thất bại).
+    let (before_idx, tmp, build_note) = build_before_index(root, &base_ref).await?;
+
+    let result = async {
+        let before = match &before_idx {
+            Some(b) => run_sim(b, &entry, &call_args, &config, &mocks).await?,
+            None => json!({ "present": false, "reason": build_note }),
+        };
+        let after = run_sim(&idx, &entry, &call_args, &config, &mocks).await?;
+
+        let delta = sequence_delta(&before, &after);
+        Ok::<Value, Error>(json!({
+            "draft": true,
+            "tool": "codegraph_diff_simulate",
+            "entry": entry,
+            "args": call_args,
+            "base_ref": base_ref,
+            "affected_functions": affected,
+            "before_index_note": build_note,
+            "before": before,
+            "after": after,
+            "delta": delta,
+            "note": "Read-only: before = index tạm từ `git archive {base_ref}`, after = index hiện tại (post-MR). Không mutate index.",
+        }))
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let payload = result?;
+    serde_json::to_string_pretty(&payload).map_err(|e| Error::Invalid(e.to_string()))
+}
+
+/// Ref → simulate: chạy sandbox trên flow entry trên cây git tại `ref` (index
+/// tạm từ `git archive`) VÀ trên index hiện tại (working tree), so sánh trace
+/// trước/sau — không cần diff, entry chọn tự do. Read-only — không mutate index.
+pub async fn dispatch_origin_simulate(
+    root: &Utf8Path,
+    shared: Arc<SharedGraphIndex>,
+    args: Value,
+) -> Result<String> {
+    let entry = arg_str(&args, "entry")?;
+    let git_ref = args
+        .get("ref")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HEAD")
+        .to_string();
+    let (call_args, mocks, config) = parse_run_options(root, &args)?;
+
+    let idx = shared.ensure_fresh().await;
+    let (origin_idx, tmp, build_note) = build_before_index(root, &git_ref).await?;
+
+    let result = async {
+        let origin = match &origin_idx {
+            Some(o) => run_sim(o, entry, &call_args, &config, &mocks).await?,
+            None => json!({ "present": false, "reason": build_note }),
+        };
+        let working_tree = run_sim(&idx, entry, &call_args, &config, &mocks).await?;
+        let delta = sequence_delta(&origin, &working_tree);
+        Ok::<Value, Error>(json!({
+            "draft": true,
+            "tool": "codegraph_origin_simulate",
+            "entry": entry,
+            "args": call_args,
+            "ref": git_ref,
+            "origin_index_note": build_note,
+            "origin": origin,
+            "working_tree": working_tree,
+            "delta": delta,
+            "note": "Read-only: origin = index tạm từ `git archive {git_ref}`, working_tree = index hiện tại. Không mutate index.",
+        }))
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let payload = result?;
+    serde_json::to_string_pretty(&payload).map_err(|e| Error::Invalid(e.to_string()))
 }

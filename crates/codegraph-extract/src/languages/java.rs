@@ -8,7 +8,9 @@ fn ts_language() -> tree_sitter::Language {
 
 /// `obj.method` — object field nếu có (giống reference: `obj.Content + "." + name`).
 fn method_invocation_name(node: &Node, src: &[u8]) -> Option<String> {
-    let name = node.child_by_field_name("name").and_then(|n| text(&n, src))?;
+    let name = node
+        .child_by_field_name("name")
+        .and_then(|n| text(&n, src))?;
     if let Some(obj) = node.child_by_field_name("object") {
         if let Some(obj_text) = text(&obj, src) {
             if !obj_text.is_empty() {
@@ -105,7 +107,12 @@ pub static SPEC: LangSpec = LangSpec {
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],
-    loop_kinds: &["for_statement", "enhanced_for_statement", "while_statement", "do_statement"],
+    loop_kinds: &[
+        "for_statement",
+        "enhanced_for_statement",
+        "while_statement",
+        "do_statement",
+    ],
     switch_kinds: &["switch_expression", "switch_statement"],
     switch_block_kinds: &["switch_block"],
     switch_case_kinds: &["switch_block_statement_group", "switch_rule"],

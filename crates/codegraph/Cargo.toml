@@ -13,11 +13,11 @@ path = "src/main.rs"
 [dependencies]
 codegraph-core      = { path = "../codegraph-core" }
 codegraph-extract   = { path = "../codegraph-extract" }
-codegraph-graph     = { path = "../codegraph-graph", features = ["sqlite"] }
+codegraph-graph     = { path = "../codegraph-graph", features = ["sqlite", "bloom-search"] }
 codegraph-context   = { path = "../codegraph-context" }
 codegraph-mcp       = { path = "../codegraph-mcp" }
 codegraph-installer = { path = "../codegraph-installer" }
-codegraph-viz       = { path = "../codegraph-viz", optional = true }
+codegraph-sboxes    = { path = "../codegraph-sboxes" }
 dirs = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
@@ -33,5 +33,4 @@ console = "0.15"
 indicatif = "0.18.6"
 
 [features]
-default = ["visualize"]
-visualize = ["dep:codegraph-viz"]
+default = []

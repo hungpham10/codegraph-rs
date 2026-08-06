@@ -8,7 +8,9 @@ fn ts_language() -> tree_sitter::Language {
 
 /// `Foo::bar()` / `self::run()` — scope + "." + method.
 fn scoped_call_name(node: &Node, src: &[u8]) -> Option<String> {
-    let name = node.child_by_field_name("name").and_then(|n| text(&n, src))?;
+    let name = node
+        .child_by_field_name("name")
+        .and_then(|n| text(&n, src))?;
     if let Some(scope) = node.child_by_field_name("scope") {
         if let Some(s) = text(&scope, src) {
             if !s.is_empty() {
@@ -21,7 +23,9 @@ fn scoped_call_name(node: &Node, src: &[u8]) -> Option<String> {
 
 /// `$obj->method()` — object + "." + method (bỏ `$` prefix của biến PHP).
 fn member_call_name(node: &Node, src: &[u8]) -> Option<String> {
-    let name = node.child_by_field_name("name").and_then(|n| text(&n, src))?;
+    let name = node
+        .child_by_field_name("name")
+        .and_then(|n| text(&n, src))?;
     if let Some(obj) = node.child_by_field_name("object") {
         if let Some(o) = text(&obj, src) {
             let o = o.trim_start_matches('$');
@@ -102,7 +106,12 @@ pub static SPEC: LangSpec = LangSpec {
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],
-    loop_kinds: &["for_statement", "foreach_statement", "while_statement", "do_statement"],
+    loop_kinds: &[
+        "for_statement",
+        "foreach_statement",
+        "while_statement",
+        "do_statement",
+    ],
     switch_kinds: &["switch_statement"],
     switch_block_kinds: &["switch_block"],
     switch_case_kinds: &["case_statement"],

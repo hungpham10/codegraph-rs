@@ -12,9 +12,7 @@ pub fn class_type_name(node: &Node, src: &[u8]) -> Option<String> {
         if ch.kind() == "class_heritage" {
             for cc in named_children(&ch) {
                 if cc.kind() == "extends_clause" {
-                    return cc
-                        .child_by_field_name("name")
-                        .and_then(|n| text(&n, src));
+                    return cc.child_by_field_name("name").and_then(|n| text(&n, src));
                 }
             }
         }
@@ -67,7 +65,13 @@ pub static SPEC: LangSpec = LangSpec {
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],
-    loop_kinds: &["for_statement", "for_in_statement", "for_of_statement", "while_statement", "do_statement"],
+    loop_kinds: &[
+        "for_statement",
+        "for_in_statement",
+        "for_of_statement",
+        "while_statement",
+        "do_statement",
+    ],
     switch_kinds: &["switch_statement"],
     switch_block_kinds: &["switch_body"],
     switch_case_kinds: &["switch_case"],

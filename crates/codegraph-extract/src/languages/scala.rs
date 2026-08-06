@@ -21,7 +21,12 @@ pub static SPEC: LangSpec = LangSpec {
         ("parameter", SymbolKind::Parameter),
     ],
     func_kinds: &["function_definition", "function_declaration"],
-    class_kinds: &["class_definition", "trait_definition", "object_definition", "enum_definition"],
+    class_kinds: &[
+        "class_definition",
+        "trait_definition",
+        "object_definition",
+        "enum_definition",
+    ],
     param_kinds: &["parameter"],
     annotation_kinds: &[],
     name_type_fallback: false,

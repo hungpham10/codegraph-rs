@@ -8,9 +8,6 @@ use std::sync::Arc;
 
 mod watcher;
 
-pub(crate) const CODEGRAPH_DIR: &str = ".codegraph";
-const DB_FILE: &str = "db.sqlite";
-
 #[derive(Parser, Debug)]
 #[command(
     name = "codegraph",
@@ -38,14 +35,22 @@ enum Cmd {
     Init {
         #[arg(long, default_value_t = false, help = "Disable indexing")]
         no_index: bool,
-        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        #[arg(
+            long,
+            default_value_t = true,
+            help = "Show live progress bar during indexing"
+        )]
         progress: bool,
     },
     /// Remove the .codegraph/ directory.
     Uninit,
     /// Full re-index.
     Index {
-        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        #[arg(
+            long,
+            default_value_t = true,
+            help = "Show live progress bar during indexing"
+        )]
         progress: bool,
     },
     /// Show index health.
@@ -77,21 +82,18 @@ enum Cmd {
     },
     /// Configure agents (alias for the agent setup step in `init`).
     Install,
-    /// Launch local web UI to explore the knowledge graph.
-    #[cfg(feature = "visualize")]
-    Visualize {
-        #[arg(long, default_value_t = 7421)]
-        port: u16,
-        #[arg(long)]
-        open: bool,
-        #[arg(long)]
-        target: Option<String>,
-        #[arg(long)]
-        prefix: Option<String>,
-        #[arg(long, default_value_t = 2)]
-        depth: u32,
-        #[arg(long)]
-        no_browser: bool,
+    /// Run a function in the behavior-verification sandbox: compile the
+    /// function (and its in-group callees) to machine code, bind external
+    /// callees to Rhai mocks, run it, and print the observed-behavior trace.
+    Sandbox {
+        /// Entry function name (substring; first match wins).
+        function: String,
+        /// Comma-separated abstract arg values (i64) for the entry function.
+        #[arg(long, default_value = "")]
+        args: String,
+        /// Do not print the trace, only the return value.
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
     },
 }
 
@@ -132,15 +134,11 @@ fn main() -> Result<()> {
         } => cmd_context(&root, &target, depth, source),
         Cmd::Serve { mcp } => cmd_serve(&root, mcp),
         Cmd::Install => cmd_agents(&root),
-        #[cfg(feature = "visualize")]
-        Cmd::Visualize {
-            port,
-            open,
-            target,
-            prefix,
-            depth,
-            no_browser,
-        } => cmd_visualize(&root, port, open, target, prefix, depth, no_browser),
+        Cmd::Sandbox {
+            function,
+            args,
+            quiet,
+        } => cmd_sandbox(&root, &function, &args, quiet),
     }
 }
 
@@ -213,17 +211,12 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
         "         • {}            Configure/install AI agent integrations",
         style("codegraph install").green()
     );
-    #[cfg(feature = "visualize")]
-    eprintln!(
-        "         • {}   Explore the graph in your browser",
-        style("codegraph visualize").green()
-    );
     eprintln!();
     Ok(())
 }
 
 fn db_path(root: &Utf8Path) -> Utf8PathBuf {
-    root.join(CODEGRAPH_DIR).join(DB_FILE)
+    codegraph_extract::project_db_path(root)
 }
 
 fn ensure_initialized(root: &Utf8Path) -> Result<()> {
@@ -288,14 +281,7 @@ fn block_on_index(root: &Utf8Path, db_path: &Utf8Path, progress: bool) -> Result
 }
 
 fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
-    let dir = root.join(CODEGRAPH_DIR);
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(".gitignore"), "*\n")?;
-    std::fs::write(dir.join("version"), env!("CARGO_PKG_VERSION"))?;
-    let config_path = dir.join("config.toml");
-    if !config_path.exists() {
-        std::fs::write(&config_path, codegraph_extract::DEFAULT_CONFIG_TOML)?;
-    }
+    let dir = codegraph_extract::init_project(root)?;
     eprintln!("initialized {}", dir);
 
     if do_index {
@@ -402,7 +388,7 @@ fn cmd_agents(root: &Utf8Path) -> Result<()> {
 }
 
 fn cmd_uninit(root: &Utf8Path) -> Result<()> {
-    let dir = root.join(CODEGRAPH_DIR);
+    let dir = codegraph_extract::project_dir(root);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
         eprintln!("removed {}", dir);
@@ -476,7 +462,9 @@ fn cmd_files(root: &Utf8Path, prefix: Option<&str>) -> Result<()> {
         Ok::<_, anyhow::Error>(if prefix.is_empty() {
             all
         } else {
-            all.into_iter().filter(|f| f.path.starts_with(&prefix)).collect()
+            all.into_iter()
+                .filter(|f| f.path.starts_with(&prefix))
+                .collect()
         })
     })?;
     let mut out = std::io::stdout().lock();
@@ -522,38 +510,90 @@ fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
         .build()?;
     rt.block_on(async {
         watcher::spawn(root.to_path_buf(), db_path.clone());
-        let mcp_server = McpServer::new(Some(db_path.into_std_path_buf())).await?;
+        let mcp_server =
+            McpServer::new(root.to_path_buf(), Some(db_path.into_std_path_buf())).await?;
         mcp_server.run_stdio().await
     })?;
     Ok(())
 }
 
-#[cfg(feature = "visualize")]
-fn cmd_visualize(
-    root: &Utf8Path,
-    port: u16,
-    open: bool,
-    target: Option<String>,
-    prefix: Option<String>,
-    depth: u32,
-    no_browser: bool,
-) -> Result<()> {
-    use codegraph_viz::{BootConfig, VizConfig};
+/// `codegraph sandbox <function>` — compile a function group to machine code,
+/// bind external callees to Rhai mocks, run it, and print the observed trace.
+fn cmd_sandbox(root: &Utf8Path, function: &str, args: &str, quiet: bool) -> Result<()> {
+    use codegraph_core::SymbolKind;
+    use codegraph_sboxes::SboxConfig;
 
-    ensure_initialized(root).context("init the index before visualize")?;
+    ensure_initialized(root)?;
     let db_path = db_path(root);
-    let config = VizConfig {
-        port,
-        open_browser: open && !no_browser,
-        boot: BootConfig {
-            target,
-            prefix,
-            depth,
-        },
-    };
+    let function = function.to_string();
+    let args: Vec<i64> = args
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().parse().map_err(|e| anyhow!("bad arg `{s}`: {e}")))
+        .collect::<Result<_>>()?;
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(codegraph_viz::run(db_path.into_std_path_buf(), config))?;
+    let (ret, trace, group_names) = rt.block_on(async {
+        let sgi = Arc::new(
+            codegraph_graph::SharedGraphIndex::open(Some(db_path.into_std_path_buf())).await?,
+        );
+        let idx = sgi.ensure_fresh().await;
+
+        // Resolve the entry function (substring, first function match).
+        let hits = idx
+            .search_symbol(&function, Some(SymbolKind::Function), 1)
+            .await?;
+        let entry = hits
+            .first()
+            .ok_or_else(|| anyhow!("no function matching `{function}`"))?;
+        let entry_id = entry.id;
+
+        // Build the group: the entry plus every callee in its flow that is a
+        // known symbol (so those calls compile to real machine code instead of
+        // a mock). Unresolved/external calls stay mocked.
+        let flow = idx.flow(entry_id).await?;
+        let mut ids = vec![entry_id];
+        let mut seen = std::collections::HashSet::from([entry_id]);
+        for &e in &flow.chain {
+            if codegraph_core::is_marker(e) {
+                continue;
+            }
+            if e != entry_id && idx.symbol_by_id(e).is_some() && seen.insert(e) {
+                ids.push(e);
+            }
+        }
+        ids.sort_unstable();
+
+        let config = SboxConfig::load(&root.to_path_buf()).unwrap_or_default();
+        let mut module = codegraph_sboxes::compile(&idx, &ids, &config).await?;
+        let (ret, trace) = module.run(&args);
+
+        let mut names: Vec<String> = ids
+            .iter()
+            .filter_map(|id| idx.symbol_by_id(*id))
+            .map(|s| s.name)
+            .collect();
+        names.sort();
+        Ok::<_, anyhow::Error>((ret, trace, names))
+    })?;
+
+    println!("group:   {}", group_names.join(", "));
+    println!("return:  {ret}");
+    if quiet {
+        return Ok(());
+    }
+    for (i, name) in trace.mock_names().iter().enumerate() {
+        println!("  {i}: call {name}");
+    }
+    for c in &trace.conds {
+        println!(
+            "  {:>4}: {} -> {}",
+            c.idx,
+            c.kind.as_str(),
+            if c.result { "taken" } else { "skipped" }
+        );
+    }
     Ok(())
 }
