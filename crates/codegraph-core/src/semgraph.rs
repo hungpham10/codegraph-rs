@@ -609,7 +609,10 @@ mod tests {
             assert_eq!(EffectType::parse(e.as_str()), Some(e));
         }
         // Case-insensitive + trim.
-        assert_eq!(EffectType::parse("  SQL_QUERY "), Some(EffectType::SqlQuery));
+        assert_eq!(
+            EffectType::parse("  SQL_QUERY "),
+            Some(EffectType::SqlQuery)
+        );
         assert_eq!(EffectType::parse("sql_query"), Some(EffectType::SqlQuery));
         assert_eq!(EffectType::parse("bogus"), None);
     }

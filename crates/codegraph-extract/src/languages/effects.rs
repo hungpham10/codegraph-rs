@@ -154,10 +154,8 @@ impl Default for EffectClassifier {
 impl EffectClassifier {
     /// Rule config xét TRƯỚC bảng default (override), phần còn lại rơi về defaults.
     pub fn with_config(config_rules: Vec<EffectRule>) -> Self {
-        let mut rules: Vec<ClassifierRule> = config_rules
-            .into_iter()
-            .map(Self::from_rule)
-            .collect();
+        let mut rules: Vec<ClassifierRule> =
+            config_rules.into_iter().map(Self::from_rule).collect();
         rules.extend(Self::default().rules);
         Self { rules }
     }
@@ -295,7 +293,10 @@ mod tests {
         let c = EffectClassifier::with_config(rules);
         assert_eq!(c.classify("db.Exec").0, EffectType::SqlQuery); // trước default ".Exec"
         assert_eq!(c.classify("sendEmail").0, EffectType::EventEmit);
-        assert_eq!(c.classify("sendEmail"), (EffectType::EventEmit, Some("sendEmail")));
+        assert_eq!(
+            c.classify("sendEmail"),
+            (EffectType::EventEmit, Some("sendEmail"))
+        );
         // Không có rule config → rơi về default.
         assert_eq!(c.classify("kafka.Produce").0, EffectType::EventEmit);
         assert_eq!(c.classify("noSuchThing"), (EffectType::None, None));
@@ -312,7 +313,10 @@ mod tests {
         }];
         install_current(Some(Arc::new(EffectClassifier::with_config(rules))));
         assert_eq!(classify_effect("legacy-writer").0, EffectType::FileWrite);
-        assert_eq!(classify_effect("legacy-writer").1.as_deref(), Some("legacy-"));
+        assert_eq!(
+            classify_effect("legacy-writer").1.as_deref(),
+            Some("legacy-")
+        );
         install_current(None);
         assert_eq!(classify_effect("legacy-writer").0, EffectType::None);
     }

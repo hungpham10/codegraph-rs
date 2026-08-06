@@ -12,7 +12,7 @@ use crate::trace::{CondEvent, CondKind, MockEvent, Trace, TraceEvent};
 use codegraph_core::{Error, Result};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, default_libcall_names};
+use cranelift_module::{default_libcall_names, FuncId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 

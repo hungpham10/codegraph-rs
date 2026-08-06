@@ -20,7 +20,7 @@
 //! same name — used by the MCP sandbox tool so a caller can mock specific
 //! functions instead of seeing a missing-mock error.
 
-use rhai::{Array, AST, Dynamic, Engine, Scope};
+use rhai::{Array, Dynamic, Engine, Scope, AST};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -68,12 +68,12 @@ impl RhaiMockLib {
                     continue;
                 }
                 if let Ok(script) = std::fs::read_to_string(&path) {
-                if let Ok(compiled) = engine.compile(&script) {
-                    for sig in compiled.iter_functions() {
-                        names.insert(sig.name.to_string());
+                    if let Ok(compiled) = engine.compile(&script) {
+                        for sig in compiled.iter_functions() {
+                            names.insert(sig.name.to_string());
+                        }
+                        ast = ast.merge(&compiled);
                     }
-                    ast = ast.merge(&compiled);
-                }
                 }
             }
         }
@@ -177,10 +177,7 @@ mod tests {
         assert!(!lib.has("nope"));
         assert_eq!(lib.call("validate_order", &[]).unwrap(), 7);
         assert_eq!(lib.call("insert_order", &[21]).unwrap(), 42);
-        assert!(matches!(
-            lib.call("nope", &[]),
-            Err(MockError::NotFound(_))
-        ));
+        assert!(matches!(lib.call("nope", &[]), Err(MockError::NotFound(_))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

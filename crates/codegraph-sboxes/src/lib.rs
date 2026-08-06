@@ -25,7 +25,7 @@ pub mod runtime;
 pub mod trace;
 
 pub use config::{SboxConfig, SboxConfigError};
-pub use group::{GroupFunc, load_group};
+pub use group::{load_group, GroupFunc};
 pub use rhai::{MockError, MockResult, RhaiMockLib};
 pub use runtime::{BranchPolicy, RunContext, SandboxModule};
 pub use trace::{CondEvent, CondKind, MockEvent, Trace, TraceEvent};
@@ -39,7 +39,11 @@ use codegraph_graph::GraphIndex;
 /// compiled functions; every other callee (external or unresolved) is dispatched
 /// to a Rhai mock at run time. A module runs one sandbox run at a time
 /// (`SandboxModule::run`).
-pub async fn compile(index: &GraphIndex, ids: &[u64], config: &SboxConfig) -> Result<SandboxModule> {
+pub async fn compile(
+    index: &GraphIndex,
+    ids: &[u64],
+    config: &SboxConfig,
+) -> Result<SandboxModule> {
     compile_with_mocks(index, ids, config, &[]).await
 }
 

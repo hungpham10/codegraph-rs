@@ -134,9 +134,11 @@ fn main() -> Result<()> {
         } => cmd_context(&root, &target, depth, source),
         Cmd::Serve { mcp } => cmd_serve(&root, mcp),
         Cmd::Install => cmd_agents(&root),
-        Cmd::Sandbox { function, args, quiet } => {
-            cmd_sandbox(&root, &function, &args, quiet)
-        }
+        Cmd::Sandbox {
+            function,
+            args,
+            quiet,
+        } => cmd_sandbox(&root, &function, &args, quiet),
     }
 }
 

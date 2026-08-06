@@ -72,7 +72,10 @@ fn build_classifier(raw: Vec<EffectRuleRaw>) -> EffectClassifier {
     let mut rules = Vec::with_capacity(raw.len());
     for r in raw {
         let Some(effect) = EffectType::parse(&r.effect) else {
-            tracing::warn!("[[effect_rules]]: unknown effect `{}`, rule ignored", r.effect);
+            tracing::warn!(
+                "[[effect_rules]]: unknown effect `{}`, rule ignored",
+                r.effect
+            );
             continue;
         };
         rules.push(EffectRule {

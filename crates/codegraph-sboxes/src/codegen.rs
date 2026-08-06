@@ -20,13 +20,13 @@
 
 use crate::abi;
 use crate::group::{group_ids, GroupFunc};
-use crate::runtime::{SandboxModule, create_jit_module};
+use crate::runtime::{create_jit_module, SandboxModule};
 use codegraph_core::{
-    FlowResult, MARKER_BRANCH_END, MARKER_BREAK, MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE,
-    MARKER_LOOP, MARKER_LOOP_BACK, MARKER_REC_CALL, MARKER_RETURN, MARKER_SWITCH_CASE,
-    MARKER_SWITCH_END, MARKER_THROW, Error, Result, SymbolId, is_marker,
+    is_marker, Error, FlowResult, Result, SymbolId, MARKER_BRANCH_END, MARKER_BREAK,
+    MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
+    MARKER_REC_CALL, MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_END, MARKER_THROW,
 };
-use cranelift_codegen::ir::{Block, FuncRef, InstBuilder, MemFlags, Value, types};
+use cranelift_codegen::ir::{types, Block, FuncRef, InstBuilder, MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{Linkage, Module};
 use std::collections::{HashMap, HashSet};
@@ -46,9 +46,14 @@ struct Item {
 enum ItemTag {
     Marker(u64),
     /// Call to a sibling compiled function.
-    GroupCall { callee: SymbolId },
+    GroupCall {
+        callee: SymbolId,
+    },
     /// Call dispatched to a Rhai mock.
-    MockCall { name: String, args: usize },
+    MockCall {
+        name: String,
+        args: usize,
+    },
 }
 
 /// Control-flow frame stack (matched against the marker nesting).
@@ -248,7 +253,10 @@ impl<'a> Lower<'a> {
         self.cond_table.push(kind);
         let idx_v = self.iconst(idx as i64);
         let depth_v = self.iconst(0);
-        let inst = self.fb.ins().call(self.cond_ref, &[self.ctx_val, idx_v, depth_v]);
+        let inst = self
+            .fb
+            .ins()
+            .call(self.cond_ref, &[self.ctx_val, idx_v, depth_v]);
         (idx, self.fb.inst_results(inst)[0])
     }
 
@@ -258,7 +266,10 @@ impl<'a> Lower<'a> {
     fn eval_condition_at(&mut self, idx: u64) -> Value {
         let idx_v = self.iconst(idx as i64);
         let depth_v = self.iconst(0);
-        let inst = self.fb.ins().call(self.cond_ref, &[self.ctx_val, idx_v, depth_v]);
+        let inst = self
+            .fb
+            .ins()
+            .call(self.cond_ref, &[self.ctx_val, idx_v, depth_v]);
         self.fb.inst_results(inst)[0]
     }
 
@@ -458,10 +469,9 @@ impl<'a> Lower<'a> {
             ItemTag::GroupCall { callee } => {
                 let fid = *callee;
                 let fref = self.callee_refs[&fid];
-                self.fb.ins().call(
-                    fref,
-                    &[self.ctx_val, nargs_c, self.args_val, self.ret_val],
-                )
+                self.fb
+                    .ins()
+                    .call(fref, &[self.ctx_val, nargs_c, self.args_val, self.ret_val])
             }
             ItemTag::MockCall { name, .. } => {
                 let idx = self.name_idx(name);
@@ -505,9 +515,7 @@ impl<'a> Lower<'a> {
         // value through the phis the frontend inserted at merge points.
         self.begin_block(self.epilogue);
         let last = self.fb.use_var(self.last);
-        self.fb
-            .ins()
-            .store(MemFlags::new(), last, self.ret_val, 0);
+        self.fb.ins().store(MemFlags::new(), last, self.ret_val, 0);
         self.fb.ins().return_(&[last]);
         self.terminated_blocks.insert(self.epilogue);
         self.terminated = true;
@@ -686,7 +694,11 @@ fn build_items(f: &GroupFunc, ids: &HashSet<SymbolId>) -> Vec<Item> {
             // Recursion: mocked, like any external callee (termination guard).
             items.push(Item {
                 tag: ItemTag::MockCall {
-                    name: flow.chain_desc.get(i).cloned().unwrap_or_else(|| e.to_string()),
+                    name: flow
+                        .chain_desc
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| e.to_string()),
                     args: pos_args.get(&i).copied().unwrap_or(0),
                 },
                 pos: i,
@@ -701,7 +713,11 @@ fn build_items(f: &GroupFunc, ids: &HashSet<SymbolId>) -> Vec<Item> {
         } else {
             items.push(Item {
                 tag: ItemTag::MockCall {
-                    name: flow.chain_desc.get(i).cloned().unwrap_or_else(|| e.to_string()),
+                    name: flow
+                        .chain_desc
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| e.to_string()),
                     args: pos_args.get(&i).copied().unwrap_or(0),
                 },
                 pos: i,

@@ -82,7 +82,11 @@ impl Trace {
         for e in &self.events {
             match e {
                 TraceEvent::Cond(c) => {
-                    out.push(format!("{}:{}", c.kind.as_str(), if c.result { 1 } else { 0 }));
+                    out.push(format!(
+                        "{}:{}",
+                        c.kind.as_str(),
+                        if c.result { 1 } else { 0 }
+                    ));
                 }
                 TraceEvent::Mock(m) => out.push(format!("call:{}", m.callee)),
             }

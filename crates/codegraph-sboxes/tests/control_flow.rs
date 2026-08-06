@@ -6,12 +6,12 @@
 //! codegraph-graph tests use), then ingested into `GraphIndex::in_memory()`.
 
 use codegraph_core::{
-    CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind, SYMBOL_BASE, MARKER_BRANCH_END,
-    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_SWITCH_CASE,
-    MARKER_SWITCH_END,
+    CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind, MARKER_BRANCH_END, MARKER_IF_FALSE,
+    MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_SWITCH_CASE, MARKER_SWITCH_END,
+    SYMBOL_BASE,
 };
 use codegraph_graph::GraphIndex;
-use codegraph_sboxes::{BranchPolicy, CondKind, SboxConfig, compile};
+use codegraph_sboxes::{compile, BranchPolicy, CondKind, SboxConfig};
 use std::collections::HashMap;
 
 fn sym(id: u64, name: &str) -> Symbol {
@@ -90,10 +90,10 @@ async fn if_and_capped_loop() {
         (
             COMPUTE,
             vec![
-                COMPUTE, // 0 self
-                HELPER,  // 1 group call
-                MARKER_IF_TRUE, // 2
-                0,              // 3 notify (mock)
+                COMPUTE,           // 0 self
+                HELPER,            // 1 group call
+                MARKER_IF_TRUE,    // 2
+                0,                 // 3 notify (mock)
                 MARKER_BRANCH_END, // 4
                 MARKER_LOOP,       // 5
                 0,                 // 6 poll (mock)
@@ -142,8 +142,16 @@ async fn if_and_capped_loop() {
     );
 
     // One if-condition decision (taken) + one loop-cap-exit evaluation extra.
-    let ifs = trace.conds.iter().filter(|c| c.kind == CondKind::If).count();
-    let loops = trace.conds.iter().filter(|c| c.kind == CondKind::Loop).count();
+    let ifs = trace
+        .conds
+        .iter()
+        .filter(|c| c.kind == CondKind::If)
+        .count();
+    let loops = trace
+        .conds
+        .iter()
+        .filter(|c| c.kind == CondKind::Loop)
+        .count();
     assert_eq!(ifs, 1);
     assert_eq!(loops, 6); // 5 taken + the 6th that fails the cap and exits
 }
@@ -172,12 +180,7 @@ async fn if_false_policy_skips_then_branch() {
         rec(COMPUTE, 5, "poll", 0),
         rec(COMPUTE, 7, "done", 0),
     ];
-    let r = result(
-        "test.ts",
-        vec![sym(COMPUTE, "compute")],
-        chains,
-        calls,
-    );
+    let r = result("test.ts", vec![sym(COMPUTE, "compute")], chains, calls);
     let mut idx = GraphIndex::in_memory();
     idx.ingest(&[r]).await.unwrap();
 
@@ -191,7 +194,11 @@ async fn if_false_policy_skips_then_branch() {
     assert_eq!(trace.count("notify"), 0);
     assert_eq!(trace.count("poll"), 5);
     assert_eq!(trace.count("done"), 1);
-    let ifs = trace.conds.iter().filter(|c| c.kind == CondKind::If).count();
+    let ifs = trace
+        .conds
+        .iter()
+        .filter(|c| c.kind == CondKind::If)
+        .count();
     assert_eq!(ifs, 1);
 }
 
@@ -219,24 +226,21 @@ async fn switch_first_case_taken() {
         rec(COMPUTE, 5, "get_stock", 0),
         rec(COMPUTE, 7, "done", 0),
     ];
-    let r = result(
-        "test.ts",
-        vec![sym(COMPUTE, "compute")],
-        chains,
-        calls,
-    );
+    let r = result("test.ts", vec![sym(COMPUTE, "compute")], chains, calls);
     let mut idx = GraphIndex::in_memory();
     idx.ingest(&[r]).await.unwrap();
 
-    let mut module = compile(&idx, &[COMPUTE], &test_config())
-        .await
-        .unwrap();
+    let mut module = compile(&idx, &[COMPUTE], &test_config()).await.unwrap();
     let (_, trace) = module.run(&[]);
 
     assert_eq!(trace.count("get_stock"), 1);
     assert_eq!(trace.count("done"), 1);
     // Case-1 condition true, case-2 condition false → 2 switch decisions.
-    let switches = trace.conds.iter().filter(|c| c.kind == CondKind::Switch).count();
+    let switches = trace
+        .conds
+        .iter()
+        .filter(|c| c.kind == CondKind::Switch)
+        .count();
     assert_eq!(switches, 2);
 }
 
@@ -263,12 +267,7 @@ async fn if_else_takes_else_branch() {
         rec(COMPUTE, 4, "else_mock", 0),
         rec(COMPUTE, 6, "done", 0),
     ];
-    let r = result(
-        "test.ts",
-        vec![sym(COMPUTE, "compute")],
-        chains,
-        calls,
-    );
+    let r = result("test.ts", vec![sym(COMPUTE, "compute")], chains, calls);
     let mut idx = GraphIndex::in_memory();
     idx.ingest(&[r]).await.unwrap();
 

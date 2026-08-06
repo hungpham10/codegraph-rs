@@ -43,8 +43,7 @@ impl Orchestrator {
     pub fn parse_project(&self, root: &Utf8Path) -> Result<(Vec<ParseResult>, ExtractStats)> {
         let config = ExtractConfig::load(root);
         let files = walker::walk(root, &self.parsers, &config);
-        let (parsed, skipped) =
-            self.parse_files(&files, None, config.effect_classifier.clone());
+        let (parsed, skipped) = self.parse_files(&files, None, config.effect_classifier.clone());
         let stats = stats_of(&parsed, skipped);
         Ok((parsed, stats))
     }

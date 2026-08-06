@@ -3,11 +3,11 @@
 //! callees mocked by Rhai. Asserts the exact observed-behavior sequence.
 
 use codegraph_core::{
-    CallRecord, EffectType, Error, ScopeLevel, Symbol, SymbolKind, SYMBOL_BASE, MARKER_BRANCH_END,
-    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_SWITCH_CASE, MARKER_SWITCH_END,
+    CallRecord, EffectType, Error, ScopeLevel, Symbol, SymbolKind, MARKER_BRANCH_END,
+    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_SWITCH_CASE, MARKER_SWITCH_END, SYMBOL_BASE,
 };
 use codegraph_graph::GraphIndex;
-use codegraph_sboxes::{BranchPolicy, SboxConfig, compile, compile_with_mocks};
+use codegraph_sboxes::{compile, compile_with_mocks, BranchPolicy, SboxConfig};
 use std::collections::HashMap;
 
 fn sym(id: u64, name: &str) -> Symbol {
@@ -89,24 +89,24 @@ async fn prepare_order_golden_trace() {
         (
             PREPARE,
             vec![
-                PREPARE,               // 0 self
-                CHECK,                 // 1 group call → real compiled call
-                MARKER_IF_TRUE,        // 2
-                0,                     // 3 send_email (mock)
-                MARKER_BRANCH_END,     // 4
-                0,                     // 5 insert_order (mock)
+                PREPARE,           // 0 self
+                CHECK,             // 1 group call → real compiled call
+                MARKER_IF_TRUE,    // 2
+                0,                 // 3 send_email (mock)
+                MARKER_BRANCH_END, // 4
+                0,                 // 5 insert_order (mock)
             ],
         ),
         (
             CHECK,
             vec![
-                CHECK,                 // 0 self
-                MARKER_SWITCH_CASE,    // 1
-                0,                     // 2 get_stock (mock, case 1)
-                MARKER_SWITCH_END,     // 3
-                MARKER_SWITCH_CASE,    // 4
-                0,                     // 5 get_stock (mock, case 2)
-                MARKER_SWITCH_END,     // 6
+                CHECK,              // 0 self
+                MARKER_SWITCH_CASE, // 1
+                0,                  // 2 get_stock (mock, case 1)
+                MARKER_SWITCH_END,  // 3
+                MARKER_SWITCH_CASE, // 4
+                0,                  // 5 get_stock (mock, case 2)
+                MARKER_SWITCH_END,  // 6
             ],
         ),
     ]);
@@ -216,10 +216,7 @@ async fn link_fails_on_unmocked_callees() {
             0,   // 2 compute_sku (inline mock only)
         ],
     )]);
-    let calls = vec![
-        rec(RUN, 1, "submit", 1),
-        rec(RUN, 2, "compute_sku", 2),
-    ];
+    let calls = vec![rec(RUN, 1, "submit", 1), rec(RUN, 2, "compute_sku", 2)];
     let r = result("order.ts", vec![sym(RUN, "run_order")], chains, calls);
     let mut idx = GraphIndex::in_memory();
     idx.ingest(&[r]).await.unwrap();
@@ -249,10 +246,7 @@ async fn inline_mocks_satisfy_link_and_run() {
             0,   // 2 compute_sku (inline mock)
         ],
     )]);
-    let calls = vec![
-        rec(RUN, 1, "submit", 1),
-        rec(RUN, 2, "compute_sku", 2),
-    ];
+    let calls = vec![rec(RUN, 1, "submit", 1), rec(RUN, 2, "compute_sku", 2)];
     let r = result("order.ts", vec![sym(RUN, "run_order")], chains, calls);
     let mut idx = GraphIndex::in_memory();
     idx.ingest(&[r]).await.unwrap();

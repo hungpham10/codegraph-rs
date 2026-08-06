@@ -11,7 +11,7 @@
 //! - `args` — pointer to `nargs` i64 slots (abstract values, `i` for arg i).
 //! - `ret`  — pointer to a single i64 slot (the function's return value).
 
-use cranelift_codegen::ir::{AbiParam, Signature, types};
+use cranelift_codegen::ir::{types, AbiParam, Signature};
 use cranelift_codegen::isa::CallConv;
 
 fn i64() -> AbiParam {
