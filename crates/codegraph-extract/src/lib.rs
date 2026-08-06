@@ -12,8 +12,8 @@ mod orchestrator;
 mod project;
 mod walker;
 
-pub use orchestrator::{ExtractStats, Orchestrator};
 pub use config::{ExtractConfig, HeaderLanguage, DEFAULT_CONFIG_TOML};
+pub use orchestrator::{ExtractStats, Orchestrator};
 pub use project::{init_project, project_db_path, project_dir, CODEGRAPH_DIR};
 
 use codegraph_core::{Error, Result};
@@ -106,7 +106,11 @@ macro_rules! lang_parser {
             fn ts_language(&self) -> tree_sitter::Language {
                 ($ts)()
             }
-            fn parse_file(&self, path: &str, source: &str) -> codegraph_core::Result<codegraph_graph::ParseResult> {
+            fn parse_file(
+                &self,
+                path: &str,
+                source: &str,
+            ) -> codegraph_core::Result<codegraph_graph::ParseResult> {
                 $crate::languages::common::run_spec(&$spec, path, $name, source)
             }
         }

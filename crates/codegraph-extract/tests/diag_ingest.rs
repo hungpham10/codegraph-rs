@@ -30,7 +30,12 @@ async fn diag_ingest_terraform_root_main() {
         .chains
         .get(&main_sym.id)
         .expect("extractor produced chain for main");
-    println!("extractor: main id={} line={} chain_len={}", main_sym.id, main_sym.line, main_chain.len());
+    println!(
+        "extractor: main id={} line={} chain_len={}",
+        main_sym.id,
+        main_sym.line,
+        main_chain.len()
+    );
     println!("extractor: chains produced for {} funcs", res.chains.len());
     let main_id = main_sym.id;
 
@@ -63,5 +68,8 @@ async fn diag_ingest_terraform_root_main() {
         main_sym.id,
         callees2.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
     );
-    assert!(!callees2.is_empty(), "root main lost its chain through ingest+persist");
+    assert!(
+        !callees2.is_empty(),
+        "root main lost its chain through ingest+persist"
+    );
 }

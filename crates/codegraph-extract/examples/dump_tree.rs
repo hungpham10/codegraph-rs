@@ -5,7 +5,9 @@ use codegraph_extract::registry;
 use std::io::Read;
 
 fn main() {
-    let lang = std::env::args().nth(1).expect("usage: dump_tree <language>");
+    let lang = std::env::args()
+        .nth(1)
+        .expect("usage: dump_tree <language>");
     let mut src = String::new();
     std::io::stdin().read_to_string(&mut src).unwrap();
 
@@ -35,14 +37,19 @@ fn print_sexp(node: &tree_sitter::Node, src: &str, depth: usize) {
         .utf8_text(src.as_bytes())
         .ok()
         .map(|t| t.replace('\n', "\\n"))
-        .map(|t| if t.len() > 60 { format!("{}…", &t[..60]) } else { t });
+        .map(|t| {
+            if t.len() > 60 {
+                format!("{}…", &t[..60])
+            } else {
+                t
+            }
+        });
     println!(
         "{indent}{}{}{}{}",
         node.kind(),
         field,
         if node.is_named() { "" } else { " !" },
-        text.map(|t| format!("  \"{t}\""))
-            .unwrap_or_default()
+        text.map(|t| format!("  \"{t}\"")).unwrap_or_default()
     );
     let mut cursor = node.walk();
     for ch in node.children(&mut cursor) {

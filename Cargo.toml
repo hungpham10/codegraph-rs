@@ -8,6 +8,7 @@ members = [
     "crates/codegraph-api",
     "crates/codegraph-mcp",
     "crates/codegraph-viz",
+    "crates/codegraph-bench",
     "crates/codegraph-installer",
     "crates/codegraph",
 ]
@@ -31,6 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # storage
+redis = { version = "1.0", features = ["tokio-comp"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
@@ -56,7 +58,7 @@ tree-sitter-lua       = "0.5"
 
 # cli / async / fs
 clap = { version = "4", features = ["derive", "wrap_help"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "fs", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "fs", "sync", "time"] }
 notify = "7"
 notify-debouncer-full = "0.4"
 ignore = "0.4"

@@ -13,7 +13,9 @@ fn main() {
         std::process::exit(1);
     });
     let mut src = String::new();
-    std::io::stdin().read_to_string(&mut src).expect("read stdin");
+    std::io::stdin()
+        .read_to_string(&mut src)
+        .expect("read stdin");
 
     let parser = registry()
         .into_iter()
@@ -25,12 +27,7 @@ fn main() {
     for s in &res.symbols {
         println!(
             "  {:<4} {:<28} {:?} {:?} scope={} L{}",
-            s.id,
-            s.name,
-            s.kind,
-            s.scope,
-            s.scope_id,
-            s.line
+            s.id, s.name, s.kind, s.scope, s.scope_id, s.line
         );
     }
     println!("== chains ({}) ==", res.chains.len());
@@ -57,11 +54,6 @@ fn main() {
     }
     println!("== calls ({}) ==", res.calls.len());
     for c in &res.calls {
-        println!(
-            "  L{:<3} {} (effect={:?})",
-            c.line,
-            c.call_name,
-            c.effect
-        );
+        println!("  L{:<3} {} (effect={:?})", c.line, c.call_name, c.effect);
     }
 }

@@ -1,0 +1,38 @@
+[package]
+name = "codegraph-bench"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+description = "Benchmark codegraph-extract + codegraph-graph trên các repo thật"
+
+[dependencies]
+codegraph-extract = { path = "../codegraph-extract" }
+codegraph-graph = { path = "../codegraph-graph" }
+codegraph-core = { path = "../codegraph-core" }
+
+anyhow = { workspace = true }
+camino = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+criterion = "0.5"
+# CodSpeed đo benchmark qua `codspeed-criterion-compat` (đo bằng hardware counters).
+codspeed-criterion-compat = { version = "2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+# Bật `bloom-search` trong codegraph-graph — phase query thêm `search_flow`.
+bloom = ["codegraph-graph/bloom-search"]
+# Dùng `Criterion` của CodSpeed (runner hardware counters) thay vì criterion thường.
+# Chạy: `cargo codspeed build -p codegraph-bench --features codspeed` rồi `cargo codspeed run`.
+# Local vẫn chạy bình thường như criterion (no runner → passthrough).
+codspeed = ["dep:codspeed-criterion-compat"]
+
+[[bench]]
+name = "codspeed"
+harness = false

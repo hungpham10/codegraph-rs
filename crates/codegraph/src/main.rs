@@ -35,14 +35,22 @@ enum Cmd {
     Init {
         #[arg(long, default_value_t = false, help = "Disable indexing")]
         no_index: bool,
-        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        #[arg(
+            long,
+            default_value_t = true,
+            help = "Show live progress bar during indexing"
+        )]
         progress: bool,
     },
     /// Remove the .codegraph/ directory.
     Uninit,
     /// Full re-index.
     Index {
-        #[arg(long, default_value_t = true, help = "Show live progress bar during indexing")]
+        #[arg(
+            long,
+            default_value_t = true,
+            help = "Show live progress bar during indexing"
+        )]
         progress: bool,
     },
     /// Show index health.
@@ -466,7 +474,9 @@ fn cmd_files(root: &Utf8Path, prefix: Option<&str>) -> Result<()> {
         Ok::<_, anyhow::Error>(if prefix.is_empty() {
             all
         } else {
-            all.into_iter().filter(|f| f.path.starts_with(&prefix)).collect()
+            all.into_iter()
+                .filter(|f| f.path.starts_with(&prefix))
+                .collect()
         })
     })?;
     let mut out = std::io::stdout().lock();
@@ -512,7 +522,8 @@ fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
         .build()?;
     rt.block_on(async {
         watcher::spawn(root.to_path_buf(), db_path.clone());
-        let mcp_server = McpServer::new(root.to_path_buf(), Some(db_path.into_std_path_buf())).await?;
+        let mcp_server =
+            McpServer::new(root.to_path_buf(), Some(db_path.into_std_path_buf())).await?;
         mcp_server.run_stdio().await
     })?;
     Ok(())

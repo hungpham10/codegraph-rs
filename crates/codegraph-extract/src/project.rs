@@ -58,7 +58,10 @@ mod tests {
         // Lần gọi thứ hai — không lỗi, config.toml giữ nguyên.
         let config = std::fs::read_to_string(first.join("config.toml")).unwrap();
         init_project(root).unwrap();
-        assert_eq!(std::fs::read_to_string(first.join("config.toml")).unwrap(), config);
+        assert_eq!(
+            std::fs::read_to_string(first.join("config.toml")).unwrap(),
+            config
+        );
     }
 
     #[test]

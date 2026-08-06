@@ -23,20 +23,22 @@ parking_lot = { workspace = true }
 smallvec = "1"
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 # For SearchIndex functionality (moved from codegraph-libs)
-redis = { version = "1.0", features = ["tokio-comp"], optional = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+redis = { workspace = true, optional = true }
+url = { version = "2.5.8", optional = true }
 zstd = { version = "0.13", optional = true }
 bincode = { version = "1.3", optional = true }
 sqlx = { workspace = true, optional = true }
+
 # Bundled sqlite cho sqlx (giống rusqlite của codegraph-db) — feature
 # unification khiến sqlx dùng chung bản build bundled này, không cần system lib.
 libsqlite3-sys = { version = "0.30", features = ["bundled"], optional = true }
 
 [features]
 default = []
-redis = ["dep:redis", "dep:zstd", "dep:bincode"]
+redis = ["dep:redis", "dep:zstd", "dep:bincode", "dep:url"]
 sqlite = ["dep:sqlx", "dep:libsqlite3-sys"]
 bloom-search = []
 
@@ -44,3 +46,8 @@ bloom-search = []
 tempfile = "3"
 codegraph-extract = { path = "../codegraph-extract" }
 codegraph-core = { path = "../codegraph-core" }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "search_bloom"
+harness = false

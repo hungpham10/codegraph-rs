@@ -21,7 +21,13 @@ pub static SPEC: LangSpec = LangSpec {
         ("type_item", SymbolKind::Class),
     ],
     func_kinds: &["function_item"],
-    class_kinds: &["struct_item", "enum_item", "trait_item", "impl_item", "mod_item"],
+    class_kinds: &[
+        "struct_item",
+        "enum_item",
+        "trait_item",
+        "impl_item",
+        "mod_item",
+    ],
     param_kinds: &[],
     annotation_kinds: &[],
     // `impl Foo` không có name field — tên nằm ở field `type`.

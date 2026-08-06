@@ -292,7 +292,9 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
                 .unwrap_or(SymbolMatch::Contains);
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let (results, total) = api.search_symbol_paged(q, kind, mode, limit, offset).await?;
+            let (results, total) = api
+                .search_symbol_paged(q, kind, mode, limit, offset)
+                .await?;
             serde_json::to_string_pretty(&json!({
                 "results": results,
                 "total": total,
@@ -362,16 +364,14 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
             .await?;
             match target {
                 Target::Ambiguous(v) => Ok(json_str(v)),
-                Target::Symbol(sym) => {
-                    match api.class_info(sym.id).await {
-                        Some(info) => serde_json::to_string_pretty(&info)
-                            .map_err(|e| Error::Invalid(e.to_string())),
-                        None => Err(Error::Invalid(format!(
-                            "symbol {:?} (id {}) is not a class/interface/enum",
-                            sym.name, sym.id
-                        ))),
-                    }
-                }
+                Target::Symbol(sym) => match api.class_info(sym.id).await {
+                    Some(info) => serde_json::to_string_pretty(&info)
+                        .map_err(|e| Error::Invalid(e.to_string())),
+                    None => Err(Error::Invalid(format!(
+                        "symbol {:?} (id {}) is not a class/interface/enum",
+                        sym.name, sym.id
+                    ))),
+                },
             }
         }
         "codegraph_list_classes" => {
@@ -425,8 +425,9 @@ pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Resul
                 .and_then(SymbolKind::parse);
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let (results, total, truncated) =
-                api.search_by_annotation(annotation, kind, offset, limit).await;
+            let (results, total, truncated) = api
+                .search_by_annotation(annotation, kind, offset, limit)
+                .await;
             serde_json::to_string_pretty(&json!({
                 "annotation": annotation,
                 "kind": kind.map(|k| k.as_str()),

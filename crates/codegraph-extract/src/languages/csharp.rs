@@ -8,7 +8,9 @@ fn ts_language() -> tree_sitter::Language {
 
 /// `new List<int>(...)` — tên class gốc (strip generic args để resolve được).
 fn new_call_name(node: &Node, src: &[u8]) -> Option<String> {
-    let tn = node.child_by_field_name("type").and_then(|t| text(&t, src))?;
+    let tn = node
+        .child_by_field_name("type")
+        .and_then(|t| text(&t, src))?;
     let base = tn.split('<').next().unwrap_or(&tn);
     Some(base.trim().to_string())
 }
@@ -61,7 +63,12 @@ pub static SPEC: LangSpec = LangSpec {
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],
-    loop_kinds: &["for_statement", "foreach_statement", "while_statement", "do_statement"],
+    loop_kinds: &[
+        "for_statement",
+        "foreach_statement",
+        "while_statement",
+        "do_statement",
+    ],
     switch_kinds: &["switch_statement", "switch_expression"],
     switch_block_kinds: &["switch_body"],
     switch_case_kinds: &["switch_section", "switch_expression_arm"],

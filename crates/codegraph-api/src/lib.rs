@@ -30,7 +30,10 @@ impl GraphApi {
 
     /// Search symbol theo tên (substring, case-insensitive).
     pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<Symbol>> {
-        self.index().await.search_symbol(query, None, limit as usize).await
+        self.index()
+            .await
+            .search_symbol(query, None, limit as usize)
+            .await
     }
 
     /// Search symbol nâng cao — kind filter + match mode + phân trang.
@@ -175,7 +178,10 @@ impl GraphApi {
         if prefix.is_empty() {
             files
         } else {
-            files.into_iter().filter(|f| f.path.starts_with(prefix)).collect()
+            files
+                .into_iter()
+                .filter(|f| f.path.starts_with(prefix))
+                .collect()
         }
     }
 

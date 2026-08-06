@@ -14,7 +14,10 @@ fn fixture_root() -> Utf8PathBuf {
 async fn index_fixtures() -> (GraphIndex, codegraph_extract::ExtractStats) {
     let mut index = GraphIndex::in_memory();
     let orch = Orchestrator::with_registry();
-    let stats = orch.index_all(&fixture_root(), &mut index, None).await.unwrap();
+    let stats = orch
+        .index_all(&fixture_root(), &mut index, None)
+        .await
+        .unwrap();
     (index, stats)
 }
 
@@ -87,18 +90,12 @@ async fn chains_are_built_for_each_function() {
     assert!(stats.chains > 0, "expected chains in index");
 
     // Flow của một function trả về chain có marker hoặc ít nhất là chính nó.
-    let hits = index
-        .search_symbol("process_user", None, 10)
-        .await
-        .unwrap();
+    let hits = index.search_symbol("process_user", None, 10).await.unwrap();
     let py = hits
         .iter()
         .find(|s| s.language == "python")
         .expect("python process_user");
     let flow = index.flow(py.id).await.unwrap();
-    assert!(
-        !flow.chain.is_empty(),
-        "chain phải chứa chính function id"
-    );
+    assert!(!flow.chain.is_empty(), "chain phải chứa chính function id");
     assert_eq!(flow.chain[0], py.id, "chain bắt đầu bằng owner");
 }

@@ -45,10 +45,7 @@ fn cpp_out_of_class_ctor_with_specifiers_issue_9() {
         ("NodiscardWidget", "[[nodiscard]]"),
         ("CustomWidget", "_CUSTOM_ATTRIBUTE"),
     ] {
-        let ctor = out_of_class
-            .iter()
-            .filter(|(n, _)| n == class)
-            .count();
+        let ctor = out_of_class.iter().filter(|(n, _)| n == class).count();
         assert_eq!(ctor, 3, "{class} phải có 3 ctor, got {out_of_class:?}");
         let dtor = out_of_class
             .iter()

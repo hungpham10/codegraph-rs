@@ -15,10 +15,9 @@
 
 use crate::languages::effects::classify_effect;
 use codegraph_core::{
-    Annotation, CallRecord, Result, ScopeLevel, Symbol, SymbolKind,
-    MARKER_BRANCH_END, MARKER_BREAK, MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE,
-    MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_END,
-    MARKER_THROW, SYMBOL_BASE,
+    Annotation, CallRecord, Result, ScopeLevel, Symbol, SymbolKind, MARKER_BRANCH_END,
+    MARKER_BREAK, MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
+    MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_END, MARKER_THROW, SYMBOL_BASE,
 };
 use codegraph_graph::ParseResult;
 use std::collections::HashMap;
@@ -100,7 +99,12 @@ pub struct LangSpec {
 // ==================== Pipeline ====================
 
 /// Chạy pipeline đầy đủ cho một file → `ParseResult` (input của `GraphIndex::ingest`).
-pub fn run_spec(spec: &'static LangSpec, path: &str, language: &str, source: &str) -> Result<ParseResult> {
+pub fn run_spec(
+    spec: &'static LangSpec,
+    path: &str,
+    language: &str,
+    source: &str,
+) -> Result<ParseResult> {
     let tree = parse_tree(spec, source)?;
     let root = tree.root_node();
     let src = source.as_bytes();
@@ -131,10 +135,7 @@ pub fn run_spec(spec: &'static LangSpec, path: &str, language: &str, source: &st
         .filter(|s| {
             matches!(
                 s.kind,
-                SymbolKind::Class
-                    | SymbolKind::Interface
-                    | SymbolKind::Enum
-                    | SymbolKind::Module
+                SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum | SymbolKind::Module
             )
         })
         .map(|s| ((s.name.clone(), s.line), s.id))
@@ -143,7 +144,15 @@ pub fn run_spec(spec: &'static LangSpec, path: &str, language: &str, source: &st
     // ── Pass 2: chains ──
     let mut chains: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut calls: Vec<CallRecord> = Vec::new();
-    collect_chains(&root, src, spec, &func_index, &class_index, &mut chains, &mut calls);
+    collect_chains(
+        &root,
+        src,
+        spec,
+        &func_index,
+        &class_index,
+        &mut chains,
+        &mut calls,
+    );
 
     Ok(ParseResult {
         path: path.to_string(),
@@ -243,7 +252,10 @@ fn push_symbol(
     ctx.next_id += 1;
 
     let (scope, scope_id) = if spec.param_kinds.contains(&node_kind) {
-        (ScopeLevel::Parameter, ctx.scope_stack.last().map(|(i, _)| *i).unwrap_or(0))
+        (
+            ScopeLevel::Parameter,
+            ctx.scope_stack.last().map(|(i, _)| *i).unwrap_or(0),
+        )
     } else if let Some(&(sid, is_class)) = ctx.scope_stack.last() {
         if is_class {
             (ScopeLevel::ObjectField, sid)
@@ -259,9 +271,7 @@ fn push_symbol(
     // reclassify Function/Method thay vì Variable/Field (giống khai báo hàm thường).
     let kind = if (node_kind == "declaration" || node_kind == "field_declaration")
         && (from_error_ctor
-            || node
-                .child_by_field_name("declarator")
-                .map(|d| d.kind())
+            || node.child_by_field_name("declarator").map(|d| d.kind())
                 == Some("function_declarator"))
     {
         if scope == ScopeLevel::ObjectField {
@@ -283,7 +293,8 @@ fn push_symbol(
 
     let type_name = match kind {
         SymbolKind::Variable | SymbolKind::Constant | SymbolKind::Field | SymbolKind::Parameter => {
-            node.child_by_field_name("type").and_then(|t| text(&t, ctx.src))
+            node.child_by_field_name("type")
+                .and_then(|t| text(&t, ctx.src))
         }
         SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum | SymbolKind::Module => {
             spec.class_type_name.and_then(|f| f(node, ctx.src))
@@ -323,7 +334,10 @@ fn push_symbol(
 fn resolve_type_refs(symbols: &mut [Symbol]) {
     let mut by_name: HashMap<String, u64> = HashMap::new();
     for s in symbols.iter() {
-        if matches!(s.kind, SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum) {
+        if matches!(
+            s.kind,
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum
+        ) {
             by_name.entry(s.name.clone()).or_insert(s.id);
         }
     }
@@ -331,7 +345,9 @@ fn resolve_type_refs(symbols: &mut [Symbol]) {
         if s.type_ref != 0 {
             continue;
         }
-        let Some(tn) = s.type_name.clone() else { continue };
+        let Some(tn) = s.type_name.clone() else {
+            continue;
+        };
         if let Some(&tid) = by_name.get(&base_type_name(&tn)) {
             s.type_ref = tid;
         }
@@ -349,11 +365,7 @@ fn base_type_name(tn: &str) -> String {
     s.rsplit(['.', ':']).next().unwrap_or(s).trim().to_string()
 }
 
-fn extract_annotations(
-    node: &Node,
-    src: &[u8],
-    kinds: &'static [&'static str],
-) -> Vec<Annotation> {
+fn extract_annotations(node: &Node, src: &[u8], kinds: &'static [&'static str]) -> Vec<Annotation> {
     if kinds.is_empty() {
         return Vec::new();
     }
@@ -443,11 +455,7 @@ fn collect_chains(
     }
 }
 
-fn func_id_of(
-    node: &Node,
-    src: &[u8],
-    func_index: &HashMap<(String, u32), u64>,
-) -> Option<u64> {
+fn func_id_of(node: &Node, src: &[u8], func_index: &HashMap<(String, u32), u64>) -> Option<u64> {
     let name_node = node
         .child_by_field_name("name")
         .or_else(|| name_from_declarator(node))
@@ -457,11 +465,7 @@ fn func_id_of(
     func_index.get(&(name, line)).copied()
 }
 
-fn class_id_of(
-    node: &Node,
-    src: &[u8],
-    class_index: &HashMap<(String, u32), u64>,
-) -> Option<u64> {
+fn class_id_of(node: &Node, src: &[u8], class_index: &HashMap<(String, u32), u64>) -> Option<u64> {
     let name_node = node
         .child_by_field_name("name")
         .or_else(|| first_identifier(node))?;
@@ -471,7 +475,12 @@ fn class_id_of(
 }
 
 /// Build chain của một function: `[func_id, marker/call, ...]`.
-pub fn build_chain(node: &Node, src: &[u8], spec: &'static LangSpec, func_id: u64) -> (Vec<u64>, Vec<CallRecord>) {
+pub fn build_chain(
+    node: &Node,
+    src: &[u8],
+    spec: &'static LangSpec,
+    func_id: u64,
+) -> (Vec<u64>, Vec<CallRecord>) {
     let mut ctx = ChainCtx {
         src,
         spec,
@@ -568,9 +577,8 @@ fn walk_chain(
             .filter(|t| !t.is_empty())
             .or_else(|| condition.clone());
         // do-while/repeat: condition chạy SAU body → emit sau.
-        let is_do_while = k.contains("do")
-            || k == "repeat_statement"
-            || k == "repeat_while_statement";
+        let is_do_while =
+            k.contains("do") || k == "repeat_statement" || k == "repeat_while_statement";
         if !is_do_while {
             if let Some(cn) = cond_node {
                 walk_chain(ctx, &cn, depth + 1, in_loop + 1, loop_cond.clone());
@@ -717,14 +725,26 @@ fn walk_alternative(
     }
 }
 
-fn walk_block(ctx: &mut ChainCtx, node: &Node, depth: u32, in_loop: u32, condition: Option<String>) {
+fn walk_block(
+    ctx: &mut ChainCtx,
+    node: &Node,
+    depth: u32,
+    in_loop: u32,
+    condition: Option<String>,
+) {
     for ch in named_children(node) {
         walk_chain(ctx, &ch, depth, in_loop, condition.clone());
     }
 }
 
 /// Walk một clause (except/else/finally) — body field nếu có, không thì toàn node.
-fn walk_clause(ctx: &mut ChainCtx, node: &Node, depth: u32, in_loop: u32, condition: Option<String>) {
+fn walk_clause(
+    ctx: &mut ChainCtx,
+    node: &Node,
+    depth: u32,
+    in_loop: u32,
+    condition: Option<String>,
+) {
     if let Some(b) = node.child_by_field_name(ctx.spec.body_field) {
         walk_chain(ctx, &b, depth, in_loop, condition);
     } else {
@@ -822,12 +842,7 @@ fn switch_cases<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Vec<Node<'a>> {
 /// chuỗi, không phải call thật. Emit placeholder `0` + CallRecord với
 /// `call_name = literal` (bỏ quote) để `search_by_call` index được. Không có
 /// symbol tương ứng trong repo → không resolve được → giữ unresolved call.
-fn emit_case_label_call(
-    ctx: &mut ChainCtx,
-    case: &Node,
-    in_loop: u32,
-    condition: Option<String>,
-) {
+fn emit_case_label_call(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition: Option<String>) {
     // Field `value` là expression của case (`case X:` → X). Fallback: named child
     // đầu tiên (một số grammar không đặt field).
     let value = case
@@ -837,8 +852,12 @@ fn emit_case_label_call(
     if !is_string_literal_kind(value.kind()) {
         return;
     }
-    let Some(lit) = text(&value, ctx.src) else { return };
-    let Some(name) = string_literal_value(&lit) else { return };
+    let Some(lit) = text(&value, ctx.src) else {
+        return;
+    };
+    let Some(name) = string_literal_value(&lit) else {
+        return;
+    };
     if name.is_empty() {
         return;
     }
@@ -1027,7 +1046,9 @@ fn declarator_child<'a>(n: &Node<'a>) -> Option<Node<'a>> {
     if let Some(d) = n.child_by_field_name("declarator") {
         return Some(d);
     }
-    named_children(n).into_iter().find(|c| is_declarator_kind(c.kind()))
+    named_children(n)
+        .into_iter()
+        .find(|c| is_declarator_kind(c.kind()))
 }
 
 fn is_declarator_kind(kind: &str) -> bool {
@@ -1053,7 +1074,9 @@ fn is_declarator_kind(kind: &str) -> bool {
 }
 
 fn is_conversion_declarator(n: &Node) -> bool {
-    n.parent().map(|p| p.kind() == "operator_cast").unwrap_or(false)
+    n.parent()
+        .map(|p| p.kind() == "operator_cast")
+        .unwrap_or(false)
 }
 
 /// DFS tìm identifier đầu tiên trong subtree.

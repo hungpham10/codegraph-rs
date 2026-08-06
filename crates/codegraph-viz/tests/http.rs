@@ -140,7 +140,9 @@ async fn http_search_kind_match_and_neighbors() {
 
     // kind=function + match=exact → chỉ còn func main (bỏ variable cùng tên).
     let hits: serde_json::Value = client
-        .get(format!("{base}/api/search?q=main&kind=function&match=exact"))
+        .get(format!(
+            "{base}/api/search?q=main&kind=function&match=exact"
+        ))
         .send()
         .await
         .unwrap()
@@ -155,7 +157,9 @@ async fn http_search_kind_match_and_neighbors() {
 
     // kind=variable + match=exact → variable cùng tên.
     let hits: serde_json::Value = client
-        .get(format!("{base}/api/search?q=main&kind=variable&match=exact"))
+        .get(format!(
+            "{base}/api/search?q=main&kind=variable&match=exact"
+        ))
         .send()
         .await
         .unwrap()

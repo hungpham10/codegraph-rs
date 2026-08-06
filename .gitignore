@@ -58,3 +58,7 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Bench repos được fetch về (danh sách nguồn: benches/repos/sources.txt)
+benches/repos/checkout/
+benches/repos/list.txt

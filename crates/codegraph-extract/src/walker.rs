@@ -29,7 +29,10 @@ pub fn build_ext_map(parsers: &[Arc<dyn LangParser>]) -> ExtMap {
     ext_map
 }
 
-fn find_parser<'a>(parsers: &'a [Arc<dyn LangParser>], lang: &str) -> Option<&'a Arc<dyn LangParser>> {
+fn find_parser<'a>(
+    parsers: &'a [Arc<dyn LangParser>],
+    lang: &str,
+) -> Option<&'a Arc<dyn LangParser>> {
     parsers.iter().find(|p| p.name() == lang)
 }
 

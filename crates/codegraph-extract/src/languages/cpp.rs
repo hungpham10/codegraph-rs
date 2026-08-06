@@ -37,7 +37,12 @@ pub static SPEC: LangSpec = LangSpec {
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],
-    loop_kinds: &["for_statement", "for_range_loop", "while_statement", "do_statement"],
+    loop_kinds: &[
+        "for_statement",
+        "for_range_loop",
+        "while_statement",
+        "do_statement",
+    ],
     switch_kinds: &["switch_statement"],
     switch_block_kinds: &[],
     switch_case_kinds: &["case_statement"],

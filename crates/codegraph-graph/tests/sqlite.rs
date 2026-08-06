@@ -7,7 +7,7 @@
 
 #![cfg(feature = "sqlite")]
 
-use codegraph_core::{CallRecord, EffectType, Symbol, SymbolKind, SYMBOL_BASE};
+use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind};
 use codegraph_graph::{GraphIndex, ParseResult, SharedGraphIndex};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -105,10 +105,7 @@ async fn index_ingest_reopen_roundtrip() {
     assert_eq!(flow.calls[0].line, 3);
 
     // search_flow qua chain engine persistent.
-    let sf = idx
-        .search_flow(&[SYMBOL_BASE + 1])
-        .await
-        .unwrap();
+    let sf = idx.search_flow(&[SYMBOL_BASE + 1]).await.unwrap();
     assert_eq!(sf.len(), 1);
     assert_eq!(sf[0].function_name, "a");
 }
@@ -221,11 +218,20 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
     assert_eq!(s2.file, "cache/cache.go");
 
     // Cả 2 đều giữ chain riêng → flow không bị "chain not found".
-    assert_eq!(idx.flow(SYMBOL_BASE).await.unwrap().chain_desc, vec!["process"]);
-    assert_eq!(idx.flow(SYMBOL_BASE + 1).await.unwrap().chain_desc, vec!["process"]);
+    assert_eq!(
+        idx.flow(SYMBOL_BASE).await.unwrap().chain_desc,
+        vec!["process"]
+    );
+    assert_eq!(
+        idx.flow(SYMBOL_BASE + 1).await.unwrap().chain_desc,
+        vec!["process"]
+    );
 
     // Search tên trả đủ 2 kết quả (không hoà trộn thành 1).
-    let hits = idx.search_symbol("process", Some(SymbolKind::Function), 10).await.unwrap();
+    let hits = idx
+        .search_symbol("process", Some(SymbolKind::Function), 10)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 2);
     let mut files: Vec<&str> = hits.iter().map(|s| s.file.as_str()).collect();
     files.sort_unstable();

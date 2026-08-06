@@ -1,0 +1,11 @@
+# Danh sách repo codspeed để benchmark — mỗi dòng: <name>|<git-url>|<commit-sha>
+#
+# Sửa/thêm dòng để thay đổi tập repo (được fetch về theo `benches/fetch_repos.sh`).
+# Commit SHA cố định (pinned) để dữ liệu đầu vào giữ nguyên giữa các lần chạy,
+# giúp CodSpeed so sánh performance ổn định. Muốn cập nhật thì đổi SHA rồi re-run.
+#
+# Các repo nhỏ, đa ngôn ngữ để phủ parser của codegraph-extract:
+hello|https://github.com/golang/example|7f05d217867b2af52b0a28c6d1c91df97e1b5b39
+serde-json|https://github.com/serde-rs/json|a3e9758ffc88247ab82182cb2505867768a702e3
+flask|https://github.com/pallets/flask|6a2f545bfd8ed31e19066a299296917e034aca58
+express|https://github.com/expressjs/express|a3714473feb3d2908add734d340e7755fd85e0a3

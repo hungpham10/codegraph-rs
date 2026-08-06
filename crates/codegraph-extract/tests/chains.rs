@@ -73,7 +73,16 @@ def process(x):
     );
     assert_eq!(
         c,
-        ["[LOOP]", "[IF_TRUE]", "save", "[IF_FALSE]", "skip", "[BRANCH_END]", "[LOOP_BACK]", "[RETURN]"]
+        [
+            "[LOOP]",
+            "[IF_TRUE]",
+            "save",
+            "[IF_FALSE]",
+            "skip",
+            "[BRANCH_END]",
+            "[LOOP_BACK]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -121,7 +130,14 @@ def process(x):
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "one", "[SWITCH_END]", "[SWITCH_CASE]", "other", "[SWITCH_END]"]
+        [
+            "[SWITCH_CASE]",
+            "one",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "other",
+            "[SWITCH_END]"
+        ]
     );
 }
 
@@ -144,17 +160,22 @@ class Foo {
     );
     assert_eq!(
         c,
-        ["obj.run", "[IF_TRUE]", "this.helper", "[IF_FALSE]", "fallback", "[BRANCH_END]"]
+        [
+            "obj.run",
+            "[IF_TRUE]",
+            "this.helper",
+            "[IF_FALSE]",
+            "fallback",
+            "[BRANCH_END]"
+        ]
     );
 }
 
 #[test]
 fn diag_go_terraform_root_main() {
     use codegraph_core::marker_name;
-    let src = std::fs::read_to_string(
-        "/Users/lap02921/Desktop/Workspace/terraform/main.go",
-    )
-    .expect("read terraform main.go");
+    let src = std::fs::read_to_string("/Users/lap02921/Desktop/Workspace/terraform/main.go")
+        .expect("read terraform main.go");
     let parser = registry()
         .into_iter()
         .find(|p| p.name() == "go")
@@ -168,30 +189,32 @@ fn diag_go_terraform_root_main() {
             s.kind,
             s.name,
             s.line,
-            chain
-                .map(|c| c
-                    .iter()
-                    .enumerate()
-                    .skip(1)
-                    .map(|(i, id)| if let Some(m) = marker_name(*id) {
-                        format!("[{m}]")
-                    } else if *id == 0 {
-                        res.calls
-                            .iter()
-                            .find(|c2| c2.position == i)
-                            .map(|c2| c2.call_name.clone())
-                            .unwrap_or_else(|| "?0".into())
-                    } else {
-                        res.symbols
-                            .iter()
-                            .find(|s2| s2.id == *id)
-                            .map(|s2| s2.name.clone())
-                            .unwrap_or_else(|| format!("?{id}"))
-                    })
-                    .collect::<Vec<_>>())
+            chain.map(|c| c
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(i, id)| if let Some(m) = marker_name(*id) {
+                    format!("[{m}]")
+                } else if *id == 0 {
+                    res.calls
+                        .iter()
+                        .find(|c2| c2.position == i)
+                        .map(|c2| c2.call_name.clone())
+                        .unwrap_or_else(|| "?0".into())
+                } else {
+                    res.symbols
+                        .iter()
+                        .find(|s2| s2.id == *id)
+                        .map(|s2| s2.name.clone())
+                        .unwrap_or_else(|| format!("?{id}"))
+                })
+                .collect::<Vec<_>>())
         );
     }
-    assert!(res.symbols.iter().any(|s| s.name == "main"), "no main symbol");
+    assert!(
+        res.symbols.iter().any(|s| s.name == "main"),
+        "no main symbol"
+    );
 }
 
 #[test]
@@ -248,7 +271,15 @@ end
     );
     assert_eq!(
         c,
-        ["[IF_TRUE]", "validate", "[IF_TRUE]", "warn", "fail", "[BRANCH_END]", "[BRANCH_END]"]
+        [
+            "[IF_TRUE]",
+            "validate",
+            "[IF_TRUE]",
+            "warn",
+            "fail",
+            "[BRANCH_END]",
+            "[BRANCH_END]"
+        ]
     );
 }
 
@@ -387,7 +418,15 @@ fn f(x: i32) -> i32 {
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "one", "[SWITCH_END]", "[SWITCH_CASE]", "other", "[SWITCH_END]", "[RETURN]"]
+        [
+            "[SWITCH_CASE]",
+            "one",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "other",
+            "[SWITCH_END]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -408,7 +447,15 @@ class Foo {
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "a", "[BREAK]", "[SWITCH_END]", "[SWITCH_CASE]", "b", "[SWITCH_END]"]
+        [
+            "[SWITCH_CASE]",
+            "a",
+            "[BREAK]",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "b",
+            "[SWITCH_END]"
+        ]
     );
 }
 
@@ -432,7 +479,17 @@ end
     );
     assert_eq!(
         c,
-        ["[IF_TRUE]", "validate", "[IF_FALSE]", "fail", "[BRANCH_END]", "[LOOP]", "save", "[LOOP_BACK]", "[RETURN]"]
+        [
+            "[IF_TRUE]",
+            "validate",
+            "[IF_FALSE]",
+            "fail",
+            "[BRANCH_END]",
+            "[LOOP]",
+            "save",
+            "[LOOP_BACK]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -454,7 +511,14 @@ function process($x) {
     );
     assert_eq!(
         c,
-        ["[LOOP]", "save", "[LOOP_BACK]", "obj.method", "self.run", "[RETURN]"]
+        [
+            "[LOOP]",
+            "save",
+            "[LOOP_BACK]",
+            "obj.method",
+            "self.run",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -474,7 +538,15 @@ def f(x: Int) = {
     );
     assert_eq!(
         c,
-        ["[SWITCH_CASE]", "one", "[SWITCH_END]", "[SWITCH_CASE]", "other", "[SWITCH_END]", "[RETURN]"]
+        [
+            "[SWITCH_CASE]",
+            "one",
+            "[SWITCH_END]",
+            "[SWITCH_CASE]",
+            "other",
+            "[SWITCH_END]",
+            "[RETURN]"
+        ]
     );
 }
 
@@ -494,7 +566,14 @@ int add(int a, int b) {
     );
     assert_eq!(
         c,
-        ["[IF_TRUE]", "[RETURN]", "compute", "[IF_FALSE]", "[RETURN]", "[BRANCH_END]"]
+        [
+            "[IF_TRUE]",
+            "[RETURN]",
+            "compute",
+            "[IF_FALSE]",
+            "[RETURN]",
+            "[BRANCH_END]"
+        ]
     );
 }
 
@@ -544,10 +623,7 @@ int f(int x) {
 }
 "#,
     );
-    assert_eq!(
-        c,
-        ["[LOOP]", "e", "a", "b", "c", "[LOOP_BACK]", "[RETURN]"]
-    );
+    assert_eq!(c, ["[LOOP]", "e", "a", "b", "c", "[LOOP_BACK]", "[RETURN]"]);
 }
 
 /// Text condition của `if` được giữ làm metadata (CallRecord.condition của call
@@ -635,10 +711,7 @@ func f() {
 }
 "#,
     );
-    assert_eq!(
-        c,
-        ["[LOOP]", "a", "b", "c", "d", "[LOOP_BACK]", "[RETURN]"]
-    );
+    assert_eq!(c, ["[LOOP]", "a", "b", "c", "d", "[LOOP_BACK]", "[RETURN]"]);
 }
 
 /// Switch discriminant (`switch (getType(x))`) cũng vào chain trước các case.

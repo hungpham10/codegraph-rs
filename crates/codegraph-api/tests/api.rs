@@ -122,7 +122,10 @@ async fn search_flow_pattern_and_references() {
     let api = api(&db_str).await;
 
     // Pattern theo tên symbol.
-    let sf = api.search_flow_pattern(&format!("{caller}, {callee}")).await.unwrap();
+    let sf = api
+        .search_flow_pattern(&format!("{caller}, {callee}"))
+        .await
+        .unwrap();
     assert_eq!(sf.len(), 1);
     assert_eq!(sf[0].function_name, "caller");
 

@@ -17,7 +17,22 @@ use tokio::sync::RwLock;
 
 use crate::storage::{self, Storage};
 
+#[cfg(feature = "bloom-search")]
+use crate::bloom::BloomFilter;
+
 pub const EMPTY: usize = 0;
+
+/// Cấu hình bloom filter prune nhánh trong `search_dfs` (feature `bloom-search`).
+#[cfg(feature = "bloom-search")]
+pub mod bloom_cfg {
+    /// Số bit của bloom filter mỗi node (làm tròn lên power of 2 trong `new`).
+    pub const SIZE: usize = 4096;
+    /// Số hash functions.
+    pub const K: usize = 10;
+    /// Chỉ prune khi substring còn lại của pattern ≤ cap này — bloom chỉ lưu
+    /// substring ngắn, nên pattern dài hơn cap sẽ không bị prune (không sai).
+    pub const MATCH_CAP: usize = 16;
+}
 
 /// Phần tử trong key của radix tree.
 pub trait Element: Eq + Hash + Clone + Copy + Debug + Send + Sync + 'static {
@@ -103,7 +118,7 @@ pub type SearchMatcher<T> = Arc<dyn Fn(&[T], &[T], usize) -> OnMatchCallback + S
 /// shortcuts/cache dựa trên `old_prefix` + `breakpoint` rồi để radix commit.
 pub type OnSplitCallback<T> = Arc<dyn Fn(usize, usize, &[T], usize) -> Result<()> + Send + Sync>;
 
-/// Callback khi chạm tới một node cụ thể, chứa thông tin đầy đủ về node 
+/// Callback khi chạm tới một node cụ thể, chứa thông tin đầy đủ về node
 /// đó dưới dạng metadata, có cấu trúc dạng node, metadata và trả về id của
 /// node, lưu ý vì đây là callback access nên nó có thể bị trùng hoặc gọi lại
 /// nhiều lần nhưng phải trả về cùng 1 id nếu trùng
@@ -217,6 +232,7 @@ impl<T: Element> Radix<T> {
                 let id = self
                     .split(node_id, common, &prefix[split_off..], index)
                     .await?;
+                self.maintain_bloom(prefix).await?;
                 return Ok((id, tail));
             }
 
@@ -230,6 +246,7 @@ impl<T: Element> Radix<T> {
                         .await
                         .update_node(node_id, None, Some(index))
                         .await?;
+                    self.maintain_bloom(prefix).await?;
                     return Ok((node_id, tail));
                 }
                 return Ok((EMPTY, tail));
@@ -250,6 +267,7 @@ impl<T: Element> Radix<T> {
             }
             if !found {
                 let id = self.extend(node_id, &prefix[tail..], index).await?;
+                self.maintain_bloom(prefix).await?;
                 return Ok((id, tail));
             }
         }
@@ -276,6 +294,7 @@ impl<T: Element> Radix<T> {
                 .await
                 .add_shortcut_node(si, &prefix[0].encode(), root)
                 .await?;
+            self.maintain_bloom(prefix).await?;
             return Ok((leaf, 1));
         }
         let id = self
@@ -286,6 +305,7 @@ impl<T: Element> Radix<T> {
             .await?;
         let si = shard_of(prefix[0], self.sharding);
         self.storage.write().await.set_root(si, id).await?;
+        self.maintain_bloom(prefix).await?;
         Ok((id, 0))
     }
 
@@ -530,6 +550,8 @@ impl<T: Element> Radix<T> {
         pattern: &[T],
         matcher: SearchMatcher<T>,
     ) -> Result<Vec<usize>> {
+        let mut records = Vec::new();
+
         if pattern.is_empty() {
             return Err(Error::NotFound);
         }
@@ -538,7 +560,10 @@ impl<T: Element> Radix<T> {
             self.storage
                 .read()
                 .await
-                .get_root(shard_of(pattern[0], self.sharding))
+                .get_root(shard_of(
+                    pattern[0], 
+                    self.sharding,
+                ))
                 .await?
         } else {
             begin
@@ -548,8 +573,13 @@ impl<T: Element> Radix<T> {
             return Ok(Vec::new());
         }
 
-        let mut records = Vec::new();
-        self.dfs_search(node_id, pattern, matcher, 0, &mut records)
+        self.search_dfs_iter(
+                node_id, 
+                pattern, 
+                matcher, 
+                0, 
+                &mut records,
+            )
             .await?;
         Ok(records)
     }
@@ -560,7 +590,7 @@ impl<T: Element> Radix<T> {
     /// `pattern_pos` tại node entry luôn là vị trí pattern bắt đầu dò trên
     /// prefix của node này (data_pos = 0).
     #[inline]
-    async fn dfs_search(
+    async fn search_dfs_iter(
         &self,
         node_id: usize,
         pattern: &[T],
@@ -587,12 +617,37 @@ impl<T: Element> Radix<T> {
             if pp == 0 || pp >= pattern.len() {
                 continue;
             }
+
             let next_elem = pattern[pp];
             for &child in &children {
                 let (cp_bytes, _) = { self.storage.read().await.get_node(child).await? };
                 let cp = Self::to_vec(&cp_bytes);
+
                 if !cp.is_empty() && cp[0] == next_elem {
-                    Box::pin(self.dfs_search(child, pattern, matcher.clone(), pp, out)).await?;
+                    // Prune nhánh: bloom của child không chứa `pattern[pp..]`
+                    // (substring) → subtree chắc chắn không có match tiếp tục,
+                    // bỏ nhánh. Bloom có 0 false negative nên không bao giờ bỏ
+                    // nhánh có match thật. Chỉ prune khi substring đủ ngắn và
+                    // child có bloom (không có → fallback full traversal).
+                    #[cfg(feature = "bloom-search")]
+                    {
+                        let remaining_len = pattern.len() - pp;
+                        if remaining_len <= bloom_cfg::MATCH_CAP {
+                            let bloom_bytes =
+                                { self.storage.read().await.get_node_bloom(child).await? };
+                            if let Some(bloom_bytes) = bloom_bytes {
+                                if let Some(bf) = BloomFilter::deserialize(&bloom_bytes) {
+                                    let remaining = Self::from_vec(&pattern[pp..]);
+                                    if !bf.contains(&remaining) {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Box::pin(self.search_dfs_iter(child, pattern, matcher.clone(), pp, out))
+                        .await?;
                     if !out.is_empty() {
                         return Ok(());
                     }
@@ -698,8 +753,8 @@ impl<T: Element> Radix<T> {
 
     /// Follow key từ root → leaf, trả về toàn bộ node ids trên đường đi.
     /// Dùng để tìm ancestors khi cập nhật bloom filters sau insert.
-    #[cfg(test)]
-    pub async fn follow_path(&self, key: &[T]) -> Result<Vec<usize>> {
+    #[cfg(feature = "bloom-search")]
+    async fn follow_path(&self, key: &[T]) -> Result<Vec<usize>> {
         if key.is_empty() {
             return Ok(Vec::new());
         }
@@ -748,6 +803,60 @@ impl<T: Element> Radix<T> {
             }
             path.push(node_id);
         }
+    }
+
+    /// Duy trì bloom filter sau mỗi mutation (insert/update record): no-op khi
+    /// feature `bloom-search` tắt. Mỗi node trên path của `key` nhận mọi
+    /// substring của `key` (giới hạn `MATCH_CAP`) — đây chính là điều kiện để
+    /// `search_dfs` prune nhánh con không chứa `pattern[pp..]`.
+    async fn maintain_bloom(&self, key: &[T]) -> Result<()> {
+        #[cfg(feature = "bloom-search")]
+        {
+            if key.is_empty() {
+                return Ok(());
+            }
+            let enc = Self::from_vec(key);
+            let bs = T::byte_size();
+            let elem_len = enc.len() / bs;
+            if elem_len == 0 {
+                return Ok(());
+            }
+
+            // Mọi substring aligned theo element, dài 1..=cap element.
+            let cap = bloom_cfg::MATCH_CAP.min(elem_len);
+            let mut subs: Vec<Vec<u8>> = Vec::new();
+            for start in 0..elem_len {
+                for end in (start + 1)..=(start + cap) {
+                    if end > elem_len {
+                        break;
+                    }
+                    subs.push(enc[start * bs..end * bs].to_vec());
+                }
+            }
+
+            let path = self.follow_path(key).await?;
+            for node_id in path {
+                let mut bf = self
+                    .storage
+                    .read()
+                    .await
+                    .get_node_bloom(node_id)
+                    .await?
+                    .and_then(|b| BloomFilter::deserialize(&b))
+                    .unwrap_or_else(|| BloomFilter::new(bloom_cfg::SIZE, bloom_cfg::K));
+                for s in &subs {
+                    bf.insert(s);
+                }
+                self.storage
+                    .write()
+                    .await
+                    .set_node_bloom(node_id, &bf.serialize())
+                    .await?;
+            }
+        }
+        #[cfg(not(feature = "bloom-search"))]
+        let _ = key;
+        Ok(())
     }
 }
 
@@ -964,7 +1073,9 @@ mod tests {
     async fn test_follow_path() {
         let mut tree = Radix::in_memory(4);
         tree.insert(&k("hello"), 1, &no_meta(5)).await.unwrap();
-        tree.insert(&k("helloworld"), 2, &no_meta(10)).await.unwrap();
+        tree.insert(&k("helloworld"), 2, &no_meta(10))
+            .await
+            .unwrap();
 
         let path = tree.follow_path(&k("helloworld")).await.unwrap();
         assert!(!path.is_empty(), "path không rỗng");
@@ -1076,16 +1187,28 @@ mod tests {
         // Metadata lưu vào node stream, keyed theo id callback trả về (= elem).
         let storage = tree.storage.read().await;
         assert_eq!(
-            storage.get_node_meta(b'a' as usize).await.unwrap().as_deref(),
+            storage
+                .get_node_meta(b'a' as usize)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"ma".as_slice())
         );
         assert_eq!(
-            storage.get_node_meta(b'b' as usize).await.unwrap().as_deref(),
+            storage
+                .get_node_meta(b'b' as usize)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"mb".as_slice())
         );
         assert_eq!(storage.get_node_meta(b'c' as usize).await.unwrap(), None);
         assert_eq!(
-            storage.get_node_meta(b'd' as usize).await.unwrap().as_deref(),
+            storage
+                .get_node_meta(b'd' as usize)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"md".as_slice())
         );
         drop(storage);
@@ -1129,7 +1252,11 @@ mod tests {
         assert_eq!(id, b'x' as usize);
         let storage = tree.storage.read().await;
         assert_eq!(
-            storage.get_node_meta(b'x' as usize).await.unwrap().as_deref(),
+            storage
+                .get_node_meta(b'x' as usize)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"mx".as_slice())
         );
         drop(storage);
@@ -1138,7 +1265,11 @@ mod tests {
         tree.register_node(b'x', b"mx2").await.unwrap();
         let storage = tree.storage.read().await;
         assert_eq!(
-            storage.get_node_meta(b'x' as usize).await.unwrap().as_deref(),
+            storage
+                .get_node_meta(b'x' as usize)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"mx2".as_slice())
         );
         drop(storage);
