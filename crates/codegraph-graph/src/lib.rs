@@ -49,6 +49,7 @@ use tokio::sync::RwLock;
 
 #[cfg(feature = "bloom-search")]
 mod bloom;
+pub mod diff;
 mod radix;
 mod search;
 mod shared;

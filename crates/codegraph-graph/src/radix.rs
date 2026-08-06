@@ -423,8 +423,21 @@ impl<T: Element> Radix<T> {
     /// Theo dõi `key` từ root → trả `Vec<usize>` node id dọc theo đường đi
     /// (node đầu là root của shard). Chỉ dùng trong test để biết node con
     /// trên đường đi khi muốn `search_dfs` bắt đầu từ một node giữa.
-    #[cfg(test)]
-    pub async fn follow_path(&self, key: &[T]) -> Result<Vec<usize>> {
+    ///
+    /// Ngoài test, chỉ được gọi từ `maintain_bloom` — khi feature
+    /// `bloom-search` tắt hàm thành dead code, nên ghi `allow(dead_code)`.
+    #[allow(dead_code)]
+    async fn follow_path(&self, key: &[T]) -> Result<Vec<usize>> {
+        #[cfg(feature = "bloom-search")]
+        #[allow(unreachable_code)]
+        return self.follow_path_with_bloom(key).await;
+
+        #[allow(unreachable_code)]
+        return self.follow_path_default(key).await;
+    }
+
+    #[allow(dead_code)]
+    async fn follow_path_default(&self, key: &[T]) -> Result<Vec<usize>> {
         if key.is_empty() {
             return Ok(Vec::new());
         }
@@ -681,13 +694,11 @@ impl<T: Element> Radix<T> {
                         if remaining_len <= bloom_cfg::MATCH_CAP {
                             let bloom_bytes =
                                 { self.storage.read().await.get_node_bloom(child).await? };
-                            if let Some(bloom_bytes) = bloom_bytes {
-                                if let Some(bf) = BloomFilter::deserialize(&bloom_bytes) {
-                                    let remaining = Self::from_vec(&pattern[pp..]);
-                                    if !bf.contains(&remaining) {
-                                        continue;
-                                    }
-                                }
+                            if let Some(bloom_bytes) = bloom_bytes
+                                && let Some(bf) = BloomFilter::deserialize(&bloom_bytes)
+                                && !bf.contains(&Self::from_vec(&pattern[pp..]))
+                            {
+                                continue;
                             }
                         }
                     }
@@ -800,7 +811,7 @@ impl<T: Element> Radix<T> {
     /// Follow key từ root → leaf, trả về toàn bộ node ids trên đường đi.
     /// Dùng để tìm ancestors khi cập nhật bloom filters sau insert.
     #[cfg(feature = "bloom-search")]
-    async fn follow_path(&self, key: &[T]) -> Result<Vec<usize>> {
+    async fn follow_path_with_bloom(&self, key: &[T]) -> Result<Vec<usize>> {
         if key.is_empty() {
             return Ok(Vec::new());
         }

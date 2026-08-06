@@ -6,6 +6,7 @@ members = [
     "crates/codegraph-graph",
     "crates/codegraph-context",
     "crates/codegraph-api",
+    "crates/codegraph-sboxes",
     "crates/codegraph-mcp",
     "crates/codegraph-bench",
     "crates/codegraph-installer",

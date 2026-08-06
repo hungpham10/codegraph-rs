@@ -82,6 +82,19 @@ enum Cmd {
     },
     /// Configure agents (alias for the agent setup step in `init`).
     Install,
+    /// Run a function in the behavior-verification sandbox: compile the
+    /// function (and its in-group callees) to machine code, bind external
+    /// callees to Rhai mocks, run it, and print the observed-behavior trace.
+    Sandbox {
+        /// Entry function name (substring; first match wins).
+        function: String,
+        /// Comma-separated abstract arg values (i64) for the entry function.
+        #[arg(long, default_value = "")]
+        args: String,
+        /// Do not print the trace, only the return value.
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -121,6 +134,9 @@ fn main() -> Result<()> {
         } => cmd_context(&root, &target, depth, source),
         Cmd::Serve { mcp } => cmd_serve(&root, mcp),
         Cmd::Install => cmd_agents(&root),
+        Cmd::Sandbox { function, args, quiet } => {
+            cmd_sandbox(&root, &function, &args, quiet)
+        }
     }
 }
 
@@ -496,5 +512,86 @@ fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
             McpServer::new(root.to_path_buf(), Some(db_path.into_std_path_buf())).await?;
         mcp_server.run_stdio().await
     })?;
+    Ok(())
+}
+
+/// `codegraph sandbox <function>` — compile a function group to machine code,
+/// bind external callees to Rhai mocks, run it, and print the observed trace.
+fn cmd_sandbox(root: &Utf8Path, function: &str, args: &str, quiet: bool) -> Result<()> {
+    use codegraph_core::SymbolKind;
+    use codegraph_sboxes::SboxConfig;
+
+    ensure_initialized(root)?;
+    let db_path = db_path(root);
+    let function = function.to_string();
+    let args: Vec<i64> = args
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().parse().map_err(|e| anyhow!("bad arg `{s}`: {e}")))
+        .collect::<Result<_>>()?;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let (ret, trace, group_names) = rt.block_on(async {
+        let sgi = Arc::new(
+            codegraph_graph::SharedGraphIndex::open(Some(db_path.into_std_path_buf())).await?,
+        );
+        let idx = sgi.ensure_fresh().await;
+
+        // Resolve the entry function (substring, first function match).
+        let hits = idx
+            .search_symbol(&function, Some(SymbolKind::Function), 1)
+            .await?;
+        let entry = hits
+            .first()
+            .ok_or_else(|| anyhow!("no function matching `{function}`"))?;
+        let entry_id = entry.id;
+
+        // Build the group: the entry plus every callee in its flow that is a
+        // known symbol (so those calls compile to real machine code instead of
+        // a mock). Unresolved/external calls stay mocked.
+        let flow = idx.flow(entry_id).await?;
+        let mut ids = vec![entry_id];
+        let mut seen = std::collections::HashSet::from([entry_id]);
+        for &e in &flow.chain {
+            if codegraph_core::is_marker(e) {
+                continue;
+            }
+            if e != entry_id && idx.symbol_by_id(e).is_some() && seen.insert(e) {
+                ids.push(e);
+            }
+        }
+        ids.sort_unstable();
+
+        let config = SboxConfig::load(&root.to_path_buf()).unwrap_or_default();
+        let mut module = codegraph_sboxes::compile(&idx, &ids, &config).await?;
+        let (ret, trace) = module.run(&args);
+
+        let mut names: Vec<String> = ids
+            .iter()
+            .filter_map(|id| idx.symbol_by_id(*id))
+            .map(|s| s.name)
+            .collect();
+        names.sort();
+        Ok::<_, anyhow::Error>((ret, trace, names))
+    })?;
+
+    println!("group:   {}", group_names.join(", "));
+    println!("return:  {ret}");
+    if quiet {
+        return Ok(());
+    }
+    for (i, name) in trace.mock_names().iter().enumerate() {
+        println!("  {i}: call {name}");
+    }
+    for c in &trace.conds {
+        println!(
+            "  {:>4}: {} -> {}",
+            c.idx,
+            c.kind.as_str(),
+            if c.result { "taken" } else { "skipped" }
+        );
+    }
     Ok(())
 }

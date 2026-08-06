@@ -1,10 +1,12 @@
 use camino::Utf8Path;
 use codegraph_api::GraphApi;
 use codegraph_context::{ContextRequest, Format};
-use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
+use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch, is_marker};
 use codegraph_extract::{init_project, project_db_path, project_dir, ExtractStats, Orchestrator};
-use codegraph_graph::GraphIndex;
+use codegraph_graph::{GraphIndex, SharedGraphIndex};
+use codegraph_sboxes::{BranchPolicy, SboxConfig, compile_with_mocks};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 pub fn tool_definitions() -> Vec<Value> {
     vec![
@@ -187,6 +189,27 @@ pub fn tool_definitions() -> Vec<Value> {
                 "limit": { "type": "integer", "default": 0 },
                 "reset": { "type": "boolean", "default": false }
             } }),
+        ),
+        // ── Behavior sandbox (compile a flow to machine code + run with mocks) ──
+        tool(
+            "codegraph_sandbox",
+            "Run a sandbox simulation of a function's flow: compile the entry function + its in-flow callees into machine code (Cranelift JIT) and run it with Rhai mocks. `mocks` maps a callee name to a Rhai body (auto-wrapped into `fn <name>(args) { … }` where `args` is the call's i64 array) or a full `fn <name>(args) { … }` script; inline mocks override `[sandbox].mock_dirs` files. Before compiling, every callee that will be mock-dispatched must have a mock (file or `mocks`); if any is unconfigured the call fails with `link failed: no mock configured for callee(s): …`. Returns the entry return value, the ordered mock invocations, control-flow decisions (if/loop/switch taken/skipped), and any callees that still ran without a mock (`missing_mocks`).",
+            json!({ "type": "object", "properties": {
+                "node": { "type": "integer", "description": "Entry function symbol id (from codegraph_search / codegraph_flow)." },
+                "name": { "type": "string", "description": "Entry function name (substring → first function match); used when node is omitted." },
+                "args": { "type": "array", "items": { "type": "integer" }, "description": "Abstract i64 arguments passed to the entry function." },
+                "mocks": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Callee name → Rhai mock body or full `fn` source." },
+                "branch_policy": { "type": "string", "enum": ["if_true", "if_false"], "description": "Override config branch_policy (default from config.toml)." },
+                "loop_cap": { "type": "integer", "description": "Override config loop_cap — max loop iterations, guarantees termination." }
+            } }),
+        ),
+        // ── Diff draft (unified diff → graph impact, read-only) ──
+        tool(
+            "codegraph_diff",
+            "Analyze a unified diff (MR / patch file / `git diff` output) against the indexed graph and produce a DRAFT report of what would change in codegraph-graph: which symbols (functions/methods/classes) are touched (by line overlap), which flows contain call sites on changed lines, the control-flow marker window around each affected call (IF_TRUE/LOOP/BRANCH_END…), and which flows call the touched functions. The index itself is NOT mutated — this is a dry-run assessment you can review before applying the diff.",
+            json!({ "type": "object", "properties": {
+                "diff": { "type": "string", "description": "Unified diff text: `git diff` output, a .patch file content, or the diff from an MR. Supports multi-file diffs, added/removed/renamed files, and `\\ No newline at end of file`." }
+            }, "required": ["diff"] }),
         ),
     ]
 }
@@ -605,4 +628,125 @@ fn stats_json(s: &ExtractStats) -> Value {
         "calls": s.calls,
         "skipped": s.skipped,
     })
+}
+
+// ── Sandbox tool (codegraph_sandbox) ──
+// Cần workspace root (config.toml `[sandbox]` + mock dirs) và snapshot index,
+// nên dispatch riêng qua `SharedGraphIndex` — không qua `GraphApi`.
+
+/// Chạy sandbox trên flow của entry function.
+///
+/// `node` (symbol id) hoặc `name` (substring → function match đầu tiên) chọn
+/// entry; group = entry + mọi callee trong flow resolve được. `mocks` là map
+/// callee → Rhai source (body được wrap tự động thành `fn <name>(args)`), override
+/// file mock cùng tên — mocks thiếu được ghi vào `missing_mocks`.
+pub async fn dispatch_sandbox(
+    root: &Utf8Path,
+    shared: Arc<SharedGraphIndex>,
+    args: Value,
+) -> Result<String> {
+    let idx = shared.ensure_fresh().await;
+
+    // Entry: `node` id, hoặc `name` (substring, function match đầu tiên).
+    let entry_id = if let Some(id) = args.get("node").and_then(|v| v.as_u64()) {
+        id
+    } else {
+        let q = arg_str(&args, "name")?;
+        let hits = idx
+            .search_symbol(q, Some(SymbolKind::Function), 1)
+            .await?;
+        hits.first()
+            .map(|s| s.id)
+            .ok_or_else(|| Error::Invalid(format!("no function matching `{q}`")))?
+    };
+
+    // Group: entry + mọi callee trong flow là symbol biết tên (compile thành
+    // machine code); callee không resolve → mock dispatch. Giống cmd_sandbox CLI.
+    let flow = idx.flow(entry_id).await?;
+    let mut ids = vec![entry_id];
+    let mut seen = std::collections::HashSet::from([entry_id]);
+    for &e in &flow.chain {
+        if is_marker(e) {
+            continue;
+        }
+        if e != entry_id && idx.symbol_by_id(e).is_some() && seen.insert(e) {
+            ids.push(e);
+        }
+    }
+    ids.sort_unstable();
+
+    let mut config = SboxConfig::load(root).unwrap_or_default();
+    if let Some(p) = args.get("branch_policy").and_then(|v| v.as_str()) {
+        config.branch_policy = match p {
+            "if_true" => BranchPolicy::IfTrue,
+            "if_false" => BranchPolicy::IfFalse,
+            other => {
+                return Err(Error::Invalid(format!(
+                    "bad branch_policy `{other}` (expected if_true/if_false)"
+                )));
+            }
+        };
+    }
+    if let Some(c) = args.get("loop_cap").and_then(|v| v.as_u64()) {
+        config.loop_cap = c as usize;
+    }
+
+    // Entry args — i64 array (abstract values; arena preloads arena[0..n]).
+    let mut call_args = Vec::new();
+    if let Some(arr) = args.get("args").and_then(|v| v.as_array()) {
+        for v in arr {
+            call_args.push(
+                v.as_i64()
+                    .ok_or_else(|| Error::Invalid("args must be integers".into()))?,
+            );
+        }
+    }
+
+    // Per-call inline mocks: callee name → rhai body / full fn source.
+    let mut mocks = Vec::new();
+    if let Some(obj) = args.get("mocks").and_then(|v| v.as_object()) {
+        for (name, src) in obj {
+            let src = src.as_str().ok_or_else(|| {
+                Error::Invalid(format!("mock `{name}` must be a rhai string"))
+            })?;
+            mocks.push((name.clone(), src.to_string()));
+        }
+    }
+
+    let mut module = compile_with_mocks(&idx, &ids, &config, &mocks).await?;
+    let (ret, trace) = module.run(&call_args);
+
+    let group_names: Vec<String> = ids
+        .iter()
+        .filter_map(|id| idx.symbol_by_id(*id).map(|s| s.name))
+        .collect();
+    serde_json::to_string_pretty(&json!({
+        "entry": flow.symbol.name,
+        "entry_id": entry_id,
+        "group": group_names,
+        "args": call_args,
+        "return": ret,
+        "mocks": trace.mocks,
+        "conds": trace.conds,
+        "missing_mocks": trace.missing,
+        "sequence": trace.sequence(),
+    }))
+    .map_err(|e| Error::Invalid(e.to_string()))
+}
+
+/// Phân tích unified diff (MR / patch / `git diff`) thành bản DRAFT tác động
+/// lên graph. Read-only: parse diff, đối chiếu dòng bên new với symbol + call-site
+/// trong index, trả report JSON — không mutate index.
+pub async fn dispatch_diff(
+    root: &Utf8Path,
+    shared: Arc<SharedGraphIndex>,
+    args: Value,
+) -> Result<String> {
+    let diff = arg_str(&args, "diff")?;
+    let parsed = codegraph_graph::diff::parse_unified_diff(diff)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+
+    let idx = shared.ensure_fresh().await;
+    let report = idx.diff_assess(&parsed, Some(root.as_std_path())).await;
+    serde_json::to_string_pretty(&report).map_err(|e| Error::Invalid(e.to_string()))
 }

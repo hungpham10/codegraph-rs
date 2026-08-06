@@ -121,9 +121,14 @@ impl McpServer {
         }
 
         let api = codegraph_api::GraphApi::new_with_index(self.shared_index.clone());
-        // Admin tools (init/index) cần workspace root — không qua GraphApi.
+        // Admin tools (init/index) cần workspace root; sandbox cần root (config +
+        // mock dirs) + snapshot index — dispatch riêng, không qua GraphApi.
         let dispatch = if name == "codegraph_init" || name == "codegraph_index" {
             tools::dispatch_admin(&self.root, name, args.clone()).await
+        } else if name == "codegraph_sandbox" {
+            tools::dispatch_sandbox(&self.root, self.shared_index.clone(), args.clone()).await
+        } else if name == "codegraph_diff" {
+            tools::dispatch_diff(&self.root, self.shared_index.clone(), args.clone()).await
         } else {
             tools::dispatch_with_api(&api, name, args).await
         };

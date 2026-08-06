@@ -11,6 +11,7 @@ codegraph-core    = { path = "../codegraph-core" }
 codegraph-extract = { path = "../codegraph-extract" }
 codegraph-graph   = { path = "../codegraph-graph", features = ["sqlite"] }
 codegraph-context = { path = "../codegraph-context" }
+codegraph-sboxes  = { path = "../codegraph-sboxes" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

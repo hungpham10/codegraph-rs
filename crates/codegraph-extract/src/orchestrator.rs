@@ -4,6 +4,7 @@
 //! index rồi ingest lại (register + remap + resolve + persist + bump version).
 
 use crate::config::ExtractConfig;
+use crate::languages::effects::{self, EffectClassifier};
 use crate::{walker, LangParser};
 use camino::Utf8Path;
 use codegraph_core::Result;
@@ -42,7 +43,8 @@ impl Orchestrator {
     pub fn parse_project(&self, root: &Utf8Path) -> Result<(Vec<ParseResult>, ExtractStats)> {
         let config = ExtractConfig::load(root);
         let files = walker::walk(root, &self.parsers, &config);
-        let (parsed, skipped) = self.parse_files(&files, None);
+        let (parsed, skipped) =
+            self.parse_files(&files, None, config.effect_classifier.clone());
         let stats = stats_of(&parsed, skipped);
         Ok((parsed, stats))
     }
@@ -73,7 +75,8 @@ impl Orchestrator {
             );
         }
 
-        let (parsed, skipped) = self.parse_files(&files, progress.clone());
+        let (parsed, skipped) =
+            self.parse_files(&files, progress.clone(), config.effect_classifier.clone());
 
         // Đưa ProgressBar vào ingest (register → edges → files → engines) — phase
         // index chiếm phần lớn thời gian, không thể để im trong lúc `GraphIndex`
@@ -94,11 +97,17 @@ impl Orchestrator {
         &self,
         files: &[walker::FileMatch],
         progress: Option<Arc<ProgressBar>>,
+        classifier: EffectClassifier,
     ) -> (Vec<ParseResult>, u64) {
+        let classifier = Arc::new(classifier);
         let progress_opt = progress.clone();
         let results: Vec<_> = files
             .par_iter()
             .map(|fm| {
+                // Classifier là ambient config — install vào thread-local của
+                // worker thread trước khi parse file (rayon reuse thread, mỗi
+                // job set lại cho chắc).
+                effects::install_current(Some(classifier.clone()));
                 let res = parse_one(fm);
                 if let Some(ref bar) = progress_opt {
                     bar.inc(1);

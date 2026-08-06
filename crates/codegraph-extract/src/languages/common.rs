@@ -873,7 +873,7 @@ fn emit_case_label_call(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition
         condition,
         is_loop_body: in_loop > 0,
         effect,
-        effect_desc: effect_desc.map(|s| s.to_string()),
+        effect_desc,
         target_class: None,
         target_method: None,
     });
@@ -949,7 +949,7 @@ fn emit_call(
         condition,
         is_loop_body: in_loop > 0,
         effect,
-        effect_desc: effect_desc.map(|s| s.to_string()),
+        effect_desc,
         target_class,
         target_method,
     });

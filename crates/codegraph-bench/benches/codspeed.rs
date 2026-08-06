@@ -16,8 +16,7 @@
 //! `benchmark_group` sẽ panic `non instrumented codspeed interface`.
 //!
 //! Chạy:
-//! - CI:  `cargo codspeed build -p codegraph-bench --features codspeed`
-//!        `cargo codspeed run`
+//! - CI:  `cargo codspeed build -p codegraph-bench --features codspeed && cargo codspeed run`
 //! - Local: `CODEGRAPH_BENCH_REPOS_LIST=repos.txt cargo bench -p codegraph-bench
 //!   --bench codspeed --features codspeed` — không có runner thì compat resolve về
 //!   criterion thường (wall-time).
