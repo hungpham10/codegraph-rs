@@ -5,14 +5,20 @@
 //!
 //! 1. env `CODEGRAPH_BENCH_REPOS_LIST` = file chứa 1 path repo mỗi dòng (CI ghi
 //!    ra file này từ `benches/repos/sources.txt` bằng `benches/fetch_repos.sh`);
-//! 2. không có env → quét `benches/repos/checkout/*` (bản fetch local);
-//! 3. vẫn rỗng → tự bench `crates/` (fallback cho lần chạy local đầu tiên).
+//! 2. không có env → tự bench `crates/` (fallback cho lần chạy local đầu tiên).
+//!
+//! Phải dùng `criterion_group!`/`criterion_main!` — **không** tự
+//! `Criterion::default()`. Dưới `cargo codspeed build` (bật `cfg(codspeed)`) các
+//! macro này gọi `Criterion::new_instrumented()` để nối với runner; còn
+//! `Criterion::default()` trong compat là dummy (`codspeed: None`) nên
+//! `benchmark_group` sẽ panic `non instrumented codspeed interface`.
 //!
 //! Chạy:
 //! - CI:  `cargo codspeed build -p codegraph-bench --features codspeed`
+//!        `cargo codspeed run`
 //! - Local: `CODEGRAPH_BENCH_REPOS_LIST=repos.txt cargo bench -p codegraph-bench
-//!   --bench codspeed --features codspeed` — không có runner thì compat chạy
-//!   như Criterion thường (wall-time).
+//!   --bench codspeed --features codspeed` — không có runner thì compat resolve về
+//!   criterion thường (wall-time).
 
 #[cfg(feature = "codspeed")]
 use codspeed_criterion_compat as crit;
@@ -37,7 +43,7 @@ fn load_repos() -> Vec<Repo> {
 
     // 1) Danh sách rõ ràng từ env (ưu tiên — CI dùng `CODEGRAPH_BENCH_REPOS_LIST`).
     if let Ok(list_file) = std::env::var("CODEGRAPH_BENCH_REPOS_LIST")
-        && let Ok(body) = std::fs::read_to_string(&list_file) 
+        && let Ok(body) = std::fs::read_to_string(&list_file)
     {
         for line in body.lines() {
             let line = line.trim();
@@ -55,7 +61,9 @@ fn load_repos() -> Vec<Repo> {
     out
 }
 
-fn main() {
+/// Đăng ký toàn bộ bench (extract/index/query) theo danh sách repo.
+/// Được `crit::criterion_main!` gọi với Criterion đã instrumented.
+fn benchmark_all(c: &mut crit::Criterion) {
     let opts = BenchOptions {
         langs: None,
         queries: 200,
@@ -64,10 +72,9 @@ fn main() {
     let repos = load_repos();
     if repos.is_empty() {
         eprintln!("Không tìm thấy repo nào để bench (đặt CODEGRAPH_BENCH_REPOS_LIST)");
-        std::process::exit(1);
+        return;
     }
 
-    let mut c = crit::Criterion::default();
     for repo in &repos {
         let name = repo.name.clone();
         let orch = orchestrator(&opts);
@@ -120,3 +127,8 @@ fn main() {
         }
     }
 }
+
+// `criterion_main!` dưới CodSpeed gọi `new_instrumented()`; local (không
+// `cfg(codspeed)`) resolve sang criterion thường.
+crit::criterion_group!(benches, benchmark_all);
+crit::criterion_main!(benches);
