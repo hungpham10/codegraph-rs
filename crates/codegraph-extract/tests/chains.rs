@@ -172,52 +172,6 @@ class Foo {
 }
 
 #[test]
-fn diag_go_terraform_root_main() {
-    use codegraph_core::marker_name;
-    let src = std::fs::read_to_string("/Users/lap02921/Desktop/Workspace/terraform/main.go")
-        .expect("read terraform main.go");
-    let parser = registry()
-        .into_iter()
-        .find(|p| p.name() == "go")
-        .expect("go parser");
-    let res = parser.parse_file("main.go", &src).expect("parse");
-    for s in &res.symbols {
-        let chain = res.chains.get(&s.id);
-        println!(
-            "id={} kind={:?} name={:?} line={} chain={:?}",
-            s.id,
-            s.kind,
-            s.name,
-            s.line,
-            chain.map(|c| c
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(i, id)| if let Some(m) = marker_name(*id) {
-                    format!("[{m}]")
-                } else if *id == 0 {
-                    res.calls
-                        .iter()
-                        .find(|c2| c2.position == i)
-                        .map(|c2| c2.call_name.clone())
-                        .unwrap_or_else(|| "?0".into())
-                } else {
-                    res.symbols
-                        .iter()
-                        .find(|s2| s2.id == *id)
-                        .map(|s2| s2.name.clone())
-                        .unwrap_or_else(|| format!("?{id}"))
-                })
-                .collect::<Vec<_>>())
-        );
-    }
-    assert!(
-        res.symbols.iter().any(|s| s.name == "main"),
-        "no main symbol"
-    );
-}
-
-#[test]
 fn go_switch_and_loop() {
     let c = walk(
         "go",
