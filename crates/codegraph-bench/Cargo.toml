@@ -19,7 +19,8 @@ tokio = { workspace = true }
 clap = { workspace = true }
 criterion = "0.5"
 # CodSpeed đo benchmark qua `codspeed-criterion-compat` (đo bằng hardware counters).
-codspeed-criterion-compat = { version = "2", optional = true }
+# Version này phải khớp CLI `cargo-codspeed` (CI cài bản mới nhất = 5.x).
+codspeed-criterion-compat = { version = "5", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

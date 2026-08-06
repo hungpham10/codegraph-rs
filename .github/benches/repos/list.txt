@@ -1,4 +1,0 @@
-/Users/lap02921/Desktop/Workspace/codegraph-rs/benches/repos/checkout/hello
-/Users/lap02921/Desktop/Workspace/codegraph-rs/benches/repos/checkout/serde-json
-/Users/lap02921/Desktop/Workspace/codegraph-rs/benches/repos/checkout/flask
-/Users/lap02921/Desktop/Workspace/codegraph-rs/benches/repos/checkout/express

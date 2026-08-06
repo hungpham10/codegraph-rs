@@ -14,9 +14,10 @@ permissions:
   id-token: write # OpenID Connect auth với CodSpeed
 
 env:
-  # Danh sách repo (1 path/dòng) sẽ được bench — do benches/fetch_repos.sh ghi ra
-  # từ benches/repos/sources.txt. codegraph-bench đọc env này khi chạy.
-  CODEGRAPH_BENCH_REPOS_LIST: .github/benches/repos/list.txt
+  # Danh sách repo (1 path/dòng) sẽ được bench — do .github/benches/fetch_repos.sh
+  # ghi ra từ .github/benches/repos/sources.txt. codegraph-bench đọc env này khi chạy.
+  # Dùng path TUYỆT ĐỐI để không phụ thuộc CWD của `cargo codspeed run`.
+  CODEGRAPH_BENCH_REPOS_LIST: ${{ github.workspace }}/.github/benches/repos/list.txt
 
 jobs:
   # Performance benchmarks: extract → index → query trên danh sách repo thật

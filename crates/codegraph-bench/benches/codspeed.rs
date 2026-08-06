@@ -4,8 +4,10 @@
 //! đo bằng hardware counters). Input là danh sách repo được nạp theo thứ tự:
 //!
 //! 1. env `CODEGRAPH_BENCH_REPOS_LIST` = file chứa 1 path repo mỗi dòng (CI ghi
-//!    ra file này từ `benches/repos/sources.txt` bằng `benches/fetch_repos.sh`);
-//! 2. không có env → tự bench `crates/` (fallback cho lần chạy local đầu tiên).
+//!    ra file này từ `.github/benches/repos/sources.txt` bằng
+//!    `.github/benches/fetch_repos.sh`); nếu env được set nhưng file không đọc
+//!    được/trống → báo lỗi và không chạy (tránh benchmark nhầm input);
+//! 2. không set env → tự bench `crates/` (fallback cho lần chạy local đầu tiên).
 //!
 //! Phải dùng `criterion_group!`/`criterion_main!` — **không** tự
 //! `Criterion::default()`. Dưới `cargo codspeed build` (bật `cfg(codspeed)`) các
@@ -42,19 +44,37 @@ fn load_repos() -> Vec<Repo> {
     let mut out = Vec::new();
 
     // 1) Danh sách rõ ràng từ env (ưu tiên — CI dùng `CODEGRAPH_BENCH_REPOS_LIST`).
-    if let Ok(list_file) = std::env::var("CODEGRAPH_BENCH_REPOS_LIST")
-        && let Ok(body) = std::fs::read_to_string(&list_file)
-    {
-        for line in body.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+    // Nếu env được set mà file không đọc được / trống → đây là lỗi cấu hình, KHÔNG
+    // rơi vào fallback `crates` (tránh benchmark nhầm input trong CI).
+    if let Ok(list_file) = std::env::var("CODEGRAPH_BENCH_REPOS_LIST") {
+        match std::fs::read_to_string(&list_file) {
+            Ok(body) => {
+                for line in body.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    push_repo(&mut out, Utf8PathBuf::from(line));
+                }
+                if out.is_empty() {
+                    eprintln!(
+                        "Cảnh báo: {list_file} không chứa repo nào (rỗng/comment) — bỏ qua benchmark."
+                    );
+                }
             }
-            push_repo(&mut out, Utf8PathBuf::from(line));
+            Err(e) => {
+                eprintln!(
+                    "Lỗi: không đọc được CODEGRAPH_BENCH_REPOS_LIST={list_file}: {e}. \
+                     Bỏ qua benchmark thay vì benchmark nhầm input."
+                );
+                return out; // rỗng → benchmark_all in message và thoát.
+            }
         }
+        return out;
     }
 
-    // 2) Fallback cuối: tự bench source của workspace.
+    // 2) Fallback cuối: tự bench source của workspace — chỉ khi env KHÔNG được set
+    //    (lần chạy local đầu tiên).
     if out.is_empty() {
         push_repo(&mut out, Utf8PathBuf::from("crates"));
     }

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Fetch danh sách repo (pinned) trong benches/repos/sources.txt về
-# benches/repos/checkout/<name>, rồi ghi đường dẫn vào benches/repos/list.txt
-# để codegraph-bench (CodSpeed) đọc qua env CODEGRAPH_BENCH_REPOS_LIST.
+# Fetch danh sách repo (pinned) trong .github/benches/repos/sources.txt về
+# .github/benches/repos/checkout/<name>, rồi ghi đường dẫn TUYỆT ĐỐI vào
+# .github/benches/repos/list.txt để codegraph-bench (CodSpeed) đọc qua env
+# CODEGRAPH_BENCH_REPOS_LIST (${{ github.workspace }}/.github/benches/repos/list.txt).
 #
-# Chạy local:  bash benches/fetch_repos.sh
+# Chạy local:  bash .github/benches/fetch_repos.sh
 # Chạy trong CI (codspeed.yml) trước `cargo codspeed build`.
 set -euo pipefail
 

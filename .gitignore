@@ -59,6 +59,6 @@ venv/
 dist/
 build/
 
-# Bench repos được fetch về (danh sách nguồn: benches/repos/sources.txt)
-benches/repos/checkout/
-benches/repos/list.txt
+# Bench repos được fetch về (danh sách nguồn: .github/benches/repos/sources.txt)
+.github/benches/repos/checkout/
+.github/benches/repos/list.txt
