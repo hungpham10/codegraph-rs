@@ -37,6 +37,8 @@ file-reading sub-task repeats work codegraph already did.
 | "Re-index the workspace" | `codegraph_index` |
 | "Run an entry function in the behavior sandbox" | `codegraph_sandbox` (per-function Rhai mocks) |
 | "Diff này (MR/patch/git diff) ảnh hưởng gì tới graph?" | `codegraph_diff` (read-only draft) |
+| "MR này đổi hành vi flow ra sao (trước vs sau)?" | `codegraph_diff_simulate` (sandbox before/after) |
+| "Flow này ở `origin/main` đang chạy thế nào so với code local của tôi (chưa commit)?" | `codegraph_origin_simulate` (ref vs working tree) |
 
 ## Disambiguating duplicate names
 
@@ -138,3 +140,69 @@ Key points:
 - A file that doesn't match anything in the index lands in
   `summary.unmatched_files` (never indexed) or `summary.new_files` (added file
   with no removed lines).
+
+## Diff simulation — `codegraph_diff_simulate`
+
+Chains `codegraph_diff` with the sandbox: for the functions a diff touches, it
+runs the entry flow TWICE — on the current index (post-MR) and on a temporary
+index rebuilt from a git ref — then compares the traces.
+
+Arguments (besides `diff`):
+- `entry`: function name to simulate (default: first function affected by the
+  diff).
+- `base_ref`: git ref for the BEFORE state (default `HEAD`; the pre-MR tree is
+  materialized with `git archive`, so the workspace must be a git repo).
+- `args`, `mocks`, `branch_policy`, `loop_cap`: same contract as
+  `codegraph_sandbox`.
+
+Response shape:
+```json
+{
+  "draft": true, "entry": "compute", "base_ref": "HEAD",
+  "affected_functions": ["compute", "cap"],
+  "before": { "present": true, "return": 50, "sequence": ["if:1", "call:fetch"], "missing_mocks": [] },
+  "after":  { "present": true, "return": 6,  "sequence": ["if:1", "call:fetch", "call:extra"], "missing_mocks": [] },
+  "delta": { "sequence_added": ["call:extra"], "sequence_removed": [] }
+}
+```
+
+What the trace captures (and what it doesn't): the sandbox follows flow
+**structure** — mock call order, branch presence, loop iterations. Branch
+decisions follow `branch_policy` (if_true/if_false; the guard text is NOT
+evaluated), loops run up to `loop_cap`, and **numeric arithmetic on values is
+not modeled**. So the reliable signal is `delta.sequence_added/removed` — e.g.
+an MR that adds/removes a call, a branch, or switches a callee shows up as a
+sequence delta; an MR that only changes an arithmetic expression does not.
+A function that doesn't exist in `base_ref` (new in the MR) reports
+`before.present: false`; a callee without a mock reports
+`link_error: no mock configured for callee(s): …` (compile aborts before
+running — supply it in `mocks` and retry).
+
+## Origin/ref simulation — `codegraph_origin_simulate`
+
+The standalone "before" half of `codegraph_diff_simulate`, WITHOUT a diff: run
+the sandbox on an entry flow at a git ref (default `HEAD`, e.g. `origin/main`)
+and on the current working tree, then compare the traces. Use it to see whether
+your local uncommitted edits change a flow's behavior, or to inspect what a flow
+does on a specific branch/commit before you touch anything.
+
+Arguments:
+- `entry` (required): function name — resolved by NAME in each index (symbol ids
+  differ between the ref tree and the working tree).
+- `ref`: git ref for the ORIGIN state (default `HEAD`; materialized with
+  `git archive`, so the workspace must be a git repo).
+- `args`, `mocks`, `branch_policy`, `loop_cap`: same contract as
+  `codegraph_sandbox`.
+
+Response shape:
+```json
+{
+  "draft": true, "entry": "compute", "ref": "origin/main",
+  "origin":       { "present": true, "return": 50, "sequence": ["if:1", "call:fetch"], "missing_mocks": [] },
+  "working_tree": { "present": true, "return": 6,  "sequence": ["if:1", "call:fetch", "call:extra"], "missing_mocks": [] },
+  "delta": { "sequence_added": ["call:extra"], "sequence_removed": [] }
+}
+```
+
+Trace semantics and limitations are identical to `codegraph_diff_simulate`
+above (structure-based, not arithmetic).

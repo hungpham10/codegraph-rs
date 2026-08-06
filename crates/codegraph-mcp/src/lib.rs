@@ -129,6 +129,11 @@ impl McpServer {
             tools::dispatch_sandbox(&self.root, self.shared_index.clone(), args.clone()).await
         } else if name == "codegraph_diff" {
             tools::dispatch_diff(&self.root, self.shared_index.clone(), args.clone()).await
+        } else if name == "codegraph_diff_simulate" {
+            tools::dispatch_diff_simulate(&self.root, self.shared_index.clone(), args.clone()).await
+        } else if name == "codegraph_origin_simulate" {
+            tools::dispatch_origin_simulate(&self.root, self.shared_index.clone(), args.clone())
+                .await
         } else {
             tools::dispatch_with_api(&api, name, args).await
         };
