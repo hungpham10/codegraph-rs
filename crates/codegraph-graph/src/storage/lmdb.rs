@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use codegraph_core::{FileInfo, Symbol};
@@ -161,6 +161,7 @@ fn open_env(path: &str) -> Result<Arc<Environment>> {
     std::fs::create_dir_all(p).map_err(e)?;
     let mut b = Environment::new();
     b.set_max_dbs(32); // schema dùng ~17 named-db
+    b.set_max_readers(512); // locktable đủ chỗ cho runtime/mcp probe + request song song
     b.set_map_size(1 << 30); // 1 GiB address space (LMDB chỉ commit trang thực đụng)
     let env = b.open(p).map_err(e)?;
     Ok(Arc::new(env))
@@ -175,18 +176,41 @@ fn open_env_read_only(path: &str) -> lmdb::Result<Environment> {
     b.open(Path::new(path))
 }
 
+/// Cache read-only `Environment` theo path — 1 env dùng chung cho mọi `probe_version`.
+///
+/// `Environment` là `Send + Sync` nên an toàn để dùng chung; env sống trọn
+/// process (không drop) để locktable không bị mở/đóng lặp.
+#[cfg(feature = "lmdb")]
+#[cfg_attr(feature = "sqlite", allow(dead_code))] // probe chỉ dùng khi lmdb là backend file
+fn probe_env(path: &str) -> lmdb::Result<Arc<Environment>> {
+    let data = Path::new(path).join("data.mdb");
+    if !data.is_file() {
+        return Err(lmdb::Error::NotFound);
+    }
+    static CACHE: std::sync::LazyLock<Mutex<HashMap<String, Arc<Environment>>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut cache = CACHE.lock().expect("probe env cache lock");
+    if let Some(env) = cache.get(path) {
+        return Ok(env.clone());
+    }
+    let env = Arc::new(open_env_read_only(path)?);
+    cache.insert(path.to_string(), env.clone());
+    Ok(env)
+}
+
 /// Đọc `version` từ file mà KHÔNG tạo file (nếu chưa có) — dùng bởi
 /// `SharedGraphIndex::ensure_fresh` để dò stale. Mirror `SqliteStorage::probe_version`.
+///
+/// Reuse env cache (`probe_env`) để không mở/đóng `Environment` mỗi lần gọi —
+/// `MDB_BAD_RSLOT` xảy ra khi nhiều `Environment` cùng mở/đóng trên một locktable
+/// (lock.mdb) khi nhiều request probe song song (runtime/mcp: mỗi request gọi qua
+/// `ensure_fresh` → `current_version`). Cache theo path giữ 1 env read-only dùng
+/// chung (sống trọn process) nên không còn tranh chấp slot reader.
 #[cfg(feature = "lmdb")]
 #[cfg_attr(feature = "sqlite", allow(dead_code))] // probe chỉ dùng khi lmdb là backend file
 pub async fn probe_version(path: &str) -> Result<u64> {
-    let data = Path::new(path).join("data.mdb");
-    if !data.is_file() {
-        return Err(StorageError::Internal(format!(
-            "lmdb file not found: {path}"
-        )));
-    }
-    let env = open_env_read_only(path).map_err(e)?;
+    let env = probe_env(path)
+        .map_err(|err| StorageError::Internal(format!("lmdb file not found: {path} ({err})")))?;
     let db = env.open_db(Some(D_VERSION)).map_err(e)?;
     let tx = env.begin_ro_txn().map_err(e)?;
     match tx.get(db, &KEY_ONE).map(de_u64) {
@@ -1039,6 +1063,41 @@ mod tests {
         // probe_version đọc từ file hiện có (không tạo file mới).
         assert_eq!(probe_version(&path).await.unwrap(), 7);
         assert!(probe_version("definitely/missing.lmdb").await.is_err());
+    }
+
+    /// Regression MDB_BAD_RSLOT: nhiều reader probe song song trên cùng path
+    /// phải dùng chung env cache — không mở/đóng Environment mỗi lần gọi.
+    #[tokio::test]
+    async fn test_concurrent_probe_reuses_env() {
+        let (_d, path) = tmp_path();
+        let (_d2, path2) = tmp_path();
+        {
+            let mut s = LmdbStorage::open(&path).await.unwrap();
+            s.set_version(5).await.unwrap();
+        }
+        {
+            let mut s = LmdbStorage::open(&path2).await.unwrap();
+            s.set_version(9).await.unwrap();
+        }
+
+        // Nhiều task probe song song trên 2 path khác nhau — mỗi path trả đúng
+        // version, và KHÔNG mở env mới mỗi lần (cache dùng chung → không BAD_RSLOT).
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let p1 = path.clone();
+            let p2 = path2.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..20 {
+                    let v1 = probe_version(&p1).await.unwrap();
+                    let v2 = probe_version(&p2).await.unwrap();
+                    assert_eq!(v1, 5);
+                    assert_eq!(v2, 9);
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
     }
 
     /// Regression MDB_BAD_VALSIZE: key chuỗi > 511 byte bị LMDB từ chối; `str_key`

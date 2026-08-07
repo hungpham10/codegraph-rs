@@ -13,10 +13,18 @@
 //! CODEGRAPH_BENCH_REPOS_LIST=repos.txt cargo bench -p codegraph-bench --bench storage
 //! ```
 
+use std::hint::black_box;
+
 use codegraph_bench::{
     BenchOptions, Repo, extract, index_at, orchestrator, run_queries, sample_query_names,
 };
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+// Dùng `codspeed_criterion_compat` khi build qua `cargo codspeed build` (đo bằng
+// hardware counters); local (không feature) resolve về criterion thường. Giống
+// benches/codspeed.rs — bắt buộc để CodSpeed nối được runner.
+#[cfg(feature = "codspeed")]
+use codspeed_criterion_compat as crit;
+#[cfg(not(feature = "codspeed"))]
+use criterion as crit;
 
 fn load_repos() -> Vec<Repo> {
     let mut out = Vec::new();
@@ -83,7 +91,7 @@ fn measure_on_disk(parsed: &[codegraph_graph::ParseResult]) {
     );
 }
 
-fn main_benchmark(c: &mut Criterion) {
+fn main_benchmark(c: &mut crit::Criterion) {
     type BackendFactory = Box<dyn Fn() -> Option<String>>;
     type NamedBackend = (&'static str, BackendFactory);
 
@@ -154,5 +162,5 @@ fn main_benchmark(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, main_benchmark);
-criterion_main!(benches);
+crit::criterion_group!(benches, main_benchmark);
+crit::criterion_main!(benches);
