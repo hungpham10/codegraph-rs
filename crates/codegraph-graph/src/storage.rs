@@ -21,6 +21,9 @@ pub mod sqlite;
 
 #[cfg(feature = "redis")]
 pub mod redis;
+
+#[cfg(feature = "lmdb")]
+pub mod lmdb;
 // ==================== Error Type ====================
 
 #[derive(Debug)]

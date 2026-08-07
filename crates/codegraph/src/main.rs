@@ -143,7 +143,7 @@ fn main() -> Result<()> {
 }
 
 fn cmd_default(root: &Utf8Path) -> Result<()> {
-    if !db_path(root).exists() {
+    if !is_initialized(root) {
         use console::style;
         eprintln!();
         eprintln!(
@@ -172,12 +172,11 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
     }
 
     use console::style;
-    let db_str = db_path(root).as_str().to_string();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let s = rt.block_on(async {
-        let idx = GraphIndex::open(&db_str).await?;
+        let idx = open_index(root).await?;
         Ok::<_, anyhow::Error>(idx.stats())
     })?;
     eprintln!();
@@ -215,12 +214,29 @@ fn cmd_default(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-fn db_path(root: &Utf8Path) -> Utf8PathBuf {
-    codegraph_extract::project_db_path(root)
+/// DSN (kèm scheme) của backend storage trong config — `None` = in-memory.
+fn storage_dsn(root: &Utf8Path) -> Option<String> {
+    codegraph_extract::ExtractConfig::load(root).storage_dsn(root)
+}
+
+/// Mở index theo backend đã config (DSN scheme → `GraphIndex::open`).
+async fn open_index(root: &Utf8Path) -> Result<GraphIndex> {
+    // `.codegraph/` đã được init (có config) — lúc này storage dsn đã biết.
+    match storage_dsn(root) {
+        Some(dsn) => Ok(GraphIndex::open(&dsn).await?),
+        None => Ok(GraphIndex::in_memory()),
+    }
+}
+
+/// Workspace đã init chưa — dấu hiệu là thư mục `.codegraph/` tồn tại (do
+/// `codegraph init` tạo). Backend-agnostic: không phụ thuộc db file tồn tại
+/// (lmdb dùng thư mục, redis không có file địa phương).
+fn is_initialized(root: &Utf8Path) -> bool {
+    codegraph_extract::project_dir(root).exists()
 }
 
 fn ensure_initialized(root: &Utf8Path) -> Result<()> {
-    if !db_path(root).exists() {
+    if !is_initialized(root) {
         use console::style;
         eprintln!();
         eprintln!(
@@ -250,15 +266,15 @@ fn ensure_initialized(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-/// Full re-index: mở sqlite → `Orchestrator::index_all` (ingest = full re-index).
-fn block_on_index(root: &Utf8Path, db_path: &Utf8Path, progress: bool) -> Result<ExtractStats> {
+/// Full re-index: mở index theo backend config → `Orchestrator::index_all`
+/// (ingest = full re-index).
+fn block_on_index(root: &Utf8Path, progress: bool) -> Result<ExtractStats> {
     let root = root.to_path_buf();
-    let db_str = db_path.as_str().to_string();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let mut idx = GraphIndex::open(&db_str).await?;
+        let mut idx = open_index(&root).await?;
         // Create progress bar if requested.
         let progress_bar = if progress {
             let bar = indicatif::ProgressBar::new(0);
@@ -285,7 +301,7 @@ fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> 
     eprintln!("initialized {}", dir);
 
     if do_index {
-        let stats = block_on_index(root, &db_path(root), show_progress)?;
+        let stats = block_on_index(root, show_progress)?;
         eprintln!(
             "indexed {} files, {} symbols, {} chains, {} edges",
             stats.files, stats.symbols, stats.chains, stats.calls
@@ -398,7 +414,7 @@ fn cmd_uninit(root: &Utf8Path) -> Result<()> {
 
 fn cmd_index(root: &Utf8Path, progress: bool) -> Result<()> {
     ensure_initialized(root)?;
-    let stats = block_on_index(root, &db_path(root), progress)?;
+    let stats = block_on_index(root, progress)?;
     eprintln!(
         "indexed {} files, {} symbols, {} chains, {} calls (skipped {})",
         stats.files, stats.symbols, stats.chains, stats.calls, stats.skipped
@@ -408,12 +424,11 @@ fn cmd_index(root: &Utf8Path, progress: bool) -> Result<()> {
 
 fn cmd_status(root: &Utf8Path) -> Result<()> {
     ensure_initialized(root)?;
-    let db_str = db_path(root).as_str().to_string();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let s = rt.block_on(async {
-        let idx = GraphIndex::open(&db_str).await?;
+        let idx = open_index(root).await?;
         Ok::<_, anyhow::Error>(idx.stats())
     })?;
     println!("files:   {}", s.files);
@@ -425,13 +440,12 @@ fn cmd_status(root: &Utf8Path) -> Result<()> {
 
 fn cmd_query(root: &Utf8Path, q: &str, limit: u32) -> Result<()> {
     ensure_initialized(root)?;
-    let db_str = db_path(root).as_str().to_string();
     let q = q.to_string();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let hits = rt.block_on(async {
-        let idx = GraphIndex::open(&db_str).await?;
+        let idx = open_index(root).await?;
         Ok::<_, anyhow::Error>(idx.search_symbol(&q, None, limit as usize).await?)
     })?;
     for h in hits {
@@ -451,13 +465,12 @@ fn cmd_files(root: &Utf8Path, prefix: Option<&str>) -> Result<()> {
     use std::io::Write;
 
     ensure_initialized(root)?;
-    let db_str = db_path(root).as_str().to_string();
     let prefix = prefix.unwrap_or("").to_string();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let files = rt.block_on(async {
-        let idx = GraphIndex::open(&db_str).await?;
+        let idx = open_index(root).await?;
         let all = idx.files();
         Ok::<_, anyhow::Error>(if prefix.is_empty() {
             all
@@ -478,7 +491,7 @@ fn cmd_files(root: &Utf8Path, prefix: Option<&str>) -> Result<()> {
 
 fn cmd_context(root: &Utf8Path, target: &str, depth: u32, include_source: bool) -> Result<()> {
     ensure_initialized(root)?;
-    let db_path = db_path(root);
+    let dsn = storage_dsn(root);
     let req = codegraph_context::ContextRequest {
         query: target.into(),
         depth,
@@ -490,9 +503,7 @@ fn cmd_context(root: &Utf8Path, target: &str, depth: u32, include_source: bool) 
         .enable_all()
         .build()?;
     let output = rt.block_on(async {
-        let sgi = Arc::new(
-            codegraph_graph::SharedGraphIndex::open(Some(db_path.into_std_path_buf())).await?,
-        );
+        let sgi = Arc::new(codegraph_graph::SharedGraphIndex::open(dsn).await?);
         codegraph_context::build(&sgi, &req).await
     })?;
     print!("{}", output);
@@ -504,14 +515,13 @@ fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
         return Err(anyhow!("only --mcp transport supported"));
     }
     ensure_initialized(root).context("init the index before serving")?;
-    let db_path = db_path(root);
+    let dsn = storage_dsn(root);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
-        watcher::spawn(root.to_path_buf(), db_path.clone());
-        let mcp_server =
-            McpServer::new(root.to_path_buf(), Some(db_path.into_std_path_buf())).await?;
+        watcher::spawn(root.to_path_buf(), dsn.clone());
+        let mcp_server = McpServer::new(root.to_path_buf(), dsn).await?;
         mcp_server.run_stdio().await
     })?;
     Ok(())
@@ -524,7 +534,7 @@ fn cmd_sandbox(root: &Utf8Path, function: &str, args: &str, quiet: bool) -> Resu
     use codegraph_sboxes::SboxConfig;
 
     ensure_initialized(root)?;
-    let db_path = db_path(root);
+    let dsn = storage_dsn(root);
     let function = function.to_string();
     let args: Vec<i64> = args
         .split(',')
@@ -536,14 +546,12 @@ fn cmd_sandbox(root: &Utf8Path, function: &str, args: &str, quiet: bool) -> Resu
         .enable_all()
         .build()?;
     let (ret, trace, group_names) = rt.block_on(async {
-        let sgi = Arc::new(
-            codegraph_graph::SharedGraphIndex::open(Some(db_path.into_std_path_buf())).await?,
-        );
+        let sgi = Arc::new(codegraph_graph::SharedGraphIndex::open(dsn).await?);
         let idx = sgi.ensure_fresh().await;
 
         // Resolve the entry function (substring, first function match).
         let hits = idx
-            .search_symbol(&function, Some(SymbolKind::Function), 1)
+            .search_symbol_kinds(&function, &[SymbolKind::Function, SymbolKind::Method], 1)
             .await?;
         let entry = hits
             .first()

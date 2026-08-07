@@ -767,11 +767,17 @@ pub struct SqliteTx {
 impl Tx for SqliteTx {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let next: i64 = sqlx::query_scalar("SELECT next FROM rt_counter WHERE id = 1")
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        let id = next as usize + self.nodes.len();
+        // Cấp id atomic ngay tại lúc reservation — không `SELECT next` rồi tự
+        // tính (đọc-then-giữ nếu 2 tx/writer chạy song song trên cùng db sẽ cấp
+        // trùng id → `UNIQUE constraint failed: rt_nodes.id` — bug E). Bản thân
+        // các row vẫn được materialize ở commit, nhưng id đã unique toàn cục.
+        let next: i64 = sqlx::query_scalar(
+            "UPDATE rt_counter SET next = next + 1 WHERE id = 1 RETURNING next - 1",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        let id = next as usize;
         self.nodes.push((id, prefix, record));
         Ok(id)
     }
@@ -1016,6 +1022,48 @@ mod tests {
         assert!(s.get_node(id).await.is_err());
         tx.commit().await.unwrap();
         assert_eq!(s.get_node(id).await.unwrap().1, 9);
+    }
+
+    /// Regression bug E: `UNIQUE constraint failed: rt_nodes.id` khi nhiều tx
+    /// (2 writer / watcher + mcp chạy cùng db.sqlite) cấp id node song song.
+    /// `new_node` phải cấp id atomic qua `UPDATE rt_counter ... RETURNING`,
+    /// không đọc-then-tính (`SELECT next` + `next + nodes.len()`) dễ trùng.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_tx_new_node_ids_unique() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        let (_d, path) = tmp_path();
+        let s = Arc::new(SqliteStorage::open(&path).await.unwrap());
+
+        let mut handles = Vec::new();
+        for w in 0..8 {
+            let s = Arc::clone(&s);
+            handles.push(tokio::spawn(async move {
+                let mut tx = s.new_tx();
+                let mut ids = Vec::new();
+                for i in 0..8 {
+                    let prefix = format!("w{w}-{i}").into_bytes();
+                    ids.push(tx.new_node(prefix, 1).await.unwrap());
+                }
+                tx.commit().await.unwrap();
+                ids
+            }));
+        }
+
+        let mut all = Vec::new();
+        for h in handles {
+            all.extend(h.await.unwrap());
+        }
+        let unique: HashSet<usize> = all.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "duplicate rt node ids allocated across concurrent transactions: {all:?}"
+        );
+        // Toàn bộ node đã materialize hợp lệ (commit không UNIQUE-fail).
+        for id in all {
+            s.get_node(id).await.expect("committed node readable");
+        }
     }
 
     #[tokio::test]

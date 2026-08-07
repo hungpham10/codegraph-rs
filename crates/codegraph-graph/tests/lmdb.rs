@@ -1,14 +1,15 @@
-//! Integration tests cho sqlite-backed index (feature `sqlite`).
+//! Integration tests cho backend LMDB (feature `lmdb`) — port subset của
+//! `tests/sqlite.rs`. Khác sqlite (path = file), LMDB dùng path = thư mục.
 //!
-//! Old `db.rs`/`traversal.rs` test `Db` (drafts schema cũ) + `Traversal` — đã
-//! xoá cùng db/. Thay bằng test của GraphIndex/SharedGraphIndex trên file
-//! sqlite duy nhất: ingest (full re-index) → reopen → query, và phát hiện
-//! stale qua version bump.
+//! `SharedGraphIndex` routing theo scheme trong DSN (`lmdb://...`) — nên bộ
+//! test này chạy được dù có bật sqlite hay không.
 
-#![cfg(feature = "sqlite")]
+#![cfg(feature = "lmdb")]
 
 use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind};
-use codegraph_graph::{GraphIndex, ParseResult, SharedGraphIndex};
+use codegraph_graph::GraphIndex;
+use codegraph_graph::ParseResult;
+use codegraph_graph::SharedGraphIndex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -31,13 +32,6 @@ fn sym(file: &str, name: &str, id: u64) -> Symbol {
     }
 }
 
-/// Như `sym` nhưng cho phép chỉ định kind (Method/Variable/...).
-fn sym_kind(file: &str, name: &str, id: u64, kind: SymbolKind) -> Symbol {
-    let mut s = sym(file, name, id);
-    s.kind = kind;
-    s
-}
-
 fn result(
     path: &str,
     symbols: Vec<Symbol>,
@@ -55,12 +49,11 @@ fn result(
     }
 }
 
-/// Ingest → reopen: mọi entity (symbols/chains/files/version) + query surface
-/// sống lại từ file; edges tái dựng từ chains + call records.
+/// Ingest → reopen: entity + query surface sống lại từ file LMDB.
 #[tokio::test]
 async fn index_ingest_reopen_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
-    let path = format!("sqlite://{}/db.sqlite", dir.path().to_string_lossy());
+    let path = format!("lmdb://{}/db.lmdb", dir.path().to_string_lossy());
 
     let calls = vec![CallRecord {
         caller_id: SYMBOL_BASE,
@@ -90,7 +83,6 @@ async fn index_ingest_reopen_roundtrip() {
         assert_eq!(idx.version(), 1);
     }
 
-    // Reopen — query lại được toàn bộ.
     let idx = GraphIndex::open(&path).await.unwrap();
     assert_eq!(idx.version(), 1);
     assert_eq!(idx.stats().symbols, 2);
@@ -110,17 +102,16 @@ async fn index_ingest_reopen_roundtrip() {
     assert_eq!(flow.chain_desc, vec!["a", "b"]);
     assert_eq!(flow.calls[0].line, 3);
 
-    // search_flow qua chain engine persistent.
     let sf = idx.search_flow(&[SYMBOL_BASE + 1]).await.unwrap();
     assert_eq!(sf.len(), 1);
     assert_eq!(sf[0].function_name, "a");
 }
 
-/// Ingest rỗng = full wipe: entity cũ biến mất, version vẫn bump.
+/// Ingest rỗng = full wipe; version vẫn bump; wipe giữ trên đĩa sau reopen.
 #[tokio::test]
 async fn empty_ingest_wipes_store() {
     let dir = tempfile::tempdir().unwrap();
-    let path = format!("sqlite://{}/db.sqlite", dir.path().to_string_lossy());
+    let path = format!("lmdb://{}/db.lmdb", dir.path().to_string_lossy());
 
     let r = result(
         "a.ts",
@@ -137,20 +128,19 @@ async fn empty_ingest_wipes_store() {
     assert_eq!(idx.stats().symbols, 0);
     assert!(idx.symbol_by_id(SYMBOL_BASE).is_none());
 
-    // Reopen: vẫn rỗng (đã wipe trên đĩa).
     let idx = GraphIndex::open(&path).await.unwrap();
     assert_eq!(idx.stats().symbols, 0);
     assert_eq!(idx.version(), 2);
 }
 
-/// SharedGraphIndex phát hiện stale qua version bump của tiến trình index khác.
+/// SharedGraphIndex phát hiện stale qua version bump (dùng `LmdbStorage::probe_version`).
+/// DSN có scheme `lmdb://` → shared mở đúng backend LMDB dù sqlite cũng bật.
 #[tokio::test]
 async fn shared_index_rebuilds_on_reindex() {
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("db.sqlite");
-    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    let db_dir = dir.path().join("db.lmdb");
+    let db_str = format!("lmdb://{}", db_dir.to_string_lossy());
 
-    // "CLI": index dữ liệu đầu.
     {
         let mut idx = GraphIndex::open(&db_str).await.unwrap();
         let r = result(
@@ -162,13 +152,11 @@ async fn shared_index_rebuilds_on_reindex() {
         idx.ingest(&[r]).await.unwrap();
     }
 
-    // "Server": shared index trên cùng file.
     let sgi = Arc::new(SharedGraphIndex::open(Some(db_str.clone())).await.unwrap());
     let idx = sgi.ensure_fresh().await;
     assert_eq!(idx.version(), 1);
     assert_eq!(idx.symbol_by_id(SYMBOL_BASE).unwrap().name, "a");
 
-    // Re-index với dữ liệu khác → version bump → ensure_fresh swap snapshot.
     {
         let mut idx = GraphIndex::open(&db_str).await.unwrap();
         let r = result(
@@ -185,18 +173,13 @@ async fn shared_index_rebuilds_on_reindex() {
     assert_eq!(idx2.symbol_by_id(SYMBOL_BASE).unwrap().name, "x");
 }
 
-/// Go: 2 hàm cùng tên (`process`) ở 2 package khác nhau = 2 FILE riêng. Mỗi
-/// file là một `ParseResult` với id local riêng (cùng `SYMBOL_BASE`) — `ingest`
-/// remap sang id global riêng biệt, cả symbol lẫn chain giữ nguyên, không đè
-/// nhau theo tên. Cũng khẳng định thứ tự global id: file đầu tiên chiếm
-/// `SYMBOL_BASE`, file sau `SYMBOL_BASE + 1`.
+/// 2 hàm cùng tên khác file → id global riêng, chain giữ nguyên, search trả đủ.
 #[tokio::test]
 async fn ingest_same_function_name_across_files_stays_distinct() {
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("db.sqlite");
-    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    let db_dir = dir.path().join("db.lmdb");
+    let db_str = format!("lmdb://{}", db_dir.to_string_lossy());
 
-    // Hai package khác nhau (`store` và `cache`), mỗi package một hàm `process`.
     let r_store = result(
         "store/store.go",
         vec![sym("store/store.go", "process", SYMBOL_BASE)],
@@ -213,7 +196,6 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
     let mut idx = GraphIndex::open(&db_str).await.unwrap();
     idx.ingest(&[r_store, r_cache]).await.unwrap();
 
-    // Cả 2 symbol cùng tên nhưng id global khác nhau, giữ đúng file.
     assert_eq!(idx.stats().symbols, 2);
     let s1 = idx.symbol_by_id(SYMBOL_BASE).unwrap();
     let s2 = idx.symbol_by_id(SYMBOL_BASE + 1).unwrap();
@@ -222,17 +204,12 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
     assert_eq!(s1.file, "store/store.go");
     assert_eq!(s2.file, "cache/cache.go");
 
-    // Cả 2 đều giữ chain riêng → flow không bị "chain not found".
-    assert_eq!(
-        idx.flow(SYMBOL_BASE).await.unwrap().chain_desc,
-        vec!["process"]
-    );
+    assert_eq!(idx.flow(SYMBOL_BASE).await.unwrap().chain_desc, vec!["process"]);
     assert_eq!(
         idx.flow(SYMBOL_BASE + 1).await.unwrap().chain_desc,
         vec!["process"]
     );
 
-    // Search tên trả đủ 2 kết quả (không hoà trộn thành 1).
     let hits = idx
         .search_symbol("process", Some(SymbolKind::Function), 10)
         .await
@@ -243,67 +220,29 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
     assert_eq!(files, vec!["cache/cache.go", "store/store.go"]);
 }
 
-/// Bug D: sandbox lookup entry phải tìm được cả Java `Method`, không chỉ Rust/
-/// Go free `Function`. `codegraph context getProfile` vốn dùng `kind=None` nên
-/// resolve được — còn sandbox lọc `Some(SymbolKind::Function)` → "no function
-/// matching". `search_symbol_kinds` phải trả về Method.
+/// Regression: LMDB giới hạn key ~511 byte (MDB_BAD_VALSIZE). Path file và
+/// call-name vượt giới hạn phải vẫn ingest/reopen đúng (key bound + hash,
+/// tên/phí giữ nguyên trong value).
 #[tokio::test]
-async fn sandbox_search_kinds_finds_java_method() {
+async fn long_path_and_call_name_survive_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("db.sqlite");
-    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    let db_str = format!("lmdb://{}/db.lmdb", dir.path().to_string_lossy());
 
-    let r = result(
-        "UserController.java",
-        vec![sym_kind(
-            "UserController.java",
-            "getProfile",
-            SYMBOL_BASE,
-            SymbolKind::Method,
-        )],
-        HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE])]),
-        vec![],
-    );
-    let mut idx = GraphIndex::open(&db_str).await.unwrap();
-    idx.ingest(&[r]).await.unwrap();
+    // path > 511 byte.
+    let long_seg = "d".repeat(280); // 280
+    let long_path = ["src", &long_seg, &long_seg, "mod.ts"].join("/");
+    assert!(long_path.len() > 511, "long_path len = {}", long_path.len());
 
-    // Trước fix: lọc Function-only → bỏ Method → empty (sandbox fail).
-    let only_func = idx
-        .search_symbol("getProfile", Some(SymbolKind::Function), 1)
-        .await
-        .unwrap();
-    assert!(only_func.is_empty());
-
-    // Fix: sandbox chấp nhận Function | Method.
-    let hits = idx
-        .search_symbol_kinds("getProfile", &[SymbolKind::Function, SymbolKind::Method], 1)
-        .await
-        .unwrap();
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].name, "getProfile");
-    assert_eq!(hits[0].kind, SymbolKind::Method);
-}
-
-/// Bug C: lời gọi method của receiver external không resolve được (`WrapResponse.
-/// ok(...)`) KHÔNG được link nhầm vào local variable `boolean ok` trong file
-/// khác (fallback tên ngắn từng trả bất kỳ symbol trùng tên, gồm Variable).
-/// Chuỗi chỉ còn callee thật `selectDepartment`.
-#[tokio::test]
-async fn external_qualified_call_not_linked_to_local_variable() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("db.sqlite");
-    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
-
-    let a = SYMBOL_BASE; // getProfile (caller)
-    let b = SYMBOL_BASE + 1; // selectDepartment (callee thật)
-    let v = SYMBOL_BASE + 2; // local `boolean ok` (Variable) — KHÔNG được link
+    // call_name > 511 byte (mangled symbol).
+    let long_call = format!("RTX{}MangledType0::method{}X", "t".repeat(300), "q".repeat(300));
+    assert!(long_call.len() > 511);
 
     let calls = vec![CallRecord {
-        caller_id: a,
-        call_name: "WrapResponse.ok".to_string(),
-        position: 1, // placeholder 0 trong chain
-        arg_exprs: vec![],
-        line: 2,
+        caller_id: SYMBOL_BASE,
+        call_name: long_call.clone(),
+        position: 1,
+        arg_exprs: vec!["x".to_string()],
+        line: 3,
         condition: None,
         is_loop_body: false,
         effect: EffectType::None,
@@ -312,29 +251,28 @@ async fn external_qualified_call_not_linked_to_local_variable() {
         target_method: None,
     }];
     let r = result(
-        "UserController.java",
-        vec![
-            sym_kind("UserController.java", "getProfile", a, SymbolKind::Method),
-            sym_kind(
-                "UserController.java",
-                "selectDepartment",
-                b,
-                SymbolKind::Method,
-            ),
-            sym_kind("HierarchyRefreshWorker.java", "ok", v, SymbolKind::Variable),
-        ],
-        HashMap::from([(a, vec![a, 0, b])]),
+        &long_path,
+        vec![sym(&long_path, "a", SYMBOL_BASE), sym(&long_path, "b", SYMBOL_BASE + 1)],
+        HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, SYMBOL_BASE + 1])]),
         calls,
     );
-    let mut idx = GraphIndex::open(&db_str).await.unwrap();
-    idx.ingest(&[r]).await.unwrap();
 
-    let cees = idx.callees(a).await.unwrap();
-    assert!(
-        !cees.iter().any(|s| s.name == "ok"),
-        "external `WrapResponse.ok` must not resolve to the local `ok` variable"
+    {
+        let mut idx = GraphIndex::open(&db_str).await.unwrap();
+        idx.ingest(&[r]).await.unwrap();
+        assert_eq!(idx.version(), 1);
+    }
+
+    let idx = GraphIndex::open(&db_str).await.unwrap();
+    assert_eq!(idx.version(), 1);
+    assert_eq!(idx.files().len(), 1);
+    assert_eq!(idx.files()[0].path, long_path);
+    assert_eq!(
+        idx.callees(SYMBOL_BASE).await.unwrap()[0].name,
+        "b"
     );
-    assert_eq!(cees.len(), 1, "chỉ còn callee thật của getProfile");
-    assert_eq!(cees[0].name, "selectDepartment");
-    assert_eq!(cees[0].file, "UserController.java");
+    // call-name index giữ nguyên tên dài sau reopen.
+    let hits = idx.search_flow(&[SYMBOL_BASE]).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].function_name, "a");
 }

@@ -92,8 +92,18 @@ pub fn extract(
 
 /// Phase index: dựng in-memory `GraphIndex` + `ingest` toàn bộ parsed.
 pub fn index(parsed: &[ParseResult]) -> Result<GraphIndex, Error> {
+    index_at(parsed, None)
+}
+
+/// Phase index trên một storage backend cụ thể — `dsn` chỉ rõ backend (vd
+/// `sqlite:///tmp/db.sqlite`, `lmdb:///tmp/db`, hoặc `None` = in-memory) —
+/// `GraphIndex::open(dsn)` tự route theo scheme, rồi `ingest` toàn bộ parsed.
+pub fn index_at(parsed: &[ParseResult], dsn: Option<&str>) -> Result<GraphIndex, Error> {
     runtime().block_on(async {
-        let mut idx = GraphIndex::in_memory();
+        let mut idx = match dsn {
+            Some(d) => GraphIndex::open(d).await?,
+            None => GraphIndex::in_memory(),
+        };
         idx.ingest(parsed).await?;
         Ok(idx)
     })

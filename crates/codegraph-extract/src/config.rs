@@ -1,4 +1,5 @@
 use crate::languages::effects::EffectClassifier;
+use crate::project::{project_db_path, project_dir};
 use camino::Utf8Path;
 use codegraph_core::{EffectCallPattern, EffectRule, EffectType};
 use serde::Deserialize;
@@ -14,6 +15,31 @@ pub enum HeaderLanguage {
     Cpp,
 }
 
+/// Backend storage cho index — chọn backend trong `[storage]` của config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StorageKind {
+    /// `sqlite://<path>` (backend mặc định).
+    #[default]
+    Sqlite,
+    /// `lmdb://<path>` (thư mục).
+    Lmdb,
+    /// `redis://<url>` (cần `dsn`).
+    Redis,
+    /// In-memory — không persist.
+    Memory,
+}
+
+impl StorageKind {
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "lmdb" => StorageKind::Lmdb,
+            "redis" => StorageKind::Redis,
+            "memory" | "in-memory" | "in_memory" => StorageKind::Memory,
+            _ => StorageKind::Sqlite,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     #[serde(default)]
@@ -21,6 +47,19 @@ struct ConfigFile {
     /// Project extra effect rules — xét trước bảng default (override).
     #[serde(default)]
     effect_rules: Vec<EffectRuleRaw>,
+    /// Backend storage (mặc định sqlite).
+    #[serde(default)]
+    storage: StorageSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StorageSection {
+    /// `"sqlite"`, `"lmdb"`, `"redis"`, `"memory"`.
+    #[serde(default, rename = "type")]
+    type_: Option<String>,
+    /// DSN override — ví dụ `lmdb:///data/codegraph.db`.
+    #[serde(default)]
+    dsn: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -45,6 +84,16 @@ pub struct ExtractConfig {
     pub header_language: HeaderLanguage,
     /// Classifier effect của project — config rules override bảng default.
     pub effect_classifier: EffectClassifier,
+    /// Backend storage được chọn trong config (mặc định sqlite).
+    pub storage: StorageConfig,
+}
+
+/// Storage backend đã parse từ `[storage]` trong config.
+#[derive(Debug, Clone, Default)]
+pub struct StorageConfig {
+    pub kind: StorageKind,
+    /// DSN override (`None` = dựng từ `kind` + project path).
+    pub dsn: Option<String>,
 }
 
 impl ExtractConfig {
@@ -63,6 +112,35 @@ impl ExtractConfig {
         Self {
             header_language: parse_header_language(file.languages.headers.as_deref()),
             effect_classifier: build_classifier(file.effect_rules),
+            storage: StorageConfig {
+                kind: file
+                    .storage
+                    .type_
+                    .as_deref()
+                    .map(StorageKind::parse)
+                    .unwrap_or_default(),
+                dsn: file.storage.dsn,
+            },
+        }
+    }
+
+    /// DSN hoàn chỉnh (kèm scheme) cho backend storage — dùng làm input trực
+    /// tiếp cho `GraphIndex::open`. `None` = in-memory.
+    ///
+    /// - `dsn` trong config override → dùng nguyên văn.
+    /// - Nếu không, dựng từ `kind`:
+    ///   - sqlite → `sqlite://<root>/.codegraph/db.sqlite`
+    ///   - lmdb   → `lmdb://<root>/.codegraph/db.lmdb` (thư mục)
+    ///   - redis  → phải có `dsn` (không có default hợp lý)
+    pub fn storage_dsn(&self, root: &Utf8Path) -> Option<String> {
+        if let Some(dsn) = &self.storage.dsn {
+            return Some(dsn.clone());
+        }
+        match self.storage.kind {
+            StorageKind::Sqlite => Some(format!("sqlite://{}", project_db_path(root))),
+            StorageKind::Lmdb => Some(format!("lmdb://{}", project_dir(root).join("db.lmdb"))),
+            StorageKind::Redis => None,
+            StorageKind::Memory => None,
         }
     }
 }
@@ -103,12 +181,21 @@ pub const DEFAULT_CONFIG_TOML: &str = r#"# CodeGraph project configuration
 # "auto" detects C++ projects from .cpp/.hpp files and C++ syntax in headers.
 headers = "auto"
 
-# Project effect rules — matched before the built-in defaults (first match wins).
+# Critical effect rules — matched before the built-in defaults (first match wins).
 # call matchers: prefix / contains / exact. Effects: sql_query, sql_write,
 # cache_read, cache_write, http_call, event_emit, file_read, file_write, log.
 # [[effect_rules]]
 # call = { prefix = "db." }
 # effect = "sql_query"
+
+[storage]
+# Backend lưu index: "sqlite", "lmdb", "redis", hoặc "memory".
+type = "sqlite"
+# DSN override (mặc định dựng từ `type` + project path):
+#   sqlite → sqlite://<root>/.codegraph/db.sqlite
+#   lmdb   → lmdb://<root>/.codegraph/db.lmdb
+#   redis  → bắt buộc khai dsn, ví dụ redis://localhost:6379
+# dsn = "sqlite:///tmp/codegraph.db"
 "#;
 
 /// Quick project scan: returns a hint when the tree is clearly C-only or C++-only.
@@ -196,6 +283,70 @@ headers = "cpp"
         assert!(!is_cpp_header(
             "#ifndef FOO_H\n#define FOO_H\nstruct foo { int x; };\n#endif\n"
         ));
+    }
+
+    #[test]
+    fn parse_storage_kind() {
+        assert_eq!(StorageKind::parse("sqlite"), StorageKind::Sqlite);
+        assert_eq!(StorageKind::parse("lmdb"), StorageKind::Lmdb);
+        assert_eq!(StorageKind::parse("REDIS"), StorageKind::Redis);
+        assert_eq!(StorageKind::parse("memory"), StorageKind::Memory);
+        assert_eq!(StorageKind::parse("in-memory"), StorageKind::Memory);
+        // unknown → sqlite (default).
+        assert_eq!(StorageKind::parse("whatsapp"), StorageKind::Sqlite);
+    }
+
+    /// `storage_dsn` dựng DSN theo kind; `dsn` override thắng.
+    #[test]
+    fn storage_dsn_built_or_overridden() {
+        let dir = std::env::temp_dir().join("codegraph-extract-dsn-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let path = Utf8Path::from_path(path.as_path()).unwrap();
+
+        std::fs::write(
+            path.as_std_path(),
+            r#"
+[storage]
+type = "lmdb"
+"#,
+        )
+        .unwrap();
+        let cfg = ExtractConfig::load_from(path);
+        let dsn = cfg.storage_dsn(Utf8Path::new("/repo")).unwrap();
+        assert!(dsn.starts_with("lmdb://"), "got {dsn}");
+        assert!(dsn.contains("/repo/.codegraph/db.lmdb"), "got {dsn}");
+
+        // override dsn thắng kind.
+        std::fs::write(
+            path.as_std_path(),
+            r#"
+[storage]
+type = "lmdb"
+dsn = "sqlite:///tmp/custom.db"
+"#,
+        )
+        .unwrap();
+        let cfg = ExtractConfig::load_from(path);
+        assert_eq!(
+            cfg.storage_dsn(Utf8Path::new("/repo")).unwrap(),
+            "sqlite:///tmp/custom.db"
+        );
+
+        // memory → None (in-memory).
+        std::fs::write(
+            path.as_std_path(),
+            r#"
+[storage]
+type = "memory"
+"#,
+        )
+        .unwrap();
+        let cfg = ExtractConfig::load_from(path);
+        assert!(cfg.storage_dsn(Utf8Path::new("/repo")).is_none());
+
+        let _ = std::fs::remove_file(path.as_std_path());
+        let _ = std::fs::remove_dir(&dir);
     }
 
     /// Parse từ file tạm với `[[effect_rules]]` → classifier áp dụng được.

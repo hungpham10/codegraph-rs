@@ -71,7 +71,7 @@ async fn api(path: &str) -> GraphApi {
 async fn search_and_symbol_by_id() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("db.sqlite");
-    let db_str = db_path.to_string_lossy().into_owned();
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
     let (caller, _, _) = seed_index(&db_str).await;
     let api = api(&db_str).await;
 
@@ -87,7 +87,7 @@ async fn search_and_symbol_by_id() {
 async fn callers_callees_and_flow() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("db.sqlite");
-    let db_str = db_path.to_string_lossy().into_owned();
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
     let (caller, callee, helper) = seed_index(&db_str).await;
     let api = api(&db_str).await;
 
@@ -117,7 +117,7 @@ async fn callers_callees_and_flow() {
 async fn search_flow_pattern_and_references() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("db.sqlite");
-    let db_str = db_path.to_string_lossy().into_owned();
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
     let (caller, callee, _) = seed_index(&db_str).await;
     let api = api(&db_str).await;
 
@@ -147,7 +147,7 @@ async fn search_flow_pattern_and_references() {
 async fn files_stats_and_context() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("db.sqlite");
-    let db_str = db_path.to_string_lossy().into_owned();
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
     seed_index(&db_str).await;
     let api = api(&db_str).await;
 

@@ -2,7 +2,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use codegraph_api::GraphApi;
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{is_marker, Error, Result, Symbol, SymbolKind, SymbolMatch};
-use codegraph_extract::{init_project, project_db_path, project_dir, ExtractStats, Orchestrator};
+use codegraph_extract::{init_project, project_dir, ExtractConfig, ExtractStats, Orchestrator};
 use codegraph_graph::{GraphIndex, SharedGraphIndex};
 use codegraph_sboxes::{compile_with_mocks, BranchPolicy, SboxConfig};
 use serde_json::{json, Value};
@@ -635,11 +635,14 @@ pub async fn dispatch_admin(root: &Utf8Path, name: &str, args: Value) -> Result<
     }
 }
 
-/// Full re-index: mở sqlite → `Orchestrator::index_all` (ingest = full re-index).
-/// Không progress bar — MCP transport là stdout, tránh nhiễu JSON-RPC.
+/// Full re-index: mở index theo backend config → `Orchestrator::index_all`
+/// (ingest = full re-index). Không progress bar — MCP transport là stdout,
+/// tránh nhiễu JSON-RPC.
 async fn run_index(root: &Utf8Path) -> Result<ExtractStats> {
-    let db_str = project_db_path(root).as_str().to_string();
-    let mut idx = GraphIndex::open(&db_str).await?;
+    let mut idx = match ExtractConfig::load(root).storage_dsn(root) {
+        Some(dsn) => GraphIndex::open(&dsn).await?,
+        None => GraphIndex::in_memory(),
+    };
     Orchestrator::with_registry()
         .index_all(root, &mut idx, None)
         .await
@@ -740,7 +743,9 @@ pub async fn dispatch_sandbox(
         id
     } else {
         let q = arg_str(&args, "name")?;
-        let hits = idx.search_symbol(q, Some(SymbolKind::Function), 1).await?;
+        let hits = idx
+            .search_symbol_kinds(q, &[SymbolKind::Function, SymbolKind::Method], 1)
+            .await?;
         hits.first()
             .map(|s| s.id)
             .ok_or_else(|| Error::Invalid(format!("no function matching `{q}`")))?
@@ -812,7 +817,7 @@ async fn run_sim(
     mocks: &[(String, String)],
 ) -> Result<Value> {
     let Some(sym) = idx
-        .search_symbol(entry_name, Some(SymbolKind::Function), 1)
+        .search_symbol_kinds(entry_name, &[SymbolKind::Function, SymbolKind::Method], 1)
         .await?
         .into_iter()
         .next()
