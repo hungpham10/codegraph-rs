@@ -19,13 +19,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use codegraph_core::{FileInfo, Symbol};
-use lmdb::{
-    Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags,
-};
 #[cfg(feature = "lmdb")]
 use lmdb::EnvironmentFlags;
+use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
 
-use super::{decode_chain, encode_chain, Result, Storage, StorageError, Tx, TxOp, EMPTY};
+use super::{EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_chain, encode_chain};
 
 /// Map lỗi LMDB → `StorageError`.
 fn e(err: impl std::fmt::Display) -> StorageError {
@@ -184,7 +182,9 @@ fn open_env_read_only(path: &str) -> lmdb::Result<Environment> {
 pub async fn probe_version(path: &str) -> Result<u64> {
     let data = Path::new(path).join("data.mdb");
     if !data.is_file() {
-        return Err(StorageError::Internal(format!("lmdb file not found: {path}")));
+        return Err(StorageError::Internal(format!(
+            "lmdb file not found: {path}"
+        )));
     }
     let env = open_env_read_only(path).map_err(e)?;
     let db = env.open_db(Some(D_VERSION)).map_err(e)?;
@@ -234,24 +234,58 @@ impl LmdbStorage {
     }
 
     fn from_env(env: Arc<Environment>) -> Result<Self> {
-        let nodes = env.create_db(Some(D_NODES), DatabaseFlags::empty()).map_err(e)?;
-        let children = env.create_db(Some(D_CHILDREN), DatabaseFlags::empty()).map_err(e)?;
-        let roots = env.create_db(Some(D_ROOTS), DatabaseFlags::empty()).map_err(e)?;
-        let meta = env.create_db(Some(D_META), DatabaseFlags::empty()).map_err(e)?;
-        let keylen = env.create_db(Some(D_KEYLEN), DatabaseFlags::empty()).map_err(e)?;
-        let shortcuts = env.create_db(Some(D_SHORTCUTS), DatabaseFlags::empty()).map_err(e)?;
-        let chains = env.create_db(Some(D_CHAINS), DatabaseFlags::empty()).map_err(e)?;
-        let edges = env.create_db(Some(D_EDGES), DatabaseFlags::empty()).map_err(e)?;
-        let node_meta = env.create_db(Some(D_NODE_META), DatabaseFlags::empty()).map_err(e)?;
+        let nodes = env
+            .create_db(Some(D_NODES), DatabaseFlags::empty())
+            .map_err(e)?;
+        let children = env
+            .create_db(Some(D_CHILDREN), DatabaseFlags::empty())
+            .map_err(e)?;
+        let roots = env
+            .create_db(Some(D_ROOTS), DatabaseFlags::empty())
+            .map_err(e)?;
+        let meta = env
+            .create_db(Some(D_META), DatabaseFlags::empty())
+            .map_err(e)?;
+        let keylen = env
+            .create_db(Some(D_KEYLEN), DatabaseFlags::empty())
+            .map_err(e)?;
+        let shortcuts = env
+            .create_db(Some(D_SHORTCUTS), DatabaseFlags::empty())
+            .map_err(e)?;
+        let chains = env
+            .create_db(Some(D_CHAINS), DatabaseFlags::empty())
+            .map_err(e)?;
+        let edges = env
+            .create_db(Some(D_EDGES), DatabaseFlags::empty())
+            .map_err(e)?;
+        let node_meta = env
+            .create_db(Some(D_NODE_META), DatabaseFlags::empty())
+            .map_err(e)?;
         #[cfg(feature = "bloom-search")]
-        let blooms = env.create_db(Some(D_BLOOMS), DatabaseFlags::empty()).map_err(e)?;
-        let counter = env.create_db(Some(D_COUNTER), DatabaseFlags::empty()).map_err(e)?;
-        let symbols = env.create_db(Some(D_SYMBOLS), DatabaseFlags::empty()).map_err(e)?;
-        let next_id = env.create_db(Some(D_NEXT_ID), DatabaseFlags::empty()).map_err(e)?;
-        let call_records = env.create_db(Some(D_CALL_RECORDS), DatabaseFlags::empty()).map_err(e)?;
-        let call_names = env.create_db(Some(D_CALL_NAMES), DatabaseFlags::empty()).map_err(e)?;
-        let files = env.create_db(Some(D_FILES), DatabaseFlags::empty()).map_err(e)?;
-        let version = env.create_db(Some(D_VERSION), DatabaseFlags::empty()).map_err(e)?;
+        let blooms = env
+            .create_db(Some(D_BLOOMS), DatabaseFlags::empty())
+            .map_err(e)?;
+        let counter = env
+            .create_db(Some(D_COUNTER), DatabaseFlags::empty())
+            .map_err(e)?;
+        let symbols = env
+            .create_db(Some(D_SYMBOLS), DatabaseFlags::empty())
+            .map_err(e)?;
+        let next_id = env
+            .create_db(Some(D_NEXT_ID), DatabaseFlags::empty())
+            .map_err(e)?;
+        let call_records = env
+            .create_db(Some(D_CALL_RECORDS), DatabaseFlags::empty())
+            .map_err(e)?;
+        let call_names = env
+            .create_db(Some(D_CALL_NAMES), DatabaseFlags::empty())
+            .map_err(e)?;
+        let files = env
+            .create_db(Some(D_FILES), DatabaseFlags::empty())
+            .map_err(e)?;
+        let version = env
+            .create_db(Some(D_VERSION), DatabaseFlags::empty())
+            .map_err(e)?;
         Ok(Self {
             env,
             nodes,
@@ -329,8 +363,13 @@ impl Storage for LmdbStorage {
         let id = next as usize;
         tx.put(self.counter, &KEY_ONE, &ku64(next + 1), WriteFlags::empty())
             .map_err(e)?;
-        tx.put(self.nodes, &k8(id), &node_val(&prefix, record), WriteFlags::empty())
-            .map_err(e)?;
+        tx.put(
+            self.nodes,
+            &k8(id),
+            &node_val(&prefix, record),
+            WriteFlags::empty(),
+        )
+        .map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(id)
     }
@@ -402,7 +441,9 @@ impl Storage for LmdbStorage {
 
     async fn get_edge_data(&self, edge: usize) -> Result<Option<Vec<u8>>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self.get_opt(&tx, self.edges, &k8(edge))?.map(|v| v.to_vec()))
+        Ok(self
+            .get_opt(&tx, self.edges, &k8(edge))?
+            .map(|v| v.to_vec()))
     }
 
     async fn clear_edges(&mut self) -> Result<()> {
@@ -442,7 +483,9 @@ impl Storage for LmdbStorage {
 
     async fn get_node_meta(&self, elem: usize) -> Result<Option<Vec<u8>>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self.get_opt(&tx, self.node_meta, &k8(elem))?.map(|v| v.to_vec()))
+        Ok(self
+            .get_opt(&tx, self.node_meta, &k8(elem))?
+            .map(|v| v.to_vec()))
     }
 
     async fn clear_node_meta(&mut self) -> Result<()> {
@@ -454,8 +497,13 @@ impl Storage for LmdbStorage {
 
     async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
-        tx.put(self.chains, &k8(record), &encode_chain(chain), WriteFlags::empty())
-            .map_err(e)?;
+        tx.put(
+            self.chains,
+            &k8(record),
+            &encode_chain(chain),
+            WriteFlags::empty(),
+        )
+        .map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
     }
@@ -475,7 +523,8 @@ impl Storage for LmdbStorage {
     }
 
     async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
-        let data = serde_json::to_vec(sym).map_err(|err| StorageError::Internal(err.to_string()))?;
+        let data =
+            serde_json::to_vec(sym).map_err(|err| StorageError::Internal(err.to_string()))?;
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         tx.put(self.symbols, &ku64(sym.id), &data, WriteFlags::empty())
             .map_err(e)?;
@@ -488,7 +537,9 @@ impl Storage for LmdbStorage {
         let Some(data) = self.get_opt(&tx, self.symbols, &ku64(id))? else {
             return Ok(None);
         };
-        serde_json::from_slice(data).map(Some).map_err(|err| StorageError::Internal(err.to_string()))
+        serde_json::from_slice(data)
+            .map(Some)
+            .map_err(|err| StorageError::Internal(err.to_string()))
     }
 
     async fn load_all_symbols(&self) -> Result<Vec<Symbol>> {
@@ -497,7 +548,9 @@ impl Storage for LmdbStorage {
         let mut out = Vec::new();
         for item in cur.iter() {
             let (_k, v) = item.map_err(e)?;
-            out.push(serde_json::from_slice(v).map_err(|err| StorageError::Internal(err.to_string()))?);
+            out.push(
+                serde_json::from_slice(v).map_err(|err| StorageError::Internal(err.to_string()))?,
+            );
         }
         Ok(out)
     }
@@ -531,15 +584,22 @@ impl Storage for LmdbStorage {
 
     async fn set_call_records(&mut self, func: u64, records: &[u8]) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
-        tx.put(self.call_records, &ku64(func), &records, WriteFlags::empty())
-            .map_err(e)?;
+        tx.put(
+            self.call_records,
+            &ku64(func),
+            &records,
+            WriteFlags::empty(),
+        )
+        .map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
     }
 
     async fn get_call_records(&self, func: u64) -> Result<Option<Vec<u8>>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self.get_opt(&tx, self.call_records, &ku64(func))?.map(|v| v.to_vec()))
+        Ok(self
+            .get_opt(&tx, self.call_records, &ku64(func))?
+            .map(|v| v.to_vec()))
     }
 
     async fn all_call_records(&self) -> Result<Vec<(u64, Vec<u8>)>> {
@@ -600,7 +660,9 @@ impl Storage for LmdbStorage {
         let mut out = Vec::new();
         for item in cur.iter() {
             let (_k, v) = item.map_err(e)?;
-            out.push(serde_json::from_slice(v).map_err(|err| StorageError::Internal(err.to_string()))?);
+            out.push(
+                serde_json::from_slice(v).map_err(|err| StorageError::Internal(err.to_string()))?,
+            );
         }
         Ok(out)
     }
@@ -660,7 +722,9 @@ impl Storage for LmdbStorage {
 
     async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self.get_opt(&tx, self.meta, &k8(record))?.map(|v| v.to_vec()))
+        Ok(self
+            .get_opt(&tx, self.meta, &k8(record))?
+            .map(|v| v.to_vec()))
     }
 
     async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
@@ -673,7 +737,10 @@ impl Storage for LmdbStorage {
 
     async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self.get_opt(&tx, self.keylen, &k8(record))?.map(de_u64).map(|v| v as usize))
+        Ok(self
+            .get_opt(&tx, self.keylen, &k8(record))?
+            .map(de_u64)
+            .map(|v| v as usize))
     }
 
     async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
@@ -774,13 +841,25 @@ impl Tx for LmdbTx {
     }
 
     async fn commit(self: Box<Self>) -> Result<()> {
-        let LmdbTx { env, nodes, children, counter, nodes_pending, ops } = *self;
+        let LmdbTx {
+            env,
+            nodes,
+            children,
+            counter,
+            nodes_pending,
+            ops,
+        } = *self;
         let mut tx = env.begin_rw_txn().map_err(e)?;
 
         // 1. Materialize node mới — để ops add/move trỏ tới hợp lệ.
         for (id, prefix, record) in &nodes_pending {
-            tx.put(nodes, &k8(*id), &node_val(prefix, *record), WriteFlags::empty())
-                .map_err(e)?;
+            tx.put(
+                nodes,
+                &k8(*id),
+                &node_val(prefix, *record),
+                WriteFlags::empty(),
+            )
+            .map_err(e)?;
         }
 
         // 2. Counter đã được bump ở new_node; giữ MAX như sqlite phòng writer khác.
@@ -823,20 +902,14 @@ impl Tx for LmdbTx {
                             child_map.insert(*from, list);
                         }
                         let list = child_map.entry(*to).or_insert_with(|| {
-                            tx.get(children, &k8(*to))
-                                .map(de_list)
-                                .unwrap_or_default()
+                            tx.get(children, &k8(*to)).map(de_list).unwrap_or_default()
                         });
                         push_unique(list, *child);
                     }
                 }
                 TxOp::UpdateNode { id, prefix, record } => {
                     let key = k8(*id);
-                    let Some((mut p, mut r)) = tx
-                        .get(nodes, &key)
-                        .map(de_node_val)
-                        .ok()
-                    else {
+                    let Some((mut p, mut r)) = tx.get(nodes, &key).map(de_node_val).ok() else {
                         continue;
                     };
                     if let Some(np) = prefix {

@@ -35,11 +35,11 @@
 //! var-type alias, gom SaveCallRecords) → files → rebuild engines → bump version.
 
 pub use crate::search::Search;
-pub use crate::storage::{InMemoryStorage, Storage, Tx};
-#[cfg(feature = "sqlite")]
-pub use crate::storage::sqlite::SqliteStorage;
 #[cfg(feature = "lmdb")]
 pub use crate::storage::lmdb::LmdbStorage;
+#[cfg(feature = "sqlite")]
+pub use crate::storage::sqlite::SqliteStorage;
+pub use crate::storage::{InMemoryStorage, Storage, Tx};
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
     EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult,
@@ -348,7 +348,10 @@ impl GraphIndex {
     // ── Build / rebuild ──
 
     /// Rebuild toàn bộ index từ entity store trong storage (open/reopen).
-    #[cfg_attr(not(any(feature = "sqlite", feature = "lmdb", feature = "redis")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
+        allow(dead_code)
+    )]
     // chỉ open() dùng — không backend thì không ai gọi.
     async fn rebuild(&mut self) -> Result<()> {
         self.next_id = self
@@ -428,7 +431,10 @@ impl GraphIndex {
     }
 
     /// Insert symbol vào registry + index (scope id đã global — path rebuild).
-    #[cfg_attr(not(any(feature = "sqlite", feature = "lmdb", feature = "redis")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
+        allow(dead_code)
+    )]
     // chỉ rebuild() dùng — không backend thì không ai gọi.
     fn index_symbol(&mut self, sym: Symbol) {
         let id = sym.id;
@@ -455,7 +461,10 @@ impl GraphIndex {
     }
 
     /// Rebuild edges từ chains + call records (nhanh — chỉ dùng khi reopen).
-    #[cfg_attr(not(any(feature = "sqlite", feature = "lmdb", feature = "redis")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
+        allow(dead_code)
+    )]
     // chỉ rebuild() dùng — không backend thì không ai gọi.
     fn rebuild_edges(&mut self, recs: &HashMap<u64, Vec<CallRecord>>) {
         self.edges.clear();
@@ -2037,10 +2046,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_persist_and_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let path = format!(
-            "sqlite://{}/db.sqlite",
-            dir.path().to_string_lossy()
-        );
+        let path = format!("sqlite://{}/db.sqlite", dir.path().to_string_lossy());
         let chains = HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, SYMBOL_BASE + 1])]);
         let r = result(
             "a.ts",

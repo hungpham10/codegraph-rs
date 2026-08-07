@@ -204,7 +204,10 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
     assert_eq!(s1.file, "store/store.go");
     assert_eq!(s2.file, "cache/cache.go");
 
-    assert_eq!(idx.flow(SYMBOL_BASE).await.unwrap().chain_desc, vec!["process"]);
+    assert_eq!(
+        idx.flow(SYMBOL_BASE).await.unwrap().chain_desc,
+        vec!["process"]
+    );
     assert_eq!(
         idx.flow(SYMBOL_BASE + 1).await.unwrap().chain_desc,
         vec!["process"]
@@ -234,7 +237,11 @@ async fn long_path_and_call_name_survive_roundtrip() {
     assert!(long_path.len() > 511, "long_path len = {}", long_path.len());
 
     // call_name > 511 byte (mangled symbol).
-    let long_call = format!("RTX{}MangledType0::method{}X", "t".repeat(300), "q".repeat(300));
+    let long_call = format!(
+        "RTX{}MangledType0::method{}X",
+        "t".repeat(300),
+        "q".repeat(300)
+    );
     assert!(long_call.len() > 511);
 
     let calls = vec![CallRecord {
@@ -252,7 +259,10 @@ async fn long_path_and_call_name_survive_roundtrip() {
     }];
     let r = result(
         &long_path,
-        vec![sym(&long_path, "a", SYMBOL_BASE), sym(&long_path, "b", SYMBOL_BASE + 1)],
+        vec![
+            sym(&long_path, "a", SYMBOL_BASE),
+            sym(&long_path, "b", SYMBOL_BASE + 1),
+        ],
         HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, SYMBOL_BASE + 1])]),
         calls,
     );
@@ -267,10 +277,7 @@ async fn long_path_and_call_name_survive_roundtrip() {
     assert_eq!(idx.version(), 1);
     assert_eq!(idx.files().len(), 1);
     assert_eq!(idx.files()[0].path, long_path);
-    assert_eq!(
-        idx.callees(SYMBOL_BASE).await.unwrap()[0].name,
-        "b"
-    );
+    assert_eq!(idx.callees(SYMBOL_BASE).await.unwrap()[0].name, "b");
     // call-name index giữ nguyên tên dài sau reopen.
     let hits = idx.search_flow(&[SYMBOL_BASE]).await.unwrap();
     assert_eq!(hits.len(), 1);

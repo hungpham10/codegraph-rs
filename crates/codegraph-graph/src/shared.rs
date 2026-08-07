@@ -84,11 +84,9 @@ impl SharedGraphIndex {
         let path = trim_scheme(dsn);
         match self.scheme() {
             #[cfg(feature = "sqlite")]
-            Some("sqlite") => {
-                crate::storage::sqlite::SqliteStorage::probe_version(path)
-                    .await
-                    .ok()
-            }
+            Some("sqlite") => crate::storage::sqlite::SqliteStorage::probe_version(path)
+                .await
+                .ok(),
             #[cfg(feature = "lmdb")]
             Some("lmdb") => crate::storage::lmdb::probe_version(path).await.ok(),
             // redis không có probe file ngoài — không đo được → stale.
