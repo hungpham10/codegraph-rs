@@ -8,7 +8,7 @@ description = "Benchmark codegraph-extract + codegraph-graph trên các repo th�
 
 [dependencies]
 codegraph-extract = { path = "../codegraph-extract" }
-codegraph-graph = { path = "../codegraph-graph" }
+codegraph-graph = { path = "../codegraph-graph", features = ["sqlite", "lmdb"] }
 codegraph-core = { path = "../codegraph-core" }
 
 anyhow = { workspace = true }
@@ -36,4 +36,8 @@ codspeed = ["dep:codspeed-criterion-compat"]
 
 [[bench]]
 name = "codspeed"
+harness = false
+
+[[bench]]
+name = "storage"
 harness = false

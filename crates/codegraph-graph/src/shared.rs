@@ -1,16 +1,20 @@
 //! SharedGraphIndex — index dùng chung cho production (GraphApi/MCP/viz).
 //!
-//! Mọi request dùng chung 1 snapshot `Arc<GraphIndex>`. Index sống trong chính
-//! file `.codegraph/db.sqlite` (entity store `sg_*` + radix chain engine `rt_*`):
+//! Mọi request dùng chung 1 snapshot `Arc<GraphIndex>`. Index sống trong một
+//! backend persistent mà DSN chỉ rõ (`sqlite://...` / `lmdb://...` / `redis://...`):
 //! `GraphIndex::ingest` (CLI/watcher, tiến trình riêng) bump `index_version`
-//! trong file; `ensure_fresh` probe version (đọc thẳng file — không cần sidecar)
-//! và rebuild snapshot khi stale dưới `rebuild_lock` (N request stale đồng thời
-//! chỉ 1 lần rebuild), đổi snapshot dưới `RwLock`. `path = None`: in-memory —
-//! không có writer ngoài, snapshot coi như luôn fresh sau lần build đầu.
+//! trong store; `ensure_fresh` probe version (đọc thẳng store — không cần
+//! sidecar) và rebuild snapshot khi stale dưới `rebuild_lock` (N request stale
+//! đồng thời chỉ 1 lần rebuild), đổi snapshot dưới `RwLock`. `dsn = None`:
+//! in-memory — không có writer ngoài, snapshot coi như luôn fresh sau lần
+//! build đầu.
+//!
+//! DSN là **source duy nhất** cho cả `rebuild` (mở backend) lẫn `current_version`
+//! (probe) — nên khi nhiều backend cùng được bật (vd `sqlite` + `lmdb`), backend
+//! được chọn theo scheme trong DSN, không phải theo thứ tự feature.
 
 use crate::GraphIndex;
 use codegraph_core::Result;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -28,11 +32,8 @@ struct IndexState {
 /// chiếu 1 instance. Rebuild đồng bộ theo version file — request đầu sau khi
 /// re-index xong chờ rebuild, các request sau thấy đã fresh.
 pub struct SharedGraphIndex {
-    /// Nơi persist index (`None` = in-memory, chạy không feature `sqlite`).
-    /// Chỉ đọc trong nhánh `sqlite` (open/rebuild) — build không feature này
-    /// giữ `None` nên field không được dùng.
-    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
-    path: Option<PathBuf>,
+    /// DSN nơi persist index (`None` = in-memory, không có writer ngoài).
+    dsn: Option<String>,
     state: RwLock<IndexState>,
     /// Serialize rebuild — N request stale đồng thời chỉ 1 lần rebuild.
     rebuild_lock: Arc<Mutex<()>>,
@@ -41,11 +42,15 @@ pub struct SharedGraphIndex {
 impl SharedGraphIndex {
     /// Mở index dùng chung.
     ///
-    /// `path = Some(p)` (feature `sqlite`): chưa build — `ensure_fresh` sẽ
-    /// reopen + rebuild index từ file lần đầu. `path = None`: in-memory.
-    pub async fn open(path: Option<PathBuf>) -> Result<Self> {
+    /// `dsn = Some(d)`: chưa build — `ensure_fresh` sẽ mở đúng backend theo
+    /// scheme rồi rebuild index từ store lần đầu. `dsn = None`: in-memory.
+    ///
+    /// `dsn` phải là DSN đầy đủ scheme (vd `sqlite:///path/db.sqlite`,
+    /// `lmdb:///path/db`) — không phải plain path, để nhiều backend cùng bật
+    /// vẫn chọn đúng backend.
+    pub async fn open(dsn: Option<String>) -> Result<Self> {
         Ok(Self {
-            path,
+            dsn,
             state: RwLock::new(IndexState {
                 index: Arc::new(GraphIndex::in_memory()),
                 version: 0,
@@ -55,31 +60,48 @@ impl SharedGraphIndex {
         })
     }
 
-    /// Version index trên đĩa hiện tại — `None` nếu probe thất bại (file chưa
-    /// có hoặc đang bị re-index). Chỉ gọi khi `path.is_some()`.
-    #[cfg(feature = "sqlite")]
+    /// Scheme của DSN (`"sqlite"`, `"lmdb"`, `"redis"`) — `None` nếu in-memory.
+    fn scheme(&self) -> Option<&'static str> {
+        let dsn = self.dsn.as_ref()?;
+        if dsn.starts_with("sqlite://") {
+            return Some("sqlite");
+        }
+        if dsn.starts_with("lmdb://") {
+            return Some("lmdb");
+        }
+        if dsn.starts_with("redis://") {
+            return Some("redis");
+        }
+        // Các scheme/DSN khác (chưa biết) — không đo được version độc lập.
+        None
+    }
+
+    /// Version index trên đĩa hiện tại — `None` nếu probe thất bại (store chưa
+    /// có hoặc đang bị re-index), hay backend không probe độc lập được (redis).
+    /// Chỉ gọi khi `dsn.is_some()`.
     async fn current_version(&self) -> Option<u64> {
-        let p = self.path.as_ref()?;
-        crate::storage::sqlite::SqliteStorage::probe_version(&p.display().to_string())
-            .await
-            .ok()
+        let dsn = self.dsn.as_ref()?;
+        let path = trim_scheme(dsn);
+        match self.scheme() {
+            #[cfg(feature = "sqlite")]
+            Some("sqlite") => crate::storage::sqlite::SqliteStorage::probe_version(path)
+                .await
+                .ok(),
+            #[cfg(feature = "lmdb")]
+            Some("lmdb") => crate::storage::lmdb::probe_version(path).await.ok(),
+            // redis không có probe file ngoài — không đo được → stale.
+            _ => None,
+        }
     }
 
     /// Snapshot hiện tại có khớp version trên đĩa không. In-memory (không file)
-    /// → không có writer ngoài → luôn fresh.
+    /// → không có writer ngoài → luôn fresh. Backend không probe được (redis/
+    /// unknown scheme) → coi là stale để rebuilt lại.
     async fn is_fresh(&self, version: u64) -> bool {
-        #[cfg(feature = "sqlite")]
-        {
-            if self.path.is_none() {
-                return true;
-            }
-            matches!(self.current_version().await, Some(v) if v == version)
+        if self.dsn.is_none() {
+            return true;
         }
-        #[cfg(not(feature = "sqlite"))]
-        {
-            let _ = version;
-            true
-        }
+        matches!(self.current_version().await, Some(v) if v == version)
     }
 
     /// Đảm bảo index mới nhất, trả snapshot dùng được.
@@ -110,19 +132,15 @@ impl SharedGraphIndex {
         self.state.read().await.index.clone()
     }
 
-    /// Build index từ file hiện tại rồi swap snapshot (gọi trong `rebuild_lock`).
+    /// Build index từ DSN hiện tại rồi swap snapshot (gọi trong `rebuild_lock`).
+    /// `GraphIndex::open` tự route theo scheme — không cần nhánh cfg.
     async fn rebuild_inner(&self) -> Result<()> {
-        #[cfg(feature = "sqlite")]
-        let index = match &self.path {
-            Some(p) => GraphIndex::open(&p.display().to_string()).await?,
+        #[cfg(any(feature = "sqlite", feature = "lmdb", feature = "redis"))]
+        let index = match &self.dsn {
+            Some(d) => GraphIndex::open(d).await?,
             None => GraphIndex::in_memory(),
         };
-        #[cfg(all(feature = "redis", not(feature = "sqlite")))]
-        let index = match &self.path {
-            Some(p) => GraphIndex::open(&p.display().to_string()).await?,
-            None => GraphIndex::in_memory(),
-        };
-        #[cfg(not(any(feature = "sqlite", feature = "redis")))]
+        #[cfg(not(any(feature = "sqlite", feature = "lmdb", feature = "redis")))]
         let index = GraphIndex::in_memory();
 
         let version = index.version();
@@ -132,6 +150,14 @@ impl SharedGraphIndex {
         state.ready = true;
         Ok(())
     }
+}
+
+/// Bỏ `scheme://` khỏi DSN — trả phần còn lại (path cho probe file).
+fn trim_scheme(dsn: &str) -> &str {
+    dsn.strip_prefix("sqlite://")
+        .or_else(|| dsn.strip_prefix("lmdb://"))
+        .or_else(|| dsn.strip_prefix("redis://"))
+        .unwrap_or(dsn)
 }
 
 #[cfg(test)]
@@ -161,7 +187,7 @@ mod tests {
         }
     }
 
-    // Chỉ test sqlite dùng — build không feature này vẫn compile.
+    // Chỉ test sqlite dùng — build không có feature này vẫn compile.
     #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
     fn mk_result(path: &str, symbols: Vec<Symbol>, chain: Vec<u64>) -> ParseResult {
         ParseResult {
@@ -191,7 +217,7 @@ mod tests {
     async fn sqlite_stale_version_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("db.sqlite");
-        let db_str = db_path.to_string_lossy().into_owned();
+        let db_str = format!("sqlite://{}", db_path.to_string_lossy());
 
         // "CLI process": index dữ liệu vào file.
         {
@@ -205,7 +231,7 @@ mod tests {
         }
 
         // "Server process": shared index trên cùng file.
-        let sgi = Arc::new(SharedGraphIndex::open(Some(db_path.clone())).await.unwrap());
+        let sgi = Arc::new(SharedGraphIndex::open(Some(db_str.clone())).await.unwrap());
         let idx = sgi.ensure_fresh().await;
         assert_eq!(idx.version(), 1);
         assert_eq!(idx.stats().symbols, 2);

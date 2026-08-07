@@ -26,11 +26,8 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub async fn new(
-        root: camino::Utf8PathBuf,
-        index_path: Option<std::path::PathBuf>,
-    ) -> anyhow::Result<Self> {
-        let shared_index = Arc::new(SharedGraphIndex::open(index_path).await?);
+    pub async fn new(root: camino::Utf8PathBuf, dsn: Option<String>) -> anyhow::Result<Self> {
+        let shared_index = Arc::new(SharedGraphIndex::open(dsn).await?);
         Ok(Self {
             root,
             shared_index,

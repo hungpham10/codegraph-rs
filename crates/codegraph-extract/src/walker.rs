@@ -218,6 +218,7 @@ mod tests {
         let config = ExtractConfig {
             header_language: HeaderLanguage::Cpp,
             effect_classifier: Default::default(),
+            storage: Default::default(),
         };
         let matches = walk(&root, &parsers, &config);
         let h = matches

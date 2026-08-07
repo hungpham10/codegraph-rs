@@ -10,15 +10,17 @@ use std::time::Duration;
 
 /// Spawn a debounced watcher that full re-indexes the workspace on file changes.
 /// Runs on a background tokio task; cancellation when the runtime drops.
-pub fn spawn(root: Utf8PathBuf, db_path: Utf8PathBuf) {
+/// `dsn = None` (in-memory backend) → không có file ngoài để theo dõi, bỏ qua.
+pub fn spawn(root: Utf8PathBuf, dsn: Option<String>) {
+    let Some(dsn) = dsn else { return };
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = run(root, db_path) {
+        if let Err(e) = run(root, dsn) {
             tracing::error!("watcher error: {e}");
         }
     });
 }
 
-fn run(root: Utf8PathBuf, db_path: Utf8PathBuf) -> Result<()> {
+fn run(root: Utf8PathBuf, dsn: String) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DebouncedEvent>>();
     let mut debouncer = new_debouncer(
         Duration::from_millis(500),
@@ -57,9 +59,8 @@ fn run(root: Utf8PathBuf, db_path: Utf8PathBuf) -> Result<()> {
         }
         // Full re-index (đã chốt — bỏ incremental): bất kỳ thay đổi nào cũng
         // index lại toàn bộ (ingest reset + rebuild engine).
-        let db_str = db_path.as_str().to_string();
         let result = handle.block_on(async {
-            let mut idx = GraphIndex::open(&db_str).await?;
+            let mut idx = GraphIndex::open(&dsn).await?;
             orch.index_all(&root, &mut idx, None).await
         });
         match result {

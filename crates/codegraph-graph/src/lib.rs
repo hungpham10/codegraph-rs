@@ -35,7 +35,11 @@
 //! var-type alias, gom SaveCallRecords) → files → rebuild engines → bump version.
 
 pub use crate::search::Search;
-use crate::storage::InMemoryStorage;
+#[cfg(feature = "lmdb")]
+pub use crate::storage::lmdb::LmdbStorage;
+#[cfg(feature = "sqlite")]
+pub use crate::storage::sqlite::SqliteStorage;
+pub use crate::storage::{InMemoryStorage, Storage, Tx};
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
     EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult,
@@ -78,6 +82,15 @@ pub type Result<T> = codegraph_core::Result<T>;
 /// Map `StorageError` → `Error::Search`.
 fn serr(e: crate::storage::StorageError) -> Error {
     Error::Search(e.to_string())
+}
+
+/// Lỗi khi DSN chỉ rõ scheme nhưng feature tương ứng không được bật.
+#[allow(dead_code)] // fallback dispatch + lmdb/sqlite branch dùng khi feature tắt
+fn backend_unavailable(name: &str) -> Error {
+    Error::Db(format!(
+        "Backend '{name}' được yêu cầu qua DSN nhưng feature '{name}' không được bật \
+         trong bản build này"
+    ))
 }
 
 /// Map `search::Error` → `Error::Search`.
@@ -151,23 +164,112 @@ impl GraphIndex {
         Self::new_with_storage(storage)
     }
 
-    /// Mở index từ file sqlite (feature `sqlite`) — rebuild từ entity store.
-    #[allow(unused_variables)] // dsn chỉ dùng khi bật sqlite/redis — không backend → Err.
+    /// Mở index từ một backend persistent bằng DSN — rebuild từ entity store.
+    ///
+    /// DSN mang scheme cho biết backend, phần còn lại là path:
+    /// - `sqlite://<path>` → sqlite (feature `sqlite`)
+    /// - `lmdb://<path>` → LMDB (feature `lmdb`)
+    /// - `redis://<url>` → redis (feature `redis`)
+    ///
+    /// Không có scheme (plain path) → fallback backend mặc định **nếu chỉ có
+    /// đúng 1 backend** được compile (backward compat: main.rs/mcp truyền
+    /// plain path với build chỉ bật `sqlite`). Nếu ≥2 backend — thay vì chọn
+    /// ngầm một backend (gây nhầm) — báo lỗi bắt caller chỉ rõ scheme.
     pub async fn open(dsn: &str) -> Result<Self> {
-        #[cfg(feature = "sqlite")]
-        #[allow(unreachable_code)]
-        return Self::open_sqlite(dsn).await;
+        match Self::split_dsn(dsn) {
+            Some(("sqlite", path)) => Self::open_sqlite_dispatch(path).await,
+            Some(("lmdb", path)) => Self::open_lmdb_dispatch(path).await,
+            _ => Self::open_default(dsn).await,
+        }
+    }
 
-        #[cfg(feature = "redis")]
-        #[allow(unreachable_code)]
-        return Self::open_redis(dsn).await;
+    /// `sqlite://` rõ ràng — compile cả sqlite; không compile → báo lỗi.
+    #[cfg(feature = "sqlite")]
+    async fn open_sqlite_dispatch(path: &str) -> Result<Self> {
+        Self::open_sqlite(path).await
+    }
+    /// `sqlite://` rõ ràng nhưng feature không bật → không thể mở.
+    #[cfg(not(feature = "sqlite"))]
+    async fn open_sqlite_dispatch(_path: &str) -> Result<Self> {
+        Err(backend_unavailable("sqlite"))
+    }
 
+    /// `lmdb://` rõ ràng — compile trường lmdb; không compile → báo lỗi.
+    #[cfg(feature = "lmdb")]
+    async fn open_lmdb_dispatch(path: &str) -> Result<Self> {
+        Self::open_lmdb(path).await
+    }
+
+    /// `lmdb://` rõ ràng nhưng feature không bổ — lỗi.
+    #[cfg(not(feature = "lmdb"))]
+    async fn open_lmdb_dispatch(_path: &str) -> Result<Self> {
+        Err(backend_unavailable("lmdb"))
+    }
+
+    /// Tách `scheme://` khỏi DSN: trả `(scheme, phần còn lại)` hoặc `None`
+    /// nếu không có scheme (plain path / redis url giữ nguyên).
+    fn split_dsn(dsn: &str) -> Option<(&'static str, &str)> {
+        if let Some(rest) = dsn.strip_prefix("sqlite://") {
+            return Some(("sqlite", rest));
+        }
+        if let Some(rest) = dsn.strip_prefix("lmdb://") {
+            return Some(("lmdb", rest));
+        }
+        None
+    }
+
+    /// Mở backend mặc định khi DSN không có scheme. Chỉ được phép ngầm chọn
+    /// khi **đúng 1** backend persistent được compile; nhiều hơn → lỗi bắt
+    /// buộc scheme (tránh chọn nhầm). Các nhánh cfg mutual-exclusive nên
+    /// không có unreachable code.
+    #[allow(unused_variables)] // dsn chỉ dùng trong nhánh single-backend
+    async fn open_default(dsn: &str) -> Result<Self> {
+        // Chỉ sqlite được compile — plain path = sqlite (backward compat).
+        #[cfg(all(feature = "sqlite", not(any(feature = "lmdb", feature = "redis"))))]
+        {
+            return Self::open_sqlite(dsn).await;
+        }
+        // Chỉ lmdb được compile — plain path = lmdb.
+        #[cfg(all(feature = "lmdb", not(any(feature = "sqlite", feature = "redis"))))]
+        {
+            return Self::open_lmdb(dsn).await;
+        }
+        // Chỉ redis được compile — plain path = redis.
+        #[cfg(all(feature = "redis", not(any(feature = "sqlite", feature = "lmdb"))))]
+        {
+            return Self::open_redis(dsn).await;
+        }
+        // Nhiều backend (≥2) — DSN không nói scheme → mơ hồ.
+        #[cfg(any(
+            all(feature = "sqlite", feature = "lmdb"),
+            all(feature = "sqlite", feature = "redis"),
+            all(feature = "lmdb", feature = "redis")
+        ))]
+        {
+            return Err(Error::Db(
+                "Nhiều backend persistent được bật nhưng DSN không chỉ rõ scheme. \
+                 Ghi rõ `sqlite://`, `lmdb://` hoặc `redis://` trong --dbdsn."
+                    .into(),
+            ));
+        }
+        // Không backend nào — không thể mở persistent.
         #[allow(unreachable_code)]
         {
             Err(Error::Db(
-                "Phải bật ít nhất feature 'sqlite' hoặc 'redis'".into(),
+                "Phải bật ít nhất một feature 'sqlite', 'lmdb' hoặc 'redis'".into(),
             ))
         }
+    }
+
+    #[cfg(feature = "lmdb")]
+    async fn open_lmdb(path: &str) -> Result<Self> {
+        let storage = crate::storage::lmdb::LmdbStorage::open(path)
+            .await
+            .map_err(serr)?;
+        let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
+        let mut idx = Self::new_with_storage(storage);
+        idx.rebuild().await?;
+        Ok(idx)
     }
 
     #[cfg(feature = "sqlite")]
@@ -246,7 +348,10 @@ impl GraphIndex {
     // ── Build / rebuild ──
 
     /// Rebuild toàn bộ index từ entity store trong storage (open/reopen).
-    #[cfg_attr(not(any(feature = "sqlite", feature = "redis")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
+        allow(dead_code)
+    )]
     // chỉ open() dùng — không backend thì không ai gọi.
     async fn rebuild(&mut self) -> Result<()> {
         self.next_id = self
@@ -326,7 +431,10 @@ impl GraphIndex {
     }
 
     /// Insert symbol vào registry + index (scope id đã global — path rebuild).
-    #[cfg_attr(not(any(feature = "sqlite", feature = "redis")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
+        allow(dead_code)
+    )]
     // chỉ rebuild() dùng — không backend thì không ai gọi.
     fn index_symbol(&mut self, sym: Symbol) {
         let id = sym.id;
@@ -353,7 +461,10 @@ impl GraphIndex {
     }
 
     /// Rebuild edges từ chains + call records (nhanh — chỉ dùng khi reopen).
-    #[cfg_attr(not(any(feature = "sqlite", feature = "redis")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
+        allow(dead_code)
+    )]
     // chỉ rebuild() dùng — không backend thì không ai gọi.
     fn rebuild_edges(&mut self, recs: &HashMap<u64, Vec<CallRecord>>) {
         self.edges.clear();
@@ -675,7 +786,22 @@ impl GraphIndex {
                 .unwrap_or("")
                 .to_lowercase();
             if !short.is_empty() {
-                candidates = self.name_index.get(&short).cloned().unwrap_or_default();
+                // Chỉ nhận callee-thực-sự (Function/Method) — KHÔNG fallback vào
+                // biến / field / param trùng tên (VD `WrapResponse.ok(...)` với
+                // receiver external không resolve được dễ link nhầm vào `boolean ok`
+                // trong file khác — bug C).
+                candidates = self
+                    .name_index
+                    .get(&short)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&id| {
+                        self.symbols.get(&id).is_some_and(|s| {
+                            matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+                        })
+                    })
+                    .collect();
             }
         }
 
@@ -730,6 +856,11 @@ impl GraphIndex {
             let mut score = 0;
             if sym.annotations.iter().any(|a| a.name == "Override") {
                 score += 10;
+            }
+            if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
+                // Ưu tiên callee-thực-sự (hàm/method) hơn symbol trùng tên khác
+                // kind (Variable/Parameter/Field...). (bug C)
+                score += 4;
             }
             if self.chains_map.contains_key(&id) {
                 score += 5;
@@ -919,6 +1050,31 @@ impl GraphIndex {
         kind: Option<SymbolKind>,
         limit: usize,
     ) -> Result<Vec<Symbol>> {
+        self.search_symbol_filtered(query, limit, |s| kind.is_none() || s.kind == kind.unwrap())
+            .await
+    }
+
+    /// Như `search_symbol` nhưng chấp nhận NHIỀU kind — dùng cho sandbox (entry
+    /// có thể là `Function` free function (Rust/Go/...) hoặc `Method` (Java/...)).
+    pub async fn search_symbol_kinds(
+        &self,
+        query: &str,
+        kinds: &[SymbolKind],
+        limit: usize,
+    ) -> Result<Vec<Symbol>> {
+        self.search_symbol_filtered(query, limit, |s| kinds.contains(&s.kind))
+            .await
+    }
+
+    async fn search_symbol_filtered<F>(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: F,
+    ) -> Result<Vec<Symbol>>
+    where
+        F: Fn(&Symbol) -> bool,
+    {
         let q = query.to_lowercase();
         let hits = match self.names.search(q.as_bytes(), None).await {
             Ok(h) => h,
@@ -944,7 +1100,7 @@ impl GraphIndex {
                 let Some(s) = self.symbols.get(&id) else {
                     continue;
                 };
-                if kind.is_some_and(|k| s.kind != k) {
+                if !filter(s) {
                     continue;
                 }
                 out.push(s.clone());
@@ -1890,8 +2046,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_persist_and_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("db.sqlite");
-        let path = path.to_string_lossy().into_owned();
+        let path = format!("sqlite://{}/db.sqlite", dir.path().to_string_lossy());
         let chains = HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, SYMBOL_BASE + 1])]);
         let r = result(
             "a.ts",
