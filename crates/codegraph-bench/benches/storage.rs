@@ -84,6 +84,9 @@ fn measure_on_disk(parsed: &[codegraph_graph::ParseResult]) {
 }
 
 fn main_benchmark(c: &mut Criterion) {
+    type BackendFactory = Box<dyn Fn() -> Option<String>>;
+    type NamedBackend = (&'static str, BackendFactory);
+
     let opts = BenchOptions {
         langs: None,
         queries: 200,
@@ -106,7 +109,7 @@ fn main_benchmark(c: &mut Criterion) {
         // ── index: mỗi backend một group, storage MỚI mỗi iteration ──
         // Mỗi backend là một closure `mk_dsn()` trả DSN cho một storage trống
         // (tempdir mới). Với in-memory, dsn = None.
-        let mk_backends: Vec<(&str, Box<dyn Fn() -> Option<String>>)> = vec![
+        let mk_backends: Vec<NamedBackend> = vec![
             ("in_memory", Box::new(|| None)),
             (
                 "sqlite",
