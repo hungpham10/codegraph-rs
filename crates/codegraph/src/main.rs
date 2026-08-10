@@ -1,13 +1,15 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use codegraph_extract::{ExtractStats, Orchestrator};
 use codegraph_graph::GraphIndex;
-use codegraph_mcp::McpServer;
-use std::sync::Arc;
+use codegraph_mcp::CodegraphServer;
 
 mod watcher;
 
+/// CLI tối giản: chỉ còn lifecycle (`init`/`deinit`) + MCP server (`serve --mcp`).
+/// Mọi query/interact đi qua MCP tools (`codegraph_search`, `codegraph_context`,
+/// `codegraph_status`, …) — CLI không lặp lại các lệnh đọc index nữa.
 #[derive(Parser, Debug)]
 #[command(
     name = "codegraph",
@@ -21,7 +23,7 @@ struct Cli {
     path: Option<Utf8PathBuf>,
 
     /// Print version.
-    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
     version: Option<bool>,
 
     #[command(subcommand)]
@@ -43,61 +45,16 @@ enum Cmd {
         progress: bool,
     },
     /// Remove the .codegraph/ directory.
-    Uninit,
-    /// Full re-index.
-    Index {
-        #[arg(
-            long,
-            default_value_t = true,
-            help = "Show live progress bar during indexing"
-        )]
-        progress: bool,
-    },
-    /// Show index health.
-    Status,
-    /// Search symbols (substring, case-insensitive).
-    Query {
-        query: String,
-        #[arg(long, default_value_t = 20)]
-        limit: u32,
-    },
-    /// List indexed files under a path prefix.
-    Files {
-        /// Path prefix filter (indexed file paths starting with this value).
-        #[arg(value_name = "PATH")]
-        prefix: Option<String>,
-    },
-    /// Build markdown context for a symbol.
-    Context {
-        target: String,
-        #[arg(long, default_value_t = 1)]
-        depth: u32,
-        #[arg(long)]
-        source: bool,
-    },
+    Deinit,
     /// Run as MCP server over stdio.
     Serve {
         #[arg(long)]
         mcp: bool,
     },
-    /// Configure agents (alias for the agent setup step in `init`).
-    Install,
-    /// Run a function in the behavior-verification sandbox: compile the
-    /// function (and its in-group callees) to machine code, bind external
-    /// callees to Rhai mocks, run it, and print the observed-behavior trace.
-    Sandbox {
-        /// Entry function name (substring; first match wins).
-        function: String,
-        /// Comma-separated abstract arg values (i64) for the entry function.
-        #[arg(long, default_value = "")]
-        args: String,
-        /// Do not print the trace, only the return value.
-        #[arg(long, default_value_t = false)]
-        quiet: bool,
-    },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -116,101 +73,23 @@ fn main() -> Result<()> {
     let cmd = match cli.cmd {
         Some(c) => c,
         None => {
-            cmd_default(&root)?;
+            cmd_default(&root).await?;
             return Ok(());
         }
     };
     match cmd {
-        Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress),
-        Cmd::Uninit => cmd_uninit(&root),
-        Cmd::Index { progress } => cmd_index(&root, progress),
-        Cmd::Status => cmd_status(&root),
-        Cmd::Query { query, limit } => cmd_query(&root, &query, limit),
-        Cmd::Files { prefix } => cmd_files(&root, prefix.as_deref()),
-        Cmd::Context {
-            target,
-            depth,
-            source,
-        } => cmd_context(&root, &target, depth, source),
-        Cmd::Serve { mcp } => cmd_serve(&root, mcp),
-        Cmd::Install => cmd_agents(&root),
-        Cmd::Sandbox {
-            function,
-            args,
-            quiet,
-        } => cmd_sandbox(&root, &function, &args, quiet),
+        Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
+        Cmd::Deinit => cmd_deinit(&root),
+        Cmd::Serve { mcp } => cmd_serve(&root, mcp).await,
     }
 }
 
-fn cmd_default(root: &Utf8Path) -> Result<()> {
-    if !is_initialized(root) {
-        use console::style;
-        eprintln!();
-        eprintln!(
-            "  {} {}",
-            style("CodeGraph").bold().cyan(),
-            style(format!("v{}", env!("CARGO_PKG_VERSION"))).dim()
-        );
-        eprintln!("  ━");
-        eprintln!(
-            "  ⚠️  {}",
-            style("Workspace not initialized").bold().yellow()
-        );
-        eprintln!("     No active database found in this directory.");
-        eprintln!();
-        eprintln!(
-            "     {} {}",
-            style("Root:").dim(),
-            style(root.as_str()).italic()
-        );
-        eprintln!(
-            "     👉 Run {} to set up CodeGraph!",
-            style("codegraph init").bold().green()
-        );
-        eprintln!();
-        std::process::exit(1);
-    }
-
-    use console::style;
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let s = rt.block_on(async {
-        let idx = open_index(root).await?;
-        Ok::<_, anyhow::Error>(idx.stats())
-    })?;
-    eprintln!();
-    eprintln!(
-        "  {} {}",
-        style("CodeGraph").bold().cyan(),
-        style(format!("v{}", env!("CARGO_PKG_VERSION"))).dim()
-    );
-    eprintln!("  ━");
-    eprintln!(
-        "  ✨  {}",
-        style("Workspace Active & Indexed").bold().green()
-    );
-    eprintln!();
-    eprintln!("     📊  {}", style("Database Statistics:").bold());
-    eprintln!("         • {} indexed files", style(s.files).cyan());
-    eprintln!("         • {} symbols", style(s.symbols).cyan());
-    eprintln!("         • {} chains", style(s.chains).cyan());
-    eprintln!("         • {} edges", style(s.edges).cyan());
-    eprintln!();
-    eprintln!("     🚀  {}", style("Quick Commands:").bold());
-    eprintln!(
-        "         • {}           Check status and statistics",
-        style("codegraph status").green()
-    );
-    eprintln!(
-        "         • {}    Search for symbols in the codebase",
-        style("codegraph query <text>").green()
-    );
-    eprintln!(
-        "         • {}            Configure/install AI agent integrations",
-        style("codegraph install").green()
-    );
-    eprintln!();
+/// Không có subcommand → in help. Banner console cũ bị bỏ: giao diện chính giờ
+/// là MCP (agent dùng `codegraph_init`/`codegraph_status` qua tools).
+async fn cmd_default(_root: &Utf8Path) -> Result<()> {
+    use clap::CommandFactory;
+    Cli::command().print_help()?;
+    println!();
     Ok(())
 }
 
@@ -235,175 +114,47 @@ fn is_initialized(root: &Utf8Path) -> bool {
     codegraph_extract::project_dir(root).exists()
 }
 
-fn ensure_initialized(root: &Utf8Path) -> Result<()> {
-    if !is_initialized(root) {
-        use console::style;
-        eprintln!();
+/// `codegraph init`: tạo `.codegraph/` + config, index ngay nếu `do_index`
+/// (progress bar khi `show_progress`). không gọi installer nữa.
+async fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
+    let dir = codegraph_extract::init_project(root)?;
+    eprintln!("initialized {}", dir);
+
+    if do_index {
+        let stats = index_all(root, show_progress).await?;
         eprintln!(
-            "  {} {}",
-            style("CodeGraph").bold().cyan(),
-            style(format!("v{}", env!("CARGO_PKG_VERSION"))).dim()
+            "indexed {} files, {} symbols, {} chains, {} calls (skipped {})",
+            stats.files, stats.symbols, stats.chains, stats.calls, stats.skipped
         );
-        eprintln!("  ━");
-        eprintln!(
-            "  ⚠️  {}",
-            style("Workspace not initialized").bold().yellow()
-        );
-        eprintln!("     No active database found in this directory.");
-        eprintln!();
-        eprintln!(
-            "     {} {}",
-            style("Root:").dim(),
-            style(root.as_str()).italic()
-        );
-        eprintln!(
-            "     👉 Run {} to set up CodeGraph!",
-            style("codegraph init").bold().green()
-        );
-        eprintln!();
-        std::process::exit(1);
     }
     Ok(())
 }
 
 /// Full re-index: mở index theo backend config → `Orchestrator::index_all`
 /// (ingest = full re-index).
-fn block_on_index(root: &Utf8Path, progress: bool) -> Result<ExtractStats> {
-    let root = root.to_path_buf();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let mut idx = open_index(&root).await?;
-        // Create progress bar if requested.
-        let progress_bar = if progress {
-            let bar = indicatif::ProgressBar::new(0);
-            bar.set_style(
-                indicatif::ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%)")
-                    .expect("valid progress bar template")
-                    .progress_chars("#>-"),
-            );
-            Some(std::sync::Arc::new(bar))
-        } else {
-            None
-        };
-        Ok::<_, anyhow::Error>(
-            Orchestrator::with_registry()
-                .index_all(&root, &mut idx, progress_bar)
-                .await?,
-        )
-    })
-}
-
-fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
-    let dir = codegraph_extract::init_project(root)?;
-    eprintln!("initialized {}", dir);
-
-    if do_index {
-        let stats = block_on_index(root, show_progress)?;
-        eprintln!(
-            "indexed {} files, {} symbols, {} chains, {} edges",
-            stats.files, stats.symbols, stats.chains, stats.calls
+async fn index_all(root: &Utf8Path, progress: bool) -> Result<ExtractStats> {
+    let mut idx = open_index(root).await?;
+    // Create progress bar if requested.
+    let progress_bar = if progress {
+        let bar = indicatif::ProgressBar::new(0);
+        bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%)")
+                .expect("valid progress bar template")
+                .progress_chars("#>-"),
         );
-    }
-
-    eprintln!();
-    cmd_agents(root)
-}
-
-fn cmd_agents(root: &Utf8Path) -> Result<()> {
-    use codegraph_installer::{project_registry, DetectStatus, InstallOpts, InstallReport};
-    use console::style;
-    use dialoguer::{theme::ColorfulTheme, MultiSelect};
-
-    let bin = std::env::current_exe()?;
-    let bin = Utf8PathBuf::from_path_buf(bin)
-        .map_err(|p| anyhow!("non-UTF8 bin path: {}", p.display()))?;
-    let opts = InstallOpts {
-        project_root: Some(root.to_path_buf()),
-        global: false,
-        binary_path: bin,
-        home_dir: None,
+        Some(std::sync::Arc::new(bar))
+    } else {
+        None
     };
-
-    let all_targets = project_registry();
-    let statuses: Vec<DetectStatus> = all_targets.iter().map(|t| t.detect(&opts)).collect();
-
-    let found_indices: Vec<usize> = statuses
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| matches!(s, DetectStatus::Found))
-        .map(|(i, _)| i)
-        .collect();
-
-    let already_indices: Vec<usize> = statuses
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| matches!(s, DetectStatus::AlreadyConfigured))
-        .map(|(i, _)| i)
-        .collect();
-
-    let not_found_indices: Vec<usize> = statuses
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| matches!(s, DetectStatus::NotFound))
-        .map(|(i, _)| i)
-        .collect();
-
-    if !already_indices.is_empty() {
-        eprintln!("{}", style("Already configured:").blue());
-        for i in &already_indices {
-            eprintln!("  {}", style(all_targets[*i].label()).blue());
-        }
-        eprintln!();
-    }
-
-    if !not_found_indices.is_empty() {
-        eprintln!("{}", style("Not detected:").dim());
-        for i in &not_found_indices {
-            eprintln!("  {}", style(all_targets[*i].label()).dim());
-        }
-        eprintln!();
-    }
-
-    if found_indices.is_empty() {
-        return Ok(());
-    }
-
-    let labels: Vec<String> = found_indices
-        .iter()
-        .map(|&i| all_targets[i].label().to_string())
-        .collect();
-
-    let chosen = MultiSelect::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select agents to configure (space = toggle, enter = confirm)")
-        .items(&labels)
-        .defaults(&vec![false; found_indices.len()])
-        .interact()?;
-
-    if chosen.is_empty() {
-        return Ok(());
-    }
-
-    eprintln!();
-    for pos in chosen {
-        let target = &all_targets[found_indices[pos]];
-        let report = target.install(&opts)?;
-        match report {
-            InstallReport::Installed(p) | InstallReport::Updated(p) => {
-                for f in &p {
-                    eprintln!("[{}] wrote {}", target.id(), f);
-                }
-            }
-            InstallReport::Unchanged => eprintln!("[{}] unchanged", target.id()),
-            InstallReport::Skipped(r) => eprintln!("[{}] skipped: {}", target.id(), r),
-        }
-    }
-    Ok(())
+    Orchestrator::with_registry()
+        .index_all(root, &mut idx, progress_bar)
+        .await
+        .map_err(Into::into)
 }
 
-fn cmd_uninit(root: &Utf8Path) -> Result<()> {
+/// `codegraph deinit`: xóa `.codegraph/` (đảo của `init`).
+fn cmd_deinit(root: &Utf8Path) -> Result<()> {
     let dir = codegraph_extract::project_dir(root);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
@@ -412,196 +163,28 @@ fn cmd_uninit(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_index(root: &Utf8Path, progress: bool) -> Result<()> {
-    ensure_initialized(root)?;
-    let stats = block_on_index(root, progress)?;
-    eprintln!(
-        "indexed {} files, {} symbols, {} chains, {} calls (skipped {})",
-        stats.files, stats.symbols, stats.chains, stats.calls, stats.skipped
-    );
-    Ok(())
-}
-
-fn cmd_status(root: &Utf8Path) -> Result<()> {
-    ensure_initialized(root)?;
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let s = rt.block_on(async {
-        let idx = open_index(root).await?;
-        Ok::<_, anyhow::Error>(idx.stats())
-    })?;
-    println!("files:   {}", s.files);
-    println!("symbols: {}", s.symbols);
-    println!("chains:  {}", s.chains);
-    println!("edges:   {}", s.edges);
-    Ok(())
-}
-
-fn cmd_query(root: &Utf8Path, q: &str, limit: u32) -> Result<()> {
-    ensure_initialized(root)?;
-    let q = q.to_string();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let hits = rt.block_on(async {
-        let idx = open_index(root).await?;
-        Ok::<_, anyhow::Error>(idx.search_symbol(&q, None, limit as usize).await?)
-    })?;
-    for h in hits {
-        println!(
-            "[{}] {}  {}  {}:{}",
-            h.id,
-            h.kind.as_str(),
-            h.name,
-            h.file,
-            h.line
-        );
-    }
-    Ok(())
-}
-
-fn cmd_files(root: &Utf8Path, prefix: Option<&str>) -> Result<()> {
-    use std::io::Write;
-
-    ensure_initialized(root)?;
-    let prefix = prefix.unwrap_or("").to_string();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let files = rt.block_on(async {
-        let idx = open_index(root).await?;
-        let all = idx.files();
-        Ok::<_, anyhow::Error>(if prefix.is_empty() {
-            all
-        } else {
-            all.into_iter()
-                .filter(|f| f.path.starts_with(&prefix))
-                .collect()
-        })
-    })?;
-    let mut out = std::io::stdout().lock();
-    for f in files {
-        if writeln!(out, "{}  ({})", f.path, f.language).is_err() {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn cmd_context(root: &Utf8Path, target: &str, depth: u32, include_source: bool) -> Result<()> {
-    ensure_initialized(root)?;
-    let dsn = storage_dsn(root);
-    let req = codegraph_context::ContextRequest {
-        query: target.into(),
-        depth,
-        include_source,
-        limit: 5,
-        format: codegraph_context::Format::Markdown,
-    };
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let output = rt.block_on(async {
-        let sgi = Arc::new(codegraph_graph::SharedGraphIndex::open(dsn).await?);
-        codegraph_context::build(&sgi, &req).await
-    })?;
-    print!("{}", output);
-    Ok(())
-}
-
-fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
+/// `codegraph serve --mcp`: chạy MCP server trên stdio.
+async fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
     if !mcp {
         return Err(anyhow!("only --mcp transport supported"));
     }
-    ensure_initialized(root).context("init the index before serving")?;
-    let dsn = storage_dsn(root);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
+
+    // MCP is session-driven: the agent binds a workspace at runtime via
+    // `codegraph_init {"path": ...}`. The startup `--path` (default: cwd) is
+    // only a PRE-SEED so the file watcher attaches to a real project. MCP hosts
+    // like Claude Desktop launch servers with cwd=/ and no `--path` — the root
+    // resolving to `/` is NOT an error anymore: we just start with an EMPTY
+    // session and let the agent bind the project path through the tool.
+    let use_root = root.as_str() != "/";
+    let initialized = use_root && is_initialized(root);
+    let dsn = if initialized { storage_dsn(root) } else { None };
+    if initialized {
         watcher::spawn(root.to_path_buf(), dsn.clone());
-        let mcp_server = McpServer::new(root.to_path_buf(), dsn).await?;
-        mcp_server.run_stdio().await
-    })?;
-    Ok(())
-}
-
-/// `codegraph sandbox <function>` — compile a function group to machine code,
-/// bind external callees to Rhai mocks, run it, and print the observed trace.
-fn cmd_sandbox(root: &Utf8Path, function: &str, args: &str, quiet: bool) -> Result<()> {
-    use codegraph_core::SymbolKind;
-    use codegraph_sboxes::SboxConfig;
-
-    ensure_initialized(root)?;
-    let dsn = storage_dsn(root);
-    let function = function.to_string();
-    let args: Vec<i64> = args
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().parse().map_err(|e| anyhow!("bad arg `{s}`: {e}")))
-        .collect::<Result<_>>()?;
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let (ret, trace, group_names) = rt.block_on(async {
-        let sgi = Arc::new(codegraph_graph::SharedGraphIndex::open(dsn).await?);
-        let idx = sgi.ensure_fresh().await;
-
-        // Resolve the entry function (substring, first function match).
-        let hits = idx
-            .search_symbol_kinds(&function, &[SymbolKind::Function, SymbolKind::Method], 1)
-            .await?;
-        let entry = hits
-            .first()
-            .ok_or_else(|| anyhow!("no function matching `{function}`"))?;
-        let entry_id = entry.id;
-
-        // Build the group: the entry plus every callee in its flow that is a
-        // known symbol (so those calls compile to real machine code instead of
-        // a mock). Unresolved/external calls stay mocked.
-        let flow = idx.flow(entry_id).await?;
-        let mut ids = vec![entry_id];
-        let mut seen = std::collections::HashSet::from([entry_id]);
-        for &e in &flow.chain {
-            if codegraph_core::is_marker(e) {
-                continue;
-            }
-            if e != entry_id && idx.symbol_by_id(e).is_some() && seen.insert(e) {
-                ids.push(e);
-            }
-        }
-        ids.sort_unstable();
-
-        let config = SboxConfig::load(&root.to_path_buf()).unwrap_or_default();
-        let mut module = codegraph_sboxes::compile(&idx, &ids, &config).await?;
-        let (ret, trace) = module.run(&args);
-
-        let mut names: Vec<String> = ids
-            .iter()
-            .filter_map(|id| idx.symbol_by_id(*id))
-            .map(|s| s.name)
-            .collect();
-        names.sort();
-        Ok::<_, anyhow::Error>((ret, trace, names))
-    })?;
-
-    println!("group:   {}", group_names.join(", "));
-    println!("return:  {ret}");
-    if quiet {
-        return Ok(());
     }
-    for (i, name) in trace.mock_names().iter().enumerate() {
-        println!("  {i}: call {name}");
-    }
-    for c in &trace.conds {
-        println!(
-            "  {:>4}: {} -> {}",
-            c.idx,
-            c.kind.as_str(),
-            if c.result { "taken" } else { "skipped" }
-        );
-    }
-    Ok(())
+    let server = if use_root {
+        CodegraphServer::with_root(root.to_path_buf()).await?
+    } else {
+        CodegraphServer::new()
+    };
+    codegraph_mcp::serve_stdio(server).await
 }

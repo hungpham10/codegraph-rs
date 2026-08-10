@@ -2,13 +2,39 @@ use camino::{Utf8Path, Utf8PathBuf};
 use codegraph_api::GraphApi;
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{is_marker, Error, Result, Symbol, SymbolKind, SymbolMatch};
-use codegraph_extract::{init_project, project_dir, ExtractConfig, ExtractStats, Orchestrator};
+use codegraph_extract::Orchestrator;
 use codegraph_graph::{GraphIndex, SharedGraphIndex};
 use codegraph_sboxes::{compile_with_mocks, BranchPolicy, SboxConfig};
+use rmcp::model::Tool;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-pub fn tool_definitions() -> Vec<Value> {
+/// Định nghĩa một MCP tool — single source of truth cho `tools/list`.
+struct ToolDef {
+    name: &'static str,
+    desc: &'static str,
+    schema: Value,
+}
+
+fn tool(name: &'static str, desc: &'static str, schema: Value) -> ToolDef {
+    ToolDef { name, desc, schema }
+}
+
+/// `tools/list` payload — chuyển mọi định nghĩa ở trên qua `rmcp::model::Tool`.
+pub fn rmcp_tools() -> Vec<Tool> {
+    tool_defs()
+        .into_iter()
+        .map(|d| Tool::new(d.name, d.desc, Arc::new(rmcp::model::object(d.schema))))
+        .collect()
+}
+
+/// Tool name có tồn tại trong danh sách không — phân biệt protocol error
+/// (unknown tool → `method_not_found`) với tool error (client-visible).
+pub fn is_known_tool(name: &str) -> bool {
+    tool_defs().iter().any(|d| d.name == name)
+}
+
+fn tool_defs() -> Vec<ToolDef> {
     vec![
         tool(
             "codegraph_search",
@@ -91,13 +117,19 @@ pub fn tool_definitions() -> Vec<Value> {
             "Index health: symbol / chain / edge / file counts.",
             json!({ "type": "object", "properties": {} }),
         ),
-        // ── Admin tools (init / index) — thao tác trên workspace root của server ──
+        // ── Admin tools (init / deinit / index) — thao tác trên session slot ──
         tool(
             "codegraph_init",
-            "Initialize the workspace for CodeGraph (idempotent): creates .codegraph/ with .gitignore, version, and config.toml. Pass index=false to skip the full re-index that runs by default.",
+            "Bind this MCP session to a workspace root (idempotent): creates .codegraph/ with .gitignore, version, and config.toml. Pass path (absolute workspace root) to select the directory for this session. index defaults to false — binding is quick and non-blocking (it does NOT index); call codegraph_index {} afterwards (or pass index=true here) only when you need a fresh index to query. Re-running with a different path re-points the session.",
             json!({ "type": "object", "properties": {
-                "index": { "type": "boolean", "default": true }
-            } }),
+                "path": { "type": "string", "description": "Absolute path of the workspace root to bind this session to." },
+                "index": { "type": "boolean", "default": false }
+            }, "required": ["path"] }),
+        ),
+        tool(
+            "codegraph_deinit",
+            "Release this MCP session: unbind the current workspace root (root becomes null). The .codegraph/ directory and index stay on disk — call codegraph_init with a path again to re-bind. Every query tool refuses to run while the session is unbound.",
+            json!({ "type": "object", "properties": {} }),
         ),
         tool(
             "codegraph_index",
@@ -237,10 +269,6 @@ pub fn tool_definitions() -> Vec<Value> {
             }, "required": ["entry"] }),
         ),
     ]
-}
-
-fn tool(name: &str, desc: &str, schema: Value) -> Value {
-    json!({ "name": name, "description": desc, "inputSchema": schema })
 }
 
 pub async fn dispatch_with_api(api: &GraphApi, name: &str, args: Value) -> Result<String> {
@@ -594,68 +622,6 @@ fn arg_u64(v: &Value, k: &str) -> Result<u64> {
     v.get(k)
         .and_then(|x| x.as_u64())
         .ok_or_else(|| Error::Invalid(format!("missing int arg: {k}")))
-}
-
-// ── Admin tools (codegraph_init / codegraph_index) ──
-// Cần workspace root (không qua GraphApi) — server lưu `root` và gọi hàm này.
-
-pub async fn dispatch_admin(root: &Utf8Path, name: &str, args: Value) -> Result<String> {
-    match name {
-        "codegraph_init" => {
-            let dir = init_project(root)?;
-            let do_index = args.get("index").and_then(|v| v.as_bool()).unwrap_or(true);
-            let mut out = json!({ "initialized": dir.as_str() });
-            if do_index {
-                match run_index(root).await {
-                    Ok(stats) => {
-                        out["indexed"] = stats_json(&stats);
-                    }
-                    Err(e) => {
-                        return Err(Error::Invalid(format!(
-                            "initialized {}, but indexing failed: {e}",
-                            dir
-                        )));
-                    }
-                }
-            }
-            serde_json::to_string_pretty(&out).map_err(|e| Error::Invalid(e.to_string()))
-        }
-        "codegraph_index" => {
-            if !project_dir(root).exists() {
-                return Err(Error::Invalid(
-                    "workspace not initialized: missing .codegraph/. Run codegraph_init first."
-                        .into(),
-                ));
-            }
-            let stats = run_index(root).await?;
-            serde_json::to_string_pretty(&stats_json(&stats))
-                .map_err(|e| Error::Invalid(e.to_string()))
-        }
-        _ => Err(Error::Invalid(format!("unknown admin tool: {name}"))),
-    }
-}
-
-/// Full re-index: mở index theo backend config → `Orchestrator::index_all`
-/// (ingest = full re-index). Không progress bar — MCP transport là stdout,
-/// tránh nhiễu JSON-RPC.
-async fn run_index(root: &Utf8Path) -> Result<ExtractStats> {
-    let mut idx = match ExtractConfig::load(root).storage_dsn(root) {
-        Some(dsn) => GraphIndex::open(&dsn).await?,
-        None => GraphIndex::in_memory(),
-    };
-    Orchestrator::with_registry()
-        .index_all(root, &mut idx, None)
-        .await
-}
-
-fn stats_json(s: &ExtractStats) -> Value {
-    json!({
-        "files": s.files,
-        "symbols": s.symbols,
-        "chains": s.chains,
-        "calls": s.calls,
-        "skipped": s.skipped,
-    })
 }
 
 // ── Sandbox tool (codegraph_sandbox) ──

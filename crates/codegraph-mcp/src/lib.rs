@@ -1,107 +1,71 @@
-//! MCP server (stdio JSON-RPC 2.0). Hand-rolled, no SDK.
+//! MCP server on the `rmcp` SDK.
+//!
+//! Server start lên rồi **quản lý theo session**: với transport stdio mỗi tiến
+//! trình host đúng **1 session slot** — agent gọi `codegraph_init {"path": ...}`
+//! để bind session vào workspace root, `codegraph_deinit` để nhả. Mọi tool khác
+//! chạy qua session (chưa bind/init → refuse). `--path` lúc khởi động là
+//! pre-seed, không bắt buộc.
+//!
+//! Hai transport module: [`stdio`] (luồng chính, 1 process = 1 session cố định)
+//! và [`http`] (luồng riêng — stub, sẽ quản lý session theo session-id header).
 
-mod protocol;
+pub mod http;
+mod session;
+pub mod stdio;
 mod tools;
 mod usage;
 
-pub use protocol::{ErrorObj, JsonRpcMessage, Response};
-pub use tools::tool_definitions;
+pub use session::{InitOutcome, Session};
+pub use stdio::serve_stdio;
 
-use codegraph_graph::SharedGraphIndex;
-use serde_json::{json, Value};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use codegraph_api::GraphApi;
+use rmcp::handler::server::ServerHandler;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::{MaybeSendFuture, RequestContext};
+use rmcp::{ErrorData as McpError, RoleServer};
+use serde_json::{json, Value};
+
+/// Hướng dẫn sử dụng tools — client render trong instructions sau `initialize`.
 pub const SERVER_INSTRUCTIONS: &str = include_str!("server-instructions.md");
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = "codegraph";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub struct McpServer {
-    /// Workspace root — dùng cho admin tools (`codegraph_init` / `codegraph_index`).
-    root: camino::Utf8PathBuf,
-    shared_index: Arc<SharedGraphIndex>,
-    /// Telemetry cho `codegraph_query_usage_report`.
+/// Server MCP. Transport-agnostic: stdio (1 process = 1 session) mount trực
+/// tiếp, http (tương lai) sẽ xoay vòng session store riêng.
+pub struct CodegraphServer {
+    session: Session,
     usage: Arc<Mutex<usage::UsageStats>>,
 }
 
-impl McpServer {
-    pub async fn new(root: camino::Utf8PathBuf, dsn: Option<String>) -> anyhow::Result<Self> {
-        let shared_index = Arc::new(SharedGraphIndex::open(dsn).await?);
+impl CodegraphServer {
+    /// Server với session trống — `codegraph_init` sẽ bind root trong phiên.
+    pub fn new() -> Self {
+        Self {
+            session: Session::new(),
+            usage: Arc::new(Mutex::new(usage::UsageStats::default())),
+        }
+    }
+
+    /// Pre-seed root từ `--path` lúc khởi động (tương đương đã `codegraph_init`
+    /// với root đó, không index thêm). Giữ CLI/watcher flow không vỡ.
+    pub async fn with_root(root: camino::Utf8PathBuf) -> anyhow::Result<Self> {
         Ok(Self {
-            root,
-            shared_index,
+            session: Session::with_root(root).await?,
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
         })
     }
 
-    pub async fn run_stdio(self) -> anyhow::Result<()> {
-        let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin);
-        let mut stdout = tokio::io::stdout();
-        let mut line = String::new();
-
-        loop {
-            line.clear();
-            let n = reader.read_line(&mut line).await?;
-            if n == 0 {
-                break;
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let msg: JsonRpcMessage = match serde_json::from_str(trimmed) {
-                Ok(m) => m,
-                Err(e) => {
-                    write_response(
-                        &mut stdout,
-                        Response::error(Value::Null, -32700, &format!("parse error: {e}")),
-                    )
-                    .await?;
-                    continue;
-                }
-            };
-            if msg.id.is_none() {
-                // notification — no response
-                continue;
-            }
-            let id = msg.id.clone().unwrap_or(Value::Null);
-            let resp = self.dispatch(msg).await;
-            let final_resp = match resp {
-                Ok(v) => Response::ok(id, v),
-                Err(e) => Response::error(id, -32603, &e.to_string()),
-            };
-            write_response(&mut stdout, final_resp).await?;
-        }
-        Ok(())
-    }
-
-    async fn dispatch(&self, msg: JsonRpcMessage) -> anyhow::Result<Value> {
-        match msg.method.as_deref() {
-            Some("initialize") => Ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                "instructions": SERVER_INSTRUCTIONS,
-            })),
-            Some("ping") => Ok(json!({})),
-            Some("tools/list") => Ok(json!({ "tools": tool_definitions() })),
-            Some("tools/call") => {
-                self.handle_tool_call(msg.params.unwrap_or(Value::Null))
-                    .await
-            }
-            Some(m) => Err(anyhow::anyhow!("method not found: {m}")),
-            None => Err(anyhow::anyhow!("missing method")),
-        }
-    }
-
-    async fn handle_tool_call(&self, params: Value) -> anyhow::Result<Value> {
-        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-
-        // Telemetry tool — đọc/ghi trực tiếp từ usage stats, không qua GraphApi.
+    /// Dispatch một tool call đã verify tên. Trả [`ToolOutput::Text`] cho thành
+    /// công, [`ToolOutput::Error`] cho lỗi tool (client thấy `is_error`),
+    /// [`Err`] cho lỗi protocol (unknown tool đã bị chặn trước ở `call_tool`).
+    async fn run_tool(&self, name: &str, args: Value) -> Result<ToolOutput, McpError> {
+        // ── Telemetry — không cần session ──
         if name == "codegraph_query_usage_report" {
             let reset = args.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -110,63 +74,191 @@ impl McpServer {
             if reset {
                 u.reset();
             }
-            let text = serde_json::to_string_pretty(&report)?;
-            return Ok(json!({
-                "content": [{ "type": "text", "text": text }],
-                "isError": false,
-            }));
+            drop(u);
+            let text = serde_json::to_string_pretty(&report).map_err(|e| {
+                McpError::internal_error(
+                    "usage report failed",
+                    Some(json!({"reason": e.to_string()})),
+                )
+            })?;
+            return Ok(ToolOutput::Text {
+                text,
+                source_bytes: 0,
+            });
         }
 
-        let api = codegraph_api::GraphApi::new_with_index(self.shared_index.clone());
-        // Admin tools (init/index) cần workspace root; sandbox cần root (config +
-        // mock dirs) + snapshot index — dispatch riêng, không qua GraphApi.
-        let dispatch = if name == "codegraph_init" || name == "codegraph_index" {
-            tools::dispatch_admin(&self.root, name, args.clone()).await
-        } else if name == "codegraph_sandbox" {
-            tools::dispatch_sandbox(&self.root, self.shared_index.clone(), args.clone()).await
-        } else if name == "codegraph_diff" {
-            tools::dispatch_diff(&self.root, self.shared_index.clone(), args.clone()).await
-        } else if name == "codegraph_diff_simulate" {
-            tools::dispatch_diff_simulate(&self.root, self.shared_index.clone(), args.clone()).await
-        } else if name == "codegraph_origin_simulate" {
-            tools::dispatch_origin_simulate(&self.root, self.shared_index.clone(), args.clone())
-                .await
-        } else {
-            tools::dispatch_with_api(&api, name, args).await
-        };
-        let text = match dispatch {
-            Ok(t) => t,
-            Err(e) => {
-                self.usage
-                    .lock()
-                    .unwrap()
-                    .record(name, e.to_string().len() as u64, 0, true);
-                return Err(anyhow::Error::from(e));
+        // ── Admin / session lifecycle ──
+        match name {
+            "codegraph_init" => {
+                let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+                    return Ok(ToolOutput::Error(
+                        "codegraph_init requires `path` — the workspace root to bind this session to, \
+                         e.g. {\"path\": \"/abs/path/to/project\"}. \
+                         To index immediately pass {\"path\": ..., \"index\": true}, \
+                         otherwise call codegraph_index {} afterwards."
+                            .into(),
+                    ));
+                };
+                // Default = KHÔNG index — bind nhanh, không block user. Agent muốn
+                // data thì chủ động gọi codegraph_index {} (hoặc truyền index=true).
+                let do_index = args.get("index").and_then(|v| v.as_bool()).unwrap_or(false);
+                return match self
+                    .session
+                    .init(camino::Utf8PathBuf::from(path), do_index)
+                    .await
+                {
+                    Ok(out) => {
+                        let mut v =
+                            json!({ "root": out.root.as_str(), "initialized": out.dir.as_str() });
+                        if let Some(stats) = &out.indexed {
+                            v["indexed"] = session::stats_json(stats);
+                        }
+                        Ok(ToolOutput::json(&v))
+                    }
+                    Err(e) => Ok(ToolOutput::Error(e.to_string())),
+                };
             }
+            "codegraph_deinit" => {
+                return match self.session.deinit().await {
+                    Ok(prev) => {
+                        let v = json!({
+                            "deinitialized": true,
+                            "root": prev.map(|p| Value::String(p.into_string())).unwrap_or(Value::Null),
+                        });
+                        Ok(ToolOutput::json(&v))
+                    }
+                    Err(e) => Ok(ToolOutput::Error(e.to_string())),
+                };
+            }
+            "codegraph_index" => {
+                return match self.session.reindex().await {
+                    Ok(stats) => {
+                        let v = session::stats_json(&stats);
+                        Ok(ToolOutput::json(&v))
+                    }
+                    Err(e) => Ok(ToolOutput::Error(e.to_string())),
+                };
+            }
+            _ => {}
+        }
+
+        // ── Query tools — cần session ready ──
+        let sgi = match self.session.ensure_ready().await {
+            Ok(sgi) => sgi,
+            Err(e) => return Ok(ToolOutput::Error(e.to_string())),
         };
-        // Ước lượng source bytes mà answer "thay thế" (file refs trong answer).
-        let source_bytes = match serde_json::from_str::<Value>(&text) {
-            Ok(v) => usage::estimate_source_bytes(&api, &v).await,
-            Err(_) => 0,
+        let api = GraphApi::new_with_index(sgi.clone());
+        // ensure_ready chỉ Ok khi session có root — đây chỉ là phòng hờ.
+        let Some(root) = self.session.root().await else {
+            return Ok(ToolOutput::Error("session root unavailable".into()));
         };
-        self.usage
-            .lock()
-            .unwrap()
-            .record(name, text.len() as u64, source_bytes, false);
-        Ok(json!({
-            "content": [{ "type": "text", "text": text }],
-            "isError": false,
-        }))
+
+        let dispatch = match name {
+            "codegraph_sandbox" => tools::dispatch_sandbox(&root, sgi.clone(), args.clone()).await,
+            "codegraph_diff" => tools::dispatch_diff(&root, sgi.clone(), args.clone()).await,
+            "codegraph_diff_simulate" => {
+                tools::dispatch_diff_simulate(&root, sgi.clone(), args.clone()).await
+            }
+            "codegraph_origin_simulate" => {
+                tools::dispatch_origin_simulate(&root, sgi.clone(), args.clone()).await
+            }
+            _ => tools::dispatch_with_api(&api, name, args).await,
+        };
+
+        match dispatch {
+            Ok(text) => {
+                // Ước lượng source bytes mà answer "thay thế" (file refs trong answer).
+                let source_bytes = match serde_json::from_str::<Value>(&text) {
+                    Ok(v) => usage::estimate_source_bytes(&api, &v).await,
+                    Err(_) => 0,
+                };
+                Ok(ToolOutput::Text { text, source_bytes })
+            }
+            Err(e) => Ok(ToolOutput::Error(e.to_string())),
+        }
     }
 }
 
-async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
-    w: &mut W,
-    r: Response,
-) -> anyhow::Result<()> {
-    let s = serde_json::to_string(&r)?;
-    w.write_all(s.as_bytes()).await?;
-    w.write_all(b"\n").await?;
-    w.flush().await?;
-    Ok(())
+impl Default for CodegraphServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Kết quả `run_tool` — phân biệt thành công / lỗi tool (client-visible) /
+/// lỗi protocol (không dùng ở đây, `call_tool` trả Err trực tiếp).
+enum ToolOutput {
+    Text { text: String, source_bytes: u64 },
+    Error(String),
+}
+
+impl ToolOutput {
+    fn json(v: &Value) -> Self {
+        match serde_json::to_string_pretty(v) {
+            Ok(text) => ToolOutput::Text {
+                text,
+                source_bytes: 0,
+            },
+            Err(e) => ToolOutput::Error(format!("serialize response: {e}")),
+        }
+    }
+}
+
+impl ServerHandler for CodegraphServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(SERVER_NAME, SERVER_VERSION))
+            .with_instructions(SERVER_INSTRUCTIONS.to_string())
+    }
+
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
+        async move {
+            Ok(ListToolsResult {
+                tools: tools::rmcp_tools(),
+                ..Default::default()
+            })
+        }
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<CallToolResponse, McpError>> + MaybeSendFuture + '_ {
+        async move {
+            let name = request.name.as_ref();
+            let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+
+            // Tên tool không tồn tại → protocol error (client thấy lỗi JSON-RPC
+            // method-not-found, không thấy một "tool ảo"). Chặn sớm trước khi
+            // chạy vào run_tool để không cho nhầm tool lạ chạy nhánh `_`.
+            if !tools::is_known_tool(name) {
+                return Err(McpError::method_not_found::<
+                    rmcp::model::CallToolRequestMethod,
+                >());
+            }
+
+            match self.run_tool(name, args).await {
+                Ok(ToolOutput::Text { text, source_bytes }) => {
+                    self.usage
+                        .lock()
+                        .unwrap()
+                        .record(name, text.len() as u64, source_bytes, false);
+                    Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
+                }
+                Ok(ToolOutput::Error(msg)) => {
+                    self.usage
+                        .lock()
+                        .unwrap()
+                        .record(name, msg.len() as u64, 0, true);
+                    Ok(CallToolResult::error(vec![ContentBlock::text(msg)]).into())
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
 }
