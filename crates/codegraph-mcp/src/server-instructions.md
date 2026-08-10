@@ -4,6 +4,26 @@ Codegraph is a SQLite semantic graph of every symbol (function/method/class/…)
 and its call chain in the workspace. Reads are sub-millisecond. Consult it
 BEFORE writing or editing code, not during.
 
+## Session & workspace selection
+
+Codegraph MCP manages **one session per process**. Bind it to a workspace root
+before querying:
+
+- `codegraph_init {"path": "/abs/path/to/project"}` — bind the session to
+  that root and create `.codegraph/` (idempotent) if missing. Binding is fast
+  and **non-blocking: it does NOT index by default** (`index` defaults to
+  `false`). After binding, call `codegraph_index {}` to build/refresh the
+  index (or pass `"index": true` to `codegraph_init` to index immediately).
+  Re-running with a different `path` re-points the session.
+- `codegraph_deinit {}` — release the session (the `.codegraph/` and index files
+  stay on disk). An unbound session **refuses every query tool** until
+  `codegraph_init` binds it again.
+
+Start with `codegraph_init {"path": ...}` for the project you are working on,
+then `codegraph_index {}` if the index is empty/stale (check
+`codegraph_status`). The `--path` given at server startup, if any, is already
+bound.
+
 ## Answer directly — don't delegate exploration
 
 For "how does X work", architecture, trace, or where-is-X questions, answer
@@ -33,8 +53,9 @@ file-reading sub-task repeats work codegraph already did.
 | "Show me this symbol by id / exact name." | `codegraph_symbol` |
 | "What's in directory X?" | `codegraph_files` |
 | "Is the index ready / what's its size?" | `codegraph_status` |
-| "Set up / (re)build the index" | `codegraph_init` (idempotent; index=true by default) |
-| "Re-index the workspace" | `codegraph_index` |
+| "Bind the session to a project (creates .codegraph/, non-blocking — does NOT index by default)" | `codegraph_init` (`path` required; `index` defaults to `false`) |
+| "Build/refresh the index for the bound session" | `codegraph_index` |
+| "Release the current session" | `codegraph_deinit` |
 | "Run an entry function in the behavior sandbox" | `codegraph_sandbox` (per-function Rhai mocks) |
 | "Diff này (MR/patch/git diff) ảnh hưởng gì tới graph?" | `codegraph_diff` (read-only draft) |
 | "MR này đổi hành vi flow ra sao (trước vs sau)?" | `codegraph_diff_simulate` (sandbox before/after) |

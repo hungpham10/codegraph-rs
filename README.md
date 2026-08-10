@@ -18,8 +18,8 @@ Agents that consult the semantic graph instead of grepping the filesystem make *
 - **Fast.** Full re-index a 139-file project in ~190 ms (release, parallel rayon).
 - **Local.** Index lives in `.codegraph/db.sqlite` next to your code. Nothing leaves the machine.
 - **Full re-index always.** No incremental sync — watcher debounces and re-indexes completely (simpler, no stale state).
-- **Multi-agent.** A single `codegraph install` configures Claude Code, Cursor, Codex, opencode, Hermes and Antigravity CLI in one go.
-- **11 MCP tools** including `codegraph_flow` (call chain), `codegraph_search_flow` (pattern search), `codegraph_references` (library call consumers).
+- **Multi-agent.** One binary serves any MCP client (Claude Code, Cursor, Codex, opencode, Hermes, Antigravity) over stdio — the agent binds the workspace with `codegraph_init` and drives everything through tools.
+- **30 MCP tools** including `codegraph_flow` (call chain), `codegraph_search_flow` (pattern search), `codegraph_references` (library call consumers), `codegraph_diff` (MR impact draft), and a behavior sandbox (`codegraph_sandbox`).
 
 ## Install
 
@@ -90,34 +90,32 @@ cargo install --git https://github.com/Cleboost/codegraph-rs codegraph
 ## Quick start
 
 ```sh
-# 1. Init, index, and configure your agents in one step
+# 1. Init and index your project
 cd ~/code/my-project
 codegraph init
 
-# 2. Use it
-codegraph query UserService
-codegraph context "auth middleware"
+# 2. Serve it to your agent (Claude Code, Cursor, ...) over MCP
+codegraph serve --mcp
 ```
 
-Your agent now has tools like `codegraph_search`, `codegraph_symbol`, `codegraph_callers`, `codegraph_flow`, `codegraph_search_flow`, `codegraph_impact`, `codegraph_context` available over MCP. The file watcher debounces changes and triggers full re-indexes while you edit.
+The agent then binds the workspace with `codegraph_init {"path": ...}` and gets
+tools like `codegraph_search`, `codegraph_symbol`, `codegraph_callers`,
+`codegraph_flow`, `codegraph_search_flow`, `codegraph_impact`,
+`codegraph_context` — all querying is done **over MCP**, not via CLI commands.
+The file watcher debounces changes and triggers full re-indexes while you edit.
 
 ## CLI reference
 
+The CLI is deliberately minimal — it only manages the workspace lifecycle and
+runs the MCP server. All reading/interacting goes through MCP tools.
+
 | Command | What it does |
 |---|---|
-| `codegraph init [--no-index]` | Create `.codegraph/`, full re-index, and configure agents; `--no-index` skips indexing |
-| `codegraph uninit` | Remove `.codegraph/` |
-| `codegraph index` | **Full re-index** of the workspace (reset → parse all → ingest) |
-| `codegraph status` | Show counts (symbols, chains, edges, files), no schema version |
-| `codegraph query <q>` | Substring search across symbol names (case-insensitive) |
-| `codegraph files [path]` | List indexed files under a prefix |
-| `codegraph context <target>` | Build markdown context (symbol + callers + callees + optional source) |
+| `codegraph init [--no-index]` | Create `.codegraph/` and full re-index (skip with `--no-index`) |
+| `codegraph deinit` | Remove `.codegraph/` |
 | `codegraph serve --mcp` | Run as MCP server over stdio (used by agents) |
-| `codegraph visualize` | Local web UI (2D/3D graph + table) at `http://127.0.0.1:7421` |
 
 Global flag `--path <dir>` overrides the workspace root.
-
-`visualize` is enabled by default. For a slimmer binary without the embedded web UI: `cargo build -p codegraph --no-default-features`.
 
 ## Supported languages
 
@@ -133,7 +131,10 @@ Each language emits:
 
 ## MCP tools
 
-Agents see **11 tools** through the MCP server:
+Agents see **30 tools** through the MCP server (search, callers/callees/impact/
+flow, class queries, annotations, dependencies, diff draft/simulation, behavior
+sandbox, usage report, plus the session tools `codegraph_init` /
+`codegraph_deinit` / `codegraph_index`). Key ones:
 
 | Tool | Use case |
 |---|---|
@@ -148,6 +149,10 @@ Agents see **11 tools** through the MCP server:
 | `codegraph_references` | Functions that call a library call matching `query` (includes unresolved external calls) |
 | `codegraph_files` | List indexed files under a path prefix |
 | `codegraph_status` | Index health: symbol/chain/edge/file counts |
+| `codegraph_init` | Bind the session to a workspace root (non-blocking, does **not** index by default) |
+| `codegraph_index` | Full re-index of the bound workspace |
+| `codegraph_sandbox` | Compile a function group to machine code and run it against Rhai mocks |
+| `codegraph_diff` | Draft report of what an MR/patch would change in the graph |
 
 Read the [server instructions](crates/codegraph-mcp/src/server-instructions.md) that ship with the binary — they tell your agent when to reach for which tool.
 
@@ -182,9 +187,9 @@ crates/
   codegraph-graph/      GraphIndex (semgraph): registry + 2 engines (chain Search<u64> + name Search<u8>) + sqlite storage
   codegraph-context/    Markdown/JSON context formatter (symbol + callers + callees + source)
   codegraph-api/        GraphApi wrapper on SharedGraphIndex (async query surface)
-  codegraph-mcp/        Hand-rolled JSON-RPC 2.0 server (stdio) + 11 tool dispatch
+  codegraph-mcp/        MCP server on the rmcp SDK (stdio) + 30-tool dispatch, session-driven
   codegraph-installer/  Agent config targets (Claude/Cursor/Codex/opencode/Hermes)
-  codegraph/            CLI (clap) + watcher (notify + debounced full re-index)
+  codegraph/            CLI lifecycle (init/deinit/serve --mcp) + watcher (notify + debounced full re-index)
 ```
 
 Pipeline:
@@ -203,7 +208,7 @@ files → ignore::WalkBuilder → rayon parse pool (tree-sitter, 14 langs)
            ↓
       GraphApi / SharedGraphIndex.ensure_fresh() (version probe)
            ↓
-      MCP server  /  CLI commands  /  Web UI
+      MCP server  /  CLI lifecycle
 ```
 
 ## Configuration
@@ -264,7 +269,7 @@ Override in `.codegraph/config.toml`:
 headers = "auto"   # "auto" (default), "c", or "cpp"
 ```
 
-After changing this setting, run `codegraph index` to re-index headers.
+After changing this setting, run `codegraph init` (or call `codegraph_index` over MCP) to re-index headers.
 
 ## Why Rust?
 

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Luồng HTTP MCP riêng (session theo mcp-session-id) — chưa implement, xem src/http.rs.
+http = []
+
 [dependencies]
 codegraph-api    = { path = "../codegraph-api" }
 codegraph-core    = { path = "../codegraph-core" }
@@ -18,6 +22,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
+rmcp = { version = "3.1.2", features = ["transport-io"] }
 
 [dev-dependencies]
 tempfile = "3"
