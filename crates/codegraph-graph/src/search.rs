@@ -22,11 +22,13 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::sync::RwLock;
 
 use crate::radix::{
-    self, EMPTY, Element, OnMatchCallback, OnNodeAccessCallback, Radix, SearchMatcher,
+    self, DfsCheckpoint, EMPTY, Element, OnMatchCallback, OnNodeAccessCallback, Radix,
+    SearchMatcher,
 };
 use crate::storage::{InMemoryStorage, Storage};
 
@@ -34,6 +36,37 @@ use crate::storage::{InMemoryStorage, Storage};
 
 /// Giới hạn cứng số kết quả trả về (khớp `codegraph-graph::HARD_LIMIT`).
 const MAX_RESULTS: usize = 5000;
+
+// ==================== Resumable search ====================
+
+/// Trạng thái resume của một lần [`Search::search_resumable`] bị ngắt bởi
+/// deadline — caller gọi lại với cùng pattern + `resume` này để tiếp tục từ
+/// đúng vị trí dừng (candidates recompute từ storage — deterministic trong một
+/// snapshot, nên chỉ cần lưu vị trí + trạng thái DFS).
+#[derive(Debug, Clone, Default)]
+pub struct SearchResume {
+    /// Candidate tiếp theo cần xử lý (index vào shortcut candidates).
+    pub cand_idx: usize,
+    /// Trạng thái DFS của candidate hiện tại (`None` = giữa các candidate —
+    /// chưa xử lý candidate nào dở).
+    pub dfs: Option<DfsCheckpoint>,
+    /// Records đã collect (dedup chéo candidates) tính tới lúc ngắt.
+    pub record_ids: Vec<usize>,
+    /// Vị trí trong phase resolve (filter `depth`) nếu bị ngắt ở đó.
+    pub resolve_idx: usize,
+}
+
+/// Kết quả của [`Search::search_resumable`].
+#[derive(Debug, Clone, Default)]
+pub struct SearchPage {
+    /// Records khớp (record idx). Khi `timed_out` — records đã collect tới lúc
+    /// ngắt (cũng nằm trong `resume.record_ids`).
+    pub record_ids: Vec<usize>,
+    /// `Some` = bị ngắt giữa chừng — caller phải gọi lại với `resume` này.
+    pub resume: Option<SearchResume>,
+    /// `true` khi `resume` có nghĩa (deadline đã hết hạn giữa chừng).
+    pub timed_out: bool,
+}
 
 // ==================== Error ====================
 
@@ -419,6 +452,48 @@ impl<T: Element> Search<T> {
         pattern: &[T],
         depth: Option<usize>,
     ) -> Result<Vec<(usize, Option<Vec<u8>>)>> {
+        let page = self.search_resumable(pattern, depth, None, None).await?;
+        if page.record_ids.is_empty() {
+            return Err(Error::NotFound);
+        }
+        // Resolve meta (API cũ giữ nguyên) — record_ids đã được filter `depth`
+        // ở search_resumable nên chỉ cần đọc meta.
+        let storage = self.storage.read().await;
+        let mut results = Vec::new();
+        for &rid in &page.record_ids {
+            if rid == EMPTY {
+                continue;
+            }
+            let meta = storage.get_meta(rid).await?;
+            results.push((rid, meta));
+            if results.len() >= MAX_RESULTS {
+                break;
+            }
+        }
+        if results.is_empty() {
+            Err(Error::NotFound)
+        } else {
+            Ok(results)
+        }
+    }
+
+    /// Như [`search`](Self::search) nhưng **resumable + deadline-aware** — dùng
+    /// khi index lớn làm query chạy lâu. Khi `deadline` hết hạn giữa chừng: trả
+    /// `SearchPage { timed_out: true, resume: Some(...) }` — caller gọi lại với
+    /// `resume` để tiếp tục từ đúng vị trí dừng (không lặp phần đã duyệt, không
+    /// mất records đã collect). Hoàn tất: `timed_out: false`, `resume: None`.
+    ///
+    /// Khác `search`: trả `record_ids` (`Vec<usize>`) không kèm meta — callers
+    /// hiện tại (name engine, chain engine) không dùng meta; `search` giữ API cũ.
+    ///
+    /// `resume: None` = search mới. `deadline: None` = chạy tới cùng.
+    pub async fn search_resumable(
+        &self,
+        pattern: &[T],
+        depth: Option<usize>,
+        resume: Option<SearchResume>,
+        deadline: Option<Instant>,
+    ) -> Result<SearchPage> {
         if pattern.is_empty() {
             return Err(Error::NotFound);
         }
@@ -426,7 +501,8 @@ impl<T: Element> Search<T> {
         let first_elem = pattern[0];
         let si = radix::shard_of(first_elem, self.sharding);
 
-        // Query candidates trực tiếp từ storage.
+        // Query candidates trực tiếp từ storage (deterministic per snapshot —
+        // resume chỉ cần cand_idx, không cần lưu candidates).
         let candidates = self
             .storage
             .read()
@@ -437,60 +513,104 @@ impl<T: Element> Search<T> {
         // depth = max hop → max key length (số element) = depth + 1.
         let max_len = depth.map(|d| d + 1);
 
-        // Mỗi candidate: `Radix::search_dfs` chạy matcher KMP trong subtree và
-        // trả record IDs (logic trie không còn nằm ở đây). Dedup chéo candidates
-        // — subtree của candidate này có thể chứa subtree của candidate khác.
+        let (mut cand_idx, mut dfs, mut record_ids, resolve_idx) = match resume {
+            Some(r) => (r.cand_idx, r.dfs, r.record_ids, r.resolve_idx),
+            None => (0, None, Vec::new(), 0),
+        };
+        // `seen` = tập record_ids đã collect (dedup chéo candidates — subtree
+        // của candidate này có thể chứa subtree của candidate khác).
+        let mut seen: HashSet<usize> = record_ids.iter().copied().collect();
         let matcher = kmp_matcher(pattern);
-        let mut seen = HashSet::new();
-        let mut record_ids = Vec::new();
-        for &node_id in &candidates {
-            if record_ids.len() >= MAX_RESULTS {
-                break;
-            }
-            for rid in self
-                .trie
-                .search_dfs(node_id, pattern, matcher.clone())
-                .await?
+
+        // ── Candidate loop ──
+        while cand_idx < candidates.len() {
+            if let Some(dl) = deadline
+                && Instant::now() >= dl
             {
-                if seen.insert(rid) {
-                    record_ids.push(rid);
+                return Ok(SearchPage {
+                    record_ids: record_ids.clone(),
+                    resume: Some(SearchResume {
+                        cand_idx,
+                        dfs,
+                        record_ids: record_ids.clone(),
+                        resolve_idx: 0,
+                    }),
+                    timed_out: true,
+                });
+            }
+
+            let node_id = candidates[cand_idx];
+            let (records, ckpt) = self
+                .trie
+                .search_dfs_resumable(node_id, pattern, matcher.clone(), dfs.take(), deadline)
+                .await?;
+            match ckpt {
+                // Timeout giữa candidate — lưu trạng thái DFS, tiếp tục lần sau.
+                Some(cp) => {
+                    dfs = Some(cp);
+                }
+                // Candidate xong — dedup records (records của candidate này) vào
+                // kết quả chung.
+                None => {
+                    for rid in records {
+                        if seen.insert(rid) {
+                            record_ids.push(rid);
+                            if record_ids.len() >= MAX_RESULTS {
+                                break;
+                            }
+                        }
+                    }
                     if record_ids.len() >= MAX_RESULTS {
                         break;
                     }
+                    cand_idx += 1;
+                    dfs = None;
                 }
             }
         }
 
-        if record_ids.is_empty() {
-            return Err(Error::NotFound);
-        }
-
-        // Resolve: filter `depth` (key length trong storage) + đọc meta.
-        let mut results = Vec::new();
-        {
+        // ── Resolve: filter `depth` (key length trong storage) — deadline-aware.
+        // Bỏ qua nếu không giới hạn depth (name engine — chiếm đa số query).
+        if let Some(m) = max_len {
+            let mut out = Vec::new();
+            let mut ridx = resolve_idx;
             let storage = self.storage.read().await;
-            for &rid in &record_ids {
+            loop {
+                if let Some(dl) = deadline
+                    && Instant::now() >= dl
+                {
+                    return Ok(SearchPage {
+                        record_ids: out.clone(),
+                        resume: Some(SearchResume {
+                            cand_idx: candidates.len(),
+                            dfs: None,
+                            record_ids: out.clone(),
+                            resolve_idx: ridx,
+                        }),
+                        timed_out: true,
+                    });
+                }
+                if ridx >= record_ids.len() {
+                    break;
+                }
+                let rid = record_ids[ridx];
+                ridx += 1;
                 if rid == EMPTY {
                     continue;
                 }
-                if let Some(m) = max_len
-                    && storage.get_key_len(rid).await?.unwrap_or(usize::MAX) > m
-                {
+                if storage.get_key_len(rid).await?.unwrap_or(usize::MAX) > m {
                     continue;
                 }
-                let meta = storage.get_meta(rid).await?;
-                results.push((rid, meta));
-                if results.len() >= MAX_RESULTS {
-                    break;
-                }
+                out.push(rid);
             }
+            record_ids = out;
         }
 
-        if results.is_empty() {
-            Err(Error::NotFound)
-        } else {
-            Ok(results)
-        }
+        Ok(SearchPage {
+            record_ids,
+            resume: None,
+            timed_out: false,
+        })
     }
 
     /// Tìm tất cả `(full_key, record)` có key bắt đầu bằng `prefix` (prefix match).

@@ -15,17 +15,17 @@ pub mod stdio;
 mod tools;
 mod usage;
 
-pub use session::{InitOutcome, Session};
+pub use session::{DetailLevel, InitOutcome, OutputStyle, Session};
 pub use stdio::serve_stdio;
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use codegraph_api::GraphApi;
+use codegraph_api::{GraphApi, SearchSessionStore};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer};
@@ -41,23 +41,42 @@ pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct CodegraphServer {
     session: Session,
     usage: Arc<Mutex<usage::UsageStats>>,
+    /// Session store cho search resumable — sống qua nhiều tool call để resume
+    /// id (trả về khi timeout) có thể retry được.
+    search_sessions: Arc<SearchSessionStore>,
 }
 
 impl CodegraphServer {
     /// Server với session trống — `codegraph_init` sẽ bind root trong phiên.
     pub fn new() -> Self {
+        Self::new_with_format(OutputStyle::default())
+    }
+
+    /// `new()` nhưng seed output format từ CLI lúc khởi động
+    /// (`codegraph serve --mcp --format=...`).
+    pub fn new_with_format(format: OutputStyle) -> Self {
         Self {
-            session: Session::new(),
+            session: Session::new_with_format(format),
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
+            search_sessions: Arc::new(SearchSessionStore::new()),
         }
     }
 
     /// Pre-seed root từ `--path` lúc khởi động (tương đương đã `codegraph_init`
     /// với root đó, không index thêm). Giữ CLI/watcher flow không vỡ.
     pub async fn with_root(root: camino::Utf8PathBuf) -> anyhow::Result<Self> {
+        Self::with_root_and_format(root, OutputStyle::default()).await
+    }
+
+    /// `with_root()` nhưng seed output format từ CLI lúc khởi động.
+    pub async fn with_root_and_format(
+        root: camino::Utf8PathBuf,
+        format: OutputStyle,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            session: Session::with_root(root).await?,
+            session: Session::with_root_and_format(root, format).await?,
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
+            search_sessions: Arc::new(SearchSessionStore::new()),
         })
     }
 
@@ -75,7 +94,14 @@ impl CodegraphServer {
                 u.reset();
             }
             drop(u);
-            let text = serde_json::to_string_pretty(&report).map_err(|e| {
+            let mut v = serde_json::to_value(&report).map_err(|e| {
+                McpError::internal_error(
+                    "usage report failed",
+                    Some(json!({"reason": e.to_string()})),
+                )
+            })?;
+            tools::omit_defaults(&mut v);
+            let text = serde_json::to_string_pretty(&v).map_err(|e| {
                 McpError::internal_error(
                     "usage report failed",
                     Some(json!({"reason": e.to_string()})),
@@ -102,14 +128,29 @@ impl CodegraphServer {
                 // Default = KHÔNG index — bind nhanh, không block user. Agent muốn
                 // data thì chủ động gọi codegraph_index {} (hoặc truyền index=true).
                 let do_index = args.get("index").and_then(|v| v.as_bool()).unwrap_or(false);
+                // Detail level mặc định cho symbol trong list tools (minimal/medium/verbose).
+                let detail = args
+                    .get("detail")
+                    .and_then(|v| v.as_str())
+                    .and_then(DetailLevel::parse)
+                    .unwrap_or_default();
+                // Output format (minimize/medium) — None giữ nguyên seed từ CLI.
+                let format = args
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .and_then(OutputStyle::parse);
                 return match self
                     .session
-                    .init(camino::Utf8PathBuf::from(path), do_index)
+                    .init(camino::Utf8PathBuf::from(path), do_index, detail, format)
                     .await
                 {
                     Ok(out) => {
-                        let mut v =
-                            json!({ "root": out.root.as_str(), "initialized": out.dir.as_str() });
+                        let mut v = json!({
+                            "root": out.root.as_str(),
+                            "initialized": out.dir.as_str(),
+                            "detail": detail.as_str(),
+                            "format": self.session.format().await.as_str(),
+                        });
                         if let Some(stats) = &out.indexed {
                             v["indexed"] = session::stats_json(stats);
                         }
@@ -147,12 +188,14 @@ impl CodegraphServer {
             Ok(sgi) => sgi,
             Err(e) => return Ok(ToolOutput::Error(e.to_string())),
         };
-        let api = GraphApi::new_with_index(sgi.clone());
+        let api = GraphApi::new_with_sessions(sgi.clone(), self.search_sessions.clone());
         // ensure_ready chỉ Ok khi session có root — đây chỉ là phòng hờ.
         let Some(root) = self.session.root().await else {
             return Ok(ToolOutput::Error("session root unavailable".into()));
         };
 
+        let detail = self.session.detail().await;
+        let format = self.session.format().await;
         let dispatch = match name {
             "codegraph_sandbox" => tools::dispatch_sandbox(&root, sgi.clone(), args.clone()).await,
             "codegraph_diff" => tools::dispatch_diff(&root, sgi.clone(), args.clone()).await,
@@ -162,14 +205,14 @@ impl CodegraphServer {
             "codegraph_origin_simulate" => {
                 tools::dispatch_origin_simulate(&root, sgi.clone(), args.clone()).await
             }
-            _ => tools::dispatch_with_api(&api, name, args).await,
+            _ => tools::dispatch_with_api(&api, &root, detail, format, name, args).await,
         };
 
         match dispatch {
             Ok(text) => {
                 // Ước lượng source bytes mà answer "thay thế" (file refs trong answer).
                 let source_bytes = match serde_json::from_str::<Value>(&text) {
-                    Ok(v) => usage::estimate_source_bytes(&api, &v).await,
+                    Ok(v) => usage::estimate_source_bytes(&api, &v, root.as_str()).await,
                     Err(_) => 0,
                 };
                 Ok(ToolOutput::Text { text, source_bytes })
@@ -194,7 +237,9 @@ enum ToolOutput {
 
 impl ToolOutput {
     fn json(v: &Value) -> Self {
-        match serde_json::to_string_pretty(v) {
+        let mut v = v.clone();
+        tools::omit_defaults(&mut v);
+        match serde_json::to_string_pretty(&v) {
             Ok(text) => ToolOutput::Text {
                 text,
                 source_bytes: 0,
@@ -217,10 +262,12 @@ impl ServerHandler for CodegraphServer {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
         async move {
-            Ok(ListToolsResult {
-                tools: tools::rmcp_tools(),
-                ..Default::default()
-            })
+            // Protocol 2026-07-28 (SEP-2549) bắt buộc `ttlMs`/`cacheScope` trên
+            // result; client strict (vd ZCode) validate theo schema đó → phải set.
+            // ttl_ms = 0: kết quả coi như stale ngay, không cache phía client.
+            Ok(ListToolsResult::with_all_items(tools::rmcp_tools())
+                .with_ttl_ms(0)
+                .with_cache_scope(CacheScope::Public))
         }
     }
 

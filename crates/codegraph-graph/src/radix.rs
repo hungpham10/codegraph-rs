@@ -118,6 +118,44 @@ pub type SearchMatcher<T> = Arc<dyn Fn(&[T], &[T], usize) -> OnMatchCallback + S
 /// shortcuts/cache dựa trên `old_prefix` + `breakpoint` rồi để radix commit.
 pub type OnSplitCallback<T> = Arc<dyn Fn(usize, usize, &[T], usize) -> Result<()> + Send + Sync>;
 
+// ==================== Resumable DFS ====================
+
+/// Frame trên work-stack của `Radix::search_dfs_resumable`.
+///
+/// Chỉ lưu 4 số — `prefix`/`continuations`/`children` được recompute từ
+/// `node_id` khi xử lý (matcher deterministic theo `(prefix, pattern,
+/// pattern_pos)`), nên checkpoint nhỏ và resume chính xác.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DfsFrame {
+    pub node_id: usize,
+    pub pattern_pos: usize,
+    pub cont_idx: usize,
+    pub child_idx: usize,
+}
+
+/// Trạng thái duyệt hiện tại của `Radix::search_dfs_resumable` khi bị deadline
+/// ngắt giữa chừng.
+#[derive(Debug, Clone)]
+pub enum DfsState {
+    /// Đang dò xuống children (chưa tìm thấy match hoàn chỉnh).
+    Search(Vec<DfsFrame>),
+    /// Đang collect toàn bộ records trong subtree của `root` (sau khi matcher
+    /// báo `found`). Stack = `(node_id, child_idx)` — duyệt pre-order.
+    Collect {
+        root: usize,
+        stack: Vec<(usize, usize)>,
+    },
+}
+
+/// Checkpoint của một lần duyệt bị ngắt — resume từ đây.
+#[derive(Debug, Clone, Default)]
+pub struct DfsCheckpoint {
+    /// `None` = đã duyệt xong (caller advance sang candidate khác).
+    pub state: Option<DfsState>,
+    /// Records đã collect được tính tới lúc ngắt.
+    pub records: Vec<usize>,
+}
+
 /// Callback khi chạm tới một node cụ thể, chứa thông tin đầy đủ về node
 /// đó dưới dạng metadata, có cấu trúc dạng node, metadata và trả về id của
 /// node, lưu ý vì đây là callback access nên nó có thể bị trùng hoặc gọi lại
@@ -612,127 +650,214 @@ impl<T: Element> Radix<T> {
     /// Trả về record IDs của match đầu tiên theo DFS trong mỗi subtree (khớp
     /// hành vi `search_index::search_like`). Không kèm meta/key length — đó là
     /// concern của caller (`Search` lưu chúng trong Storage).
+    ///
+    /// Wrapper không deadline cho tests; production path (`Search`) dùng
+    /// [`Self::search_dfs_resumable`] để cancel giữa chừng.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn search_dfs(
         &self,
         begin: usize,
         pattern: &[T],
         matcher: SearchMatcher<T>,
     ) -> Result<Vec<usize>> {
-        let mut records = Vec::new();
-
-        if pattern.is_empty() {
-            return Err(Error::NotFound);
-        }
-
-        let node_id = if begin == EMPTY {
-            self.storage
-                .read()
-                .await
-                .get_root(shard_of(pattern[0], self.sharding))
-                .await?
-        } else {
-            begin
-        };
-
-        if node_id == EMPTY {
-            return Ok(Vec::new());
-        }
-
-        self.search_dfs_iter(node_id, pattern, matcher, 0, &mut records)
+        let (records, _) = self
+            .search_dfs_resumable(begin, pattern, matcher, None, None)
             .await?;
         Ok(records)
     }
 
-    /// DFS dùng `matcher`: đọc prefix của `node_id`, hỏi matcher, rồi quyết
-    /// định collect subtree / đệ quy xuống children theo `continuations`.
+    /// Như [`search_dfs`](Self::search_dfs) nhưng **resumable + deadline-aware**:
+    /// duyệt bằng explicit work-stack (không async recursion) nên ngắt được giữa
+    /// chừng khi `deadline` hết hạn. Khi ngắt: trả `(records, Some(checkpoint))` —
+    /// caller gọi lại với `resume = Some(checkpoint)` để tiếp tục chính xác từ vị
+    /// trí dừng; hoàn tất không timeout: `None` ở vị trí checkpoint.
     ///
-    /// `pattern_pos` tại node entry luôn là vị trí pattern bắt đầu dò trên
-    /// prefix của node này (data_pos = 0).
-    #[inline]
-    async fn search_dfs_iter(
+    /// Semantics giữ nguyên `search_dfs`: node đầu tiên (theo DFS) có pattern
+    /// khớp hoàn chỉnh trong prefix → collect toàn bộ records của subtree đó rồi
+    /// dừng (short-circuit); prefix hết mà pattern chưa khớp hết → dò xuống
+    /// children theo `continuations` matcher trả về.
+    pub async fn search_dfs_resumable(
         &self,
-        node_id: usize,
+        begin: usize,
         pattern: &[T],
         matcher: SearchMatcher<T>,
-        pattern_pos: usize,
-        out: &mut Vec<usize>,
-    ) -> Result<()> {
-        let (prefix_bytes, _record) = { self.storage.read().await.get_node(node_id).await? };
-        let prefix = Self::to_vec(&prefix_bytes);
-
-        let result = matcher(&prefix, pattern, pattern_pos);
-
-        // Match hoàn chỉnh → collect toàn bộ records trong subtree.
-        if result.found {
-            self.collect_subtree_records(node_id, out).await?;
-            return Ok(());
+        resume: Option<DfsCheckpoint>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(Vec<usize>, Option<DfsCheckpoint>)> {
+        if pattern.is_empty() {
+            return Err(Error::NotFound);
         }
 
-        // Với mỗi vị trí pattern mà matcher cho phép tiếp tục, đi xuống
-        // child có element đầu khớp pattern[pp]. Short-circuit ở match đầu
-        // tiên trong subtree (khớp dfs_search cũ của search_index).
-        let children = { self.storage.read().await.get_children(node_id).await? };
-        for pp in result.continuations {
-            if pp == 0 || pp >= pattern.len() {
-                continue;
+        // Trạng thái: từ checkpoint (resume) hoặc khởi tạo từ `begin`.
+        let (mut state, mut records) = if let Some(cp) = resume {
+            (cp.state, cp.records)
+        } else {
+            let node_id = if begin == EMPTY {
+                self.storage
+                    .read()
+                    .await
+                    .get_root(shard_of(pattern[0], self.sharding))
+                    .await?
+            } else {
+                begin
+            };
+            if node_id == EMPTY {
+                return Ok((Vec::new(), None));
+            }
+            (
+                Some(DfsState::Search(vec![DfsFrame {
+                    node_id,
+                    pattern_pos: 0,
+                    cont_idx: 0,
+                    child_idx: 0,
+                }])),
+                Vec::new(),
+            )
+        };
+
+        // Mỗi vòng lặp xử lý đúng 1 bước duyệt; giữa các bước check deadline.
+        loop {
+            let cur = match state.take() {
+                Some(s) => s,
+                None => break, // duyệt xong (Search không match / Collect xong).
+            };
+
+            if let Some(dl) = deadline
+                && std::time::Instant::now() >= dl
+            {
+                return Ok((
+                    Vec::new(),
+                    Some(DfsCheckpoint {
+                        state: Some(cur),
+                        records,
+                    }),
+                ));
             }
 
-            let next_elem = pattern[pp];
-            for &child in &children {
-                let (cp_bytes, _) = { self.storage.read().await.get_node(child).await? };
-                let cp = Self::to_vec(&cp_bytes);
+            state = match cur {
+                DfsState::Search(mut stack) => {
+                    // Bước tới: pop frame, đọc prefix, hỏi matcher. Found → chuyển
+                    // sang Collect; ngược lại tìm child khớp element tiếp theo.
+                    let mut next: Option<DfsState> = None;
+                    while next.is_none() {
+                        let Some(mut frame) = stack.pop() else {
+                            break; // stack rỗng — không có match trong subtree này.
+                        };
 
-                if !cp.is_empty() && cp[0] == next_elem {
-                    // Prune nhánh: bloom của child không chứa `pattern[pp..]`
-                    // (substring) → subtree chắc chắn không có match tiếp tục,
-                    // bỏ nhánh. Bloom có 0 false negative nên không bao giờ bỏ
-                    // nhánh có match thật. Chỉ prune khi substring đủ ngắn và
-                    // child có bloom (không có → fallback full traversal).
-                    #[cfg(feature = "bloom-search")]
-                    {
-                        let remaining_len = pattern.len() - pp;
-                        if remaining_len <= bloom_cfg::MATCH_CAP {
-                            let bloom_bytes =
-                                { self.storage.read().await.get_node_bloom(child).await? };
-                            if let Some(bloom_bytes) = bloom_bytes
-                                && let Some(bf) = BloomFilter::deserialize(&bloom_bytes)
-                                && !bf.contains(&Self::from_vec(&pattern[pp..]))
-                            {
+                        let (prefix_bytes, _record) =
+                            { self.storage.read().await.get_node(frame.node_id).await? };
+                        let prefix = Self::to_vec(&prefix_bytes);
+                        let result = matcher(&prefix, pattern, frame.pattern_pos);
+
+                        // Match hoàn chỉnh → collect toàn bộ subtree rồi dừng.
+                        if result.found {
+                            next = Some(DfsState::Collect {
+                                root: frame.node_id,
+                                stack: vec![(frame.node_id, 0)],
+                            });
+                            break;
+                        }
+
+                        let children =
+                            { self.storage.read().await.get_children(frame.node_id).await? };
+                        let mut descended = false;
+                        while frame.cont_idx < result.continuations.len() {
+                            let pp = result.continuations[frame.cont_idx];
+                            if pp == 0 || pp >= pattern.len() {
+                                frame.cont_idx += 1;
+                                frame.child_idx = 0;
                                 continue;
                             }
-                        }
-                    }
 
-                    Box::pin(self.search_dfs_iter(child, pattern, matcher.clone(), pp, out))
-                        .await?;
-                    if !out.is_empty() {
-                        return Ok(());
+                            let next_elem = pattern[pp];
+                            while frame.child_idx < children.len() {
+                                let child = children[frame.child_idx];
+                                frame.child_idx += 1;
+                                let (cp_bytes, _) =
+                                    { self.storage.read().await.get_node(child).await? };
+                                let cp = Self::to_vec(&cp_bytes);
+                                if cp.is_empty() || cp[0] != next_elem {
+                                    continue;
+                                }
+
+                                // Prune nhánh: bloom của child không chứa
+                                // `pattern[pp..]` (substring) → subtree chắc chắn
+                                // không có match tiếp tục, bỏ nhánh. Bloom có 0
+                                // false negative nên không bao giờ bỏ nhánh có
+                                // match thật. Chỉ prune khi substring đủ ngắn và
+                                // child có bloom (không có → fallback traversal).
+                                #[cfg(feature = "bloom-search")]
+                                {
+                                    let remaining_len = pattern.len() - pp;
+                                    if remaining_len <= bloom_cfg::MATCH_CAP {
+                                        let bloom_bytes = {
+                                            self.storage
+                                                .read()
+                                                .await
+                                                .get_node_bloom(child)
+                                                .await?
+                                        };
+                                        if let Some(bloom_bytes) = bloom_bytes
+                                            && let Some(bf) =
+                                                BloomFilter::deserialize(&bloom_bytes)
+                                            && !bf.contains(&Self::from_vec(&pattern[pp..]))
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                // Đi xuống child — đẩy frame hiện tại lại (với vị
+                                // trí đã tiến) + frame con mới.
+                                stack.push(frame);
+                                stack.push(DfsFrame {
+                                    node_id: child,
+                                    pattern_pos: pp,
+                                    cont_idx: 0,
+                                    child_idx: 0,
+                                });
+                                descended = true;
+                                break;
+                            }
+                            if descended {
+                                break;
+                            }
+                            frame.cont_idx += 1;
+                            frame.child_idx = 0;
+                        }
+                        if descended {
+                            next = Some(DfsState::Search(stack));
+                            break;
+                        }
+                        // Frame này đã dò hết continuations — pop frame tiếp theo.
+                    }
+                    // `None` = stack rỗng không có match → candidate xong.
+                    next
+                }
+                DfsState::Collect { root, mut stack } => {
+                    // Collect subtree theo pre-order (record của node trước, sau
+                    // đó mới children — giống bản đệ quy cũ).
+                    if let Some((node_id, child_idx)) = stack.pop() {
+                        let (_prefix_bytes, record) =
+                            { self.storage.read().await.get_node(node_id).await? };
+                        if record != EMPTY {
+                            records.push(record);
+                        }
+                        let children =
+                            { self.storage.read().await.get_children(node_id).await? };
+                        if child_idx < children.len() {
+                            stack.push((node_id, child_idx + 1));
+                            stack.push((children[child_idx], 0));
+                        }
+                        Some(DfsState::Collect { root, stack })
+                    } else {
+                        None // Collect xong — candidate đã có records, dừng.
                     }
                 }
-            }
+            };
         }
 
-        Ok(())
-    }
-
-    /// Collect toàn bộ record IDs trong subtree của `node_id` (DFS).
-    #[inline]
-    async fn collect_subtree_records(
-        &self,
-        node_id: usize,
-        records: &mut Vec<usize>,
-    ) -> Result<()> {
-        let (_prefix_bytes, record) = { self.storage.read().await.get_node(node_id).await? };
-        if record != EMPTY {
-            records.push(record);
-        }
-
-        let children = { self.storage.read().await.get_children(node_id).await? };
-        for &child in &children {
-            Box::pin(self.collect_subtree_records(child, records)).await?;
-        }
-
-        Ok(())
+        Ok((records, None))
     }
 
     /// Chẻ `parent` tại `breakpoint`:
