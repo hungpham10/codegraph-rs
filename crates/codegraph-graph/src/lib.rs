@@ -218,6 +218,14 @@ pub struct PagedSearchOutcome {
     pub cursor: Option<SearchCursor>,
 }
 
+/// Phân trang cho search symbol: `limit` chặn số symbol mỗi trang
+/// (`0` = không giới hạn), `offset` bỏ qua `offset` symbol đầu.
+#[derive(Debug, Clone, Copy)]
+pub struct Pagination {
+    pub limit: usize,
+    pub offset: usize,
+}
+
 impl GraphIndex {
     /// Index in-memory (test/dev, không persist).
     pub fn in_memory() -> Self {
@@ -1672,7 +1680,14 @@ impl GraphIndex {
         offset: usize,
     ) -> Result<(Vec<Symbol>, usize)> {
         let out = self
-            .search_symbol_paged_resumable(query, kind, mode, limit, offset, None, None)
+            .search_symbol_paged_resumable(
+                query,
+                kind,
+                mode,
+                Pagination { limit, offset },
+                None,
+                None,
+            )
             .await?;
         Ok((out.page, out.total))
     }
@@ -1696,8 +1711,7 @@ impl GraphIndex {
         query: &str,
         kind: Option<SymbolKind>,
         mode: SymbolMatch,
-        limit: usize,
-        offset: usize,
+        pagination: Pagination,
         resume: Option<SearchCursor>,
         deadline: Option<Instant>,
     ) -> Result<PagedSearchOutcome> {
@@ -1705,12 +1719,12 @@ impl GraphIndex {
 
         // Validate resume: query/mode/kind phải khớp (limit/offset không — page
         // có thể đổi giữa chừng khi retry).
-        if let Some(c) = &resume {
-            if c.query != q || c.mode != mode || c.kind != kind {
-                return Err(Error::Invalid(
-                    "resume cursor does not match this query".into(),
-                ));
-            }
+        if let Some(c) = &resume
+            && (c.query != q || c.mode != mode || c.kind != kind)
+        {
+            return Err(Error::Invalid(
+                "resume cursor does not match this query".into(),
+            ));
         }
 
         // ── Khôi phục / khởi tạo phase ──
@@ -1796,44 +1810,43 @@ impl GraphIndex {
         }
 
         // ── Phase B: stream ids theo tên đã sort → collected ──
-        if !timed_out {
-            if let SearchCursorPhase::Expand {
+        if !timed_out
+            && let SearchCursorPhase::Expand {
                 names,
                 name_idx,
                 id_idx,
                 collected,
             } = &mut phase
-            {
-                loop {
-                    if let Some(dl) = deadline
-                        && Instant::now() >= dl
-                    {
-                        timed_out = true;
-                        break;
-                    }
-                    if *name_idx >= names.len() {
-                        break;
-                    }
-                    let name = &names[*name_idx];
-                    let Some(name_ids) = self.name_index.get(name) else {
-                        *name_idx += 1;
-                        *id_idx = 0;
-                        continue;
-                    };
-                    if *id_idx >= name_ids.len() {
-                        *name_idx += 1;
-                        *id_idx = 0;
-                        continue;
-                    }
-                    let id = name_ids[*id_idx];
-                    *id_idx += 1;
-                    if let Some(k) = kind {
-                        if self.symbols.get(&id).is_some_and(|s| s.kind == k) {
-                            collected.push(id);
-                        }
-                    } else {
+        {
+            loop {
+                if let Some(dl) = deadline
+                    && Instant::now() >= dl
+                {
+                    timed_out = true;
+                    break;
+                }
+                if *name_idx >= names.len() {
+                    break;
+                }
+                let name = &names[*name_idx];
+                let Some(name_ids) = self.name_index.get(name) else {
+                    *name_idx += 1;
+                    *id_idx = 0;
+                    continue;
+                };
+                if *id_idx >= name_ids.len() {
+                    *name_idx += 1;
+                    *id_idx = 0;
+                    continue;
+                }
+                let id = name_ids[*id_idx];
+                *id_idx += 1;
+                if let Some(k) = kind {
+                    if self.symbols.get(&id).is_some_and(|s| s.kind == k) {
                         collected.push(id);
                     }
+                } else {
+                    collected.push(id);
                 }
             }
         }
@@ -1871,14 +1884,18 @@ impl GraphIndex {
             _ => (Vec::new(), 0),
         };
 
-        let cap = if limit == 0 { usize::MAX } else { limit };
+        let cap = if pagination.limit == 0 {
+            usize::MAX
+        } else {
+            pagination.limit
+        };
         let page: Vec<Symbol> = collected
             .iter()
-            .skip(offset)
+            .skip(pagination.offset)
             .take(cap)
             .filter_map(|id| self.symbols.get(id).cloned())
             .collect();
-        let page_end = offset + page.len();
+        let page_end = pagination.offset + page.len();
         let more = page_end < total;
 
         Ok(PagedSearchOutcome {
@@ -1886,7 +1903,7 @@ impl GraphIndex {
             total,
             timed_out: false,
             progress: total,
-            cursor: more.then(|| SearchCursor {
+            cursor: more.then_some(SearchCursor {
                 query: q,
                 mode,
                 kind,
@@ -1909,8 +1926,7 @@ impl GraphIndex {
             query,
             None,
             SymbolMatch::Contains,
-            limit,
-            0,
+            Pagination { limit, offset: 0 },
             resume,
             deadline,
         )
@@ -2546,8 +2562,7 @@ mod tests {
                     q,
                     kind,
                     mode,
-                    limit,
-                    offset,
+                    Pagination { limit, offset },
                     None,
                     Some(Instant::now()),
                 )
@@ -2556,7 +2571,14 @@ mod tests {
             assert!(first.timed_out, "expired deadline must time out");
             assert!(first.cursor.is_some(), "timeout must carry a cursor");
             let out = idx
-                .search_symbol_paged_resumable(q, kind, mode, limit, offset, first.cursor, None)
+                .search_symbol_paged_resumable(
+                    q,
+                    kind,
+                    mode,
+                    Pagination { limit, offset },
+                    first.cursor,
+                    None,
+                )
                 .await
                 .unwrap();
             assert!(!out.timed_out, "resume without deadline must complete");
@@ -2618,8 +2640,7 @@ mod tests {
     async fn search_paged_resumable_multistep_chain() {
         let mut idx = GraphIndex::in_memory();
         let mut results = Vec::new();
-        let mut id = SYMBOL_BASE;
-        for i in 0..4000 {
+        for (id, i) in (SYMBOL_BASE..).zip(0..4000) {
             let name = format!("order_{i:04}");
             results.push(result(
                 "a.ts",
@@ -2627,7 +2648,6 @@ mod tests {
                 HashMap::new(),
                 vec![],
             ));
-            id += 1;
         }
         idx.ingest(&results).await.unwrap();
 
@@ -2643,8 +2663,10 @@ mod tests {
                 "order",
                 None,
                 SymbolMatch::Contains,
-                10,
-                0,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 Some(Instant::now()),
             )
@@ -2661,8 +2683,10 @@ mod tests {
                     "order",
                     None,
                     SymbolMatch::Contains,
-                    10,
-                    0,
+                    Pagination {
+                        limit: 10,
+                        offset: 0,
+                    },
                     cursor,
                     Some(Instant::now() + std::time::Duration::from_millis(10)),
                 )

@@ -1,4 +1,4 @@
-use codegraph_api::GraphApi;
+use codegraph_api::{GraphApi, Pagination};
 use codegraph_core::{
     CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind, SymbolMatch, SYMBOL_BASE,
 };
@@ -180,8 +180,7 @@ async fn files_stats_and_context() {
 async fn seed_many(db: &str, count: usize) {
     let mut idx = GraphIndex::open(db).await.unwrap();
     let mut results = Vec::new();
-    let mut id = SYMBOL_BASE;
-    for i in 0..count {
+    for (id, i) in (SYMBOL_BASE..).zip(0..count) {
         let name = format!("order_{i:05}");
         results.push(ParseResult {
             path: "src/a.ts".into(),
@@ -192,7 +191,6 @@ async fn seed_many(db: &str, count: usize) {
             chains: HashMap::new(),
             calls: vec![],
         });
-        id += 1;
     }
     idx.ingest(&results).await.unwrap();
 }
@@ -267,7 +265,17 @@ async fn search_symbol_paged_resume_paging() {
     let api = api(&db_str).await;
 
     let first = api
-        .search_symbol_paged_resumable("order", None, SymbolMatch::Contains, 10, 0, None, 0)
+        .search_symbol_paged_resumable(
+            "order",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 10,
+                offset: 0,
+            },
+            None,
+            0,
+        )
         .await
         .unwrap();
     assert!(!first.timed_out);
@@ -285,8 +293,10 @@ async fn search_symbol_paged_resume_paging() {
             "order",
             None,
             SymbolMatch::Contains,
-            10,
-            10,
+            Pagination {
+                limit: 10,
+                offset: 10,
+            },
             Some(resume_id.clone()),
             0,
         )
@@ -305,8 +315,10 @@ async fn search_symbol_paged_resume_paging() {
             "order",
             None,
             SymbolMatch::Contains,
-            10,
-            1490,
+            Pagination {
+                limit: 10,
+                offset: 1490,
+            },
             Some(resume_id.clone()),
             0,
         )
@@ -321,8 +333,10 @@ async fn search_symbol_paged_resume_paging() {
             "zzz",
             None,
             SymbolMatch::Contains,
-            10,
-            0,
+            Pagination {
+                limit: 10,
+                offset: 0
+            },
             Some(resume_id),
             0
         )

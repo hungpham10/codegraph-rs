@@ -1,6 +1,6 @@
 use crate::session::{DetailLevel, OutputStyle};
 use camino::{Utf8Path, Utf8PathBuf};
-use codegraph_api::GraphApi;
+use codegraph_api::{GraphApi, Pagination};
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{is_marker, Error, Result, Symbol, SymbolKind, SymbolMatch};
 use codegraph_extract::Orchestrator;
@@ -500,7 +500,14 @@ pub async fn dispatch_with_api(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2000);
             let out = api
-                .search_symbol_paged_resumable(q, kind, mode, limit, offset, resume, timeout_ms)
+                .search_symbol_paged_resumable(
+                    q,
+                    kind,
+                    mode,
+                    Pagination { limit, offset },
+                    resume,
+                    timeout_ms,
+                )
                 .await?;
             if out.timed_out {
                 return Err(Error::Other(format!(

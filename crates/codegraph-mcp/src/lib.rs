@@ -18,7 +18,6 @@ mod usage;
 pub use session::{DetailLevel, InitOutcome, OutputStyle, Session};
 pub use stdio::serve_stdio;
 
-use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use codegraph_api::{GraphApi, SearchSessionStore};
@@ -27,7 +26,7 @@ use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
     Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
 };
-use rmcp::service::{MaybeSendFuture, RequestContext};
+use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer};
 use serde_json::{json, Value};
 
@@ -256,56 +255,52 @@ impl ServerHandler for CodegraphServer {
             .with_instructions(SERVER_INSTRUCTIONS.to_string())
     }
 
-    fn list_tools(
+    async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
-        async move {
-            // Protocol 2026-07-28 (SEP-2549) bắt buộc `ttlMs`/`cacheScope` trên
-            // result; client strict (vd ZCode) validate theo schema đó → phải set.
-            // ttl_ms = 0: kết quả coi như stale ngay, không cache phía client.
-            Ok(ListToolsResult::with_all_items(tools::rmcp_tools())
-                .with_ttl_ms(0)
-                .with_cache_scope(CacheScope::Public))
-        }
+    ) -> Result<ListToolsResult, McpError> {
+        // Protocol 2026-07-28 (SEP-2549) bắt buộc `ttlMs`/`cacheScope` trên
+        // result; client strict (vd ZCode) validate theo schema đó → phải set.
+        // ttl_ms = 0: kết quả coi như stale ngay, không cache phía client.
+        Ok(ListToolsResult::with_all_items(tools::rmcp_tools())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Public))
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResponse, McpError>> + MaybeSendFuture + '_ {
-        async move {
-            let name = request.name.as_ref();
-            let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+    ) -> Result<CallToolResponse, McpError> {
+        let name = request.name.as_ref();
+        let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
 
-            // Tên tool không tồn tại → protocol error (client thấy lỗi JSON-RPC
-            // method-not-found, không thấy một "tool ảo"). Chặn sớm trước khi
-            // chạy vào run_tool để không cho nhầm tool lạ chạy nhánh `_`.
-            if !tools::is_known_tool(name) {
-                return Err(McpError::method_not_found::<
-                    rmcp::model::CallToolRequestMethod,
-                >());
-            }
+        // Tên tool không tồn tại → protocol error (client thấy lỗi JSON-RPC
+        // method-not-found, không thấy một "tool ảo"). Chặn sớm trước khi
+        // chạy vào run_tool để không cho nhầm tool lạ chạy nhánh `_`.
+        if !tools::is_known_tool(name) {
+            return Err(McpError::method_not_found::<
+                rmcp::model::CallToolRequestMethod,
+            >());
+        }
 
-            match self.run_tool(name, args).await {
-                Ok(ToolOutput::Text { text, source_bytes }) => {
-                    self.usage
-                        .lock()
-                        .unwrap()
-                        .record(name, text.len() as u64, source_bytes, false);
-                    Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
-                }
-                Ok(ToolOutput::Error(msg)) => {
-                    self.usage
-                        .lock()
-                        .unwrap()
-                        .record(name, msg.len() as u64, 0, true);
-                    Ok(CallToolResult::error(vec![ContentBlock::text(msg)]).into())
-                }
-                Err(e) => Err(e),
+        match self.run_tool(name, args).await {
+            Ok(ToolOutput::Text { text, source_bytes }) => {
+                self.usage
+                    .lock()
+                    .unwrap()
+                    .record(name, text.len() as u64, source_bytes, false);
+                Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
             }
+            Ok(ToolOutput::Error(msg)) => {
+                self.usage
+                    .lock()
+                    .unwrap()
+                    .record(name, msg.len() as u64, 0, true);
+                Ok(CallToolResult::error(vec![ContentBlock::text(msg)]).into())
+            }
+            Err(e) => Err(e),
         }
     }
 }

@@ -716,12 +716,8 @@ impl<T: Element> Radix<T> {
         };
 
         // Mỗi vòng lặp xử lý đúng 1 bước duyệt; giữa các bước check deadline.
-        loop {
-            let cur = match state.take() {
-                Some(s) => s,
-                None => break, // duyệt xong (Search không match / Collect xong).
-            };
-
+        // `state = None` → duyệt xong (Search không match / Collect xong).
+        while let Some(cur) = state.take() {
             if let Some(dl) = deadline
                 && std::time::Instant::now() >= dl
             {

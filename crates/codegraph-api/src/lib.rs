@@ -127,6 +127,14 @@ pub struct ResumeSearchOutcome {
     pub index_version: u64,
 }
 
+/// Phân trang cho search symbol: `limit` chặn số symbol mỗi trang (`0` =
+/// không giới hạn), `offset` bỏ qua `offset` symbol đầu.
+#[derive(Debug, Clone, Copy)]
+pub struct Pagination {
+    pub limit: u32,
+    pub offset: u32,
+}
+
 impl GraphApi {
     pub fn new_with_index(index: Arc<SharedGraphIndex>) -> Self {
         Self {
@@ -174,8 +182,7 @@ impl GraphApi {
             query,
             None,
             SymbolMatch::Contains,
-            limit,
-            0,
+            Pagination { limit, offset: 0 },
             resume,
             timeout_ms,
         )
@@ -208,8 +215,7 @@ impl GraphApi {
         query: &str,
         kind: Option<SymbolKind>,
         mode: SymbolMatch,
-        limit: u32,
-        offset: u32,
+        pagination: Pagination,
         resume: Option<String>,
         timeout_ms: u64,
     ) -> Result<ResumeSearchOutcome> {
@@ -251,8 +257,10 @@ impl GraphApi {
                 query,
                 kind,
                 mode,
-                limit as usize,
-                offset as usize,
+                codegraph_graph::Pagination {
+                    limit: pagination.limit as usize,
+                    offset: pagination.offset as usize,
+                },
                 cursor,
                 deadline,
             )
