@@ -174,6 +174,17 @@ pub enum ScopeLevel {
     Parameter,
 }
 
+impl ScopeLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::ObjectField => "object_field",
+            Self::Local => "local",
+            Self::Parameter => "parameter",
+        }
+    }
+}
+
 /// Phân loại tác động bên ngoài của một call (để impact/report).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

@@ -1,5 +1,7 @@
-use codegraph_api::GraphApi;
-use codegraph_core::{CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind, SYMBOL_BASE};
+use codegraph_api::{GraphApi, Pagination};
+use codegraph_core::{
+    CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind, SymbolMatch, SYMBOL_BASE,
+};
 use codegraph_graph::{GraphIndex, ParseResult, SharedGraphIndex};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -167,7 +169,177 @@ async fn files_stats_and_context() {
         include_source: false,
         limit: 5,
         format: codegraph_context::Format::Markdown,
+        strip_prefix: None,
     };
     let md = api.context_markdown(&req).await.unwrap();
     assert!(md.contains("caller"));
+}
+
+/// Seed N symbol tên "order_*" (mỗi tên 1 symbol) — đủ lớn để search chậm hơn
+/// 1ms (debug build) và có tổng > limit (test phân trang).
+async fn seed_many(db: &str, count: usize) {
+    let mut idx = GraphIndex::open(db).await.unwrap();
+    let mut results = Vec::new();
+    for (id, i) in (SYMBOL_BASE..).zip(0..count) {
+        let name = format!("order_{i:05}");
+        results.push(ParseResult {
+            path: "src/a.ts".into(),
+            language: "typescript".into(),
+            bytes: 10,
+            lines: 4,
+            symbols: vec![sym(id, &name)],
+            chains: HashMap::new(),
+            calls: vec![],
+        });
+    }
+    idx.ingest(&results).await.unwrap();
+}
+
+/// Resume roundtrip: timeout → lấy resume id → retry cùng args + resume → kết
+/// quả đầy đủ, không lặp/không mất. Resume id sai → lỗi bảo retry không resume.
+#[tokio::test]
+async fn search_resumable_timeout_retry_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("db.sqlite");
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    seed_many(&db_str, 6000).await;
+    let api = api(&db_str).await;
+
+    // Call 1: timeout_ms=1 — trên seed 6000 symbol debug build chắc chắn trễ
+    // hơn 1ms. Nếu máy quá nhanh (không timeout) test vẫn đúng — chỉ bỏ qua
+    // nhánh retry. total = 5000 vì name engine chặn cứng MAX_RESULTS tên distinct.
+    let capped = 5000;
+    let first = api.search_resumable("order", 20, None, 1).await.unwrap();
+    let resume_id = if first.timed_out {
+        assert!(first.resume.is_some(), "timeout must carry a resume id");
+        first.resume.unwrap()
+    } else {
+        // Hoàn tất ngay — verify kết quả rồi dừng (không cần retry).
+        let ids: std::collections::HashSet<u64> = first.page.iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), first.page.len(), "no duplicate results");
+        assert_eq!(first.total, capped);
+        assert_eq!(first.page.len(), 20);
+        return;
+    };
+
+    // Retry: cùng args + resume, không giới hạn thời gian → hoàn tất.
+    let out = api
+        .search_resumable("order", 20, Some(resume_id.clone()), 0)
+        .await
+        .unwrap();
+    assert!(!out.timed_out);
+    assert_eq!(out.total, capped, "total must match the full scan (capped)");
+    let ids: std::collections::HashSet<u64> = out.page.iter().map(|s| s.id).collect();
+    assert_eq!(
+        ids.len(),
+        out.page.len(),
+        "no duplicate results after resume"
+    );
+    assert_eq!(out.page.len(), 20);
+
+    // Resume id không tồn tại → lỗi (LLM nên retry không resume).
+    assert!(
+        api.search_resumable("order", 20, Some("deadbeef00000000".into()), 0)
+            .await
+            .is_err(),
+        "unknown resume id must be rejected"
+    );
+    // Resume id không khớp query → lỗi.
+    assert!(
+        api.search_resumable("totally_different", 20, Some(resume_id), 0)
+            .await
+            .is_err(),
+        "resume id for a different query must be rejected"
+    );
+}
+
+/// Phân trang qua resume (Paged cursor): call 1 limit=10 (timeout_ms=0) hoàn
+/// tất + còn page sau → resume id; call 2 cùng resume + offset=10 → page rời,
+/// tổng nhất quán.
+#[tokio::test]
+async fn search_symbol_paged_resume_paging() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("db.sqlite");
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    seed_many(&db_str, 1500).await;
+    let api = api(&db_str).await;
+
+    let first = api
+        .search_symbol_paged_resumable(
+            "order",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 10,
+                offset: 0,
+            },
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+    assert!(!first.timed_out);
+    assert_eq!(first.total, 1500);
+    assert_eq!(first.page.len(), 10);
+    assert!(
+        first.resume.is_some(),
+        "more pages remain -> response must carry a resume id"
+    );
+    let resume_id = first.resume.unwrap();
+
+    // Trang 2 qua resume (Paged cursor — không quét lại).
+    let second = api
+        .search_symbol_paged_resumable(
+            "order",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 10,
+                offset: 10,
+            },
+            Some(resume_id.clone()),
+            0,
+        )
+        .await
+        .unwrap();
+    assert!(!second.timed_out);
+    assert_eq!(second.total, 1500, "total must be stable across pages");
+    let page1: std::collections::HashSet<u64> = first.page.iter().map(|s| s.id).collect();
+    let page2: std::collections::HashSet<u64> = second.page.iter().map(|s| s.id).collect();
+    assert!(page1.is_disjoint(&page2), "pages must be disjoint");
+    assert_eq!(second.page.len(), 10);
+
+    // Page cuối rời.
+    let last = api
+        .search_symbol_paged_resumable(
+            "order",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 10,
+                offset: 1490,
+            },
+            Some(resume_id.clone()),
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(last.page.len(), 10);
+    assert!(last.resume.is_none(), "last page: no more resume");
+
+    // Resume id này thuộc query "order" — dùng cho query khác → lỗi.
+    assert!(api
+        .search_symbol_paged_resumable(
+            "zzz",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 10,
+                offset: 0
+            },
+            Some(resume_id),
+            0
+        )
+        .await
+        .is_err());
 }

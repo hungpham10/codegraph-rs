@@ -26,6 +26,10 @@ pub struct ContextRequest {
     pub include_source: bool,
     pub limit: u32,
     pub format: Format,
+    /// Workspace root — strip khỏi `file` trong markdown (path tương đối tiết
+    /// kiệm token cho LLM). `None` = giữ absolute (CLI/HTTP không biết root).
+    #[serde(default)]
+    pub strip_prefix: Option<String>,
 }
 
 impl Default for ContextRequest {
@@ -36,6 +40,7 @@ impl Default for ContextRequest {
             include_source: false,
             limit: 5,
             format: Format::Markdown,
+            strip_prefix: None,
         }
     }
 }
@@ -59,7 +64,7 @@ pub async fn build(index: &Arc<SharedGraphIndex>, req: &ContextRequest) -> Resul
     let response = build_response(index, req).await?;
     match req.format {
         Format::Json => Ok(serde_json::to_string_pretty(&response).unwrap_or_default()),
-        Format::Markdown => Ok(render_markdown(&response)),
+        Format::Markdown => Ok(render_markdown(&response, req.strip_prefix.as_deref())),
     }
 }
 
@@ -113,7 +118,19 @@ pub async fn build_response(
     })
 }
 
-fn render_markdown(resp: &ContextResponse) -> String {
+/// Strip `root/` prefix khỏi path (boundary-aware) — `None` giữ nguyên.
+fn rel_path<'a>(p: &'a str, strip: Option<&str>) -> &'a str {
+    if let Some(root) = strip {
+        if let Some(rest) = p.strip_prefix(root) {
+            if let Some(rest) = rest.strip_prefix('/') {
+                return rest;
+            }
+        }
+    }
+    p
+}
+
+fn render_markdown(resp: &ContextResponse, strip: Option<&str>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Context: `{}`", resp.query);
     if resp.hits.is_empty() {
@@ -126,7 +143,7 @@ fn render_markdown(resp: &ContextResponse) -> String {
             "\n## `{}` — {} — `{}:{}`",
             h.symbol.name,
             h.symbol.kind.as_str(),
-            h.symbol.file,
+            rel_path(&h.symbol.file, strip),
             h.symbol.line
         );
         if let Some(sig) = &h.symbol.signature {
@@ -138,13 +155,25 @@ fn render_markdown(resp: &ContextResponse) -> String {
         if !h.callers.is_empty() {
             let _ = writeln!(out, "\n**Callers** ({}):", h.callers.len());
             for c in &h.callers {
-                let _ = writeln!(out, "- `{}` — `{}:{}`", c.name, c.file, c.line);
+                let _ = writeln!(
+                    out,
+                    "- `{}` — `{}:{}`",
+                    c.name,
+                    rel_path(&c.file, strip),
+                    c.line
+                );
             }
         }
         if !h.callees.is_empty() {
             let _ = writeln!(out, "\n**Callees** ({}):", h.callees.len());
             for c in &h.callees {
-                let _ = writeln!(out, "- `{}` — `{}:{}`", c.name, c.file, c.line);
+                let _ = writeln!(
+                    out,
+                    "- `{}` — `{}:{}`",
+                    c.name,
+                    rel_path(&c.file, strip),
+                    c.line
+                );
             }
         }
     }

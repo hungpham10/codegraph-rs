@@ -50,7 +50,30 @@ enum Cmd {
     Serve {
         #[arg(long)]
         mcp: bool,
+        /// Output format cho mọi response (Binance-style minimal):
+        /// minimize (mặc định) = symbol thành mảng vị trí cố định; medium = giữ
+        /// key, lược field có value mặc định. Ghi đè được theo session
+        /// (codegraph_init {"format": ...}) và từng call (arg "format").
+        #[arg(long, value_enum, default_value_t = OutputFormat::Minimize)]
+        format: OutputFormat,
     },
+}
+
+/// Giá trị `--format` của CLI — map sang `codegraph_mcp::OutputStyle`.
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Minimize,
+    Medium,
+}
+
+impl OutputFormat {
+    fn style(self) -> codegraph_mcp::OutputStyle {
+        match self {
+            Self::Minimize => codegraph_mcp::OutputStyle::Minimize,
+            Self::Medium => codegraph_mcp::OutputStyle::Medium,
+        }
+    }
 }
 
 #[tokio::main]
@@ -80,8 +103,15 @@ async fn main() -> Result<()> {
     match cmd {
         Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
         Cmd::Deinit => cmd_deinit(&root),
-        Cmd::Serve { mcp } => cmd_serve(&root, mcp).await,
+        Cmd::Serve { mcp, format } => cmd_serve(&root, mcp, format.style()).await,
     }
+}
+
+/// Workspace đã init chưa — dấu hiệu là thư mục `.codegraph/` tồn tại (do
+/// `codegraph init` tạo). Backend-agnostic: không phụ thuộc db file tồn tại
+/// (lmdb dùng thư mục, redis không có file địa phương).
+fn is_initialized(root: &Utf8Path) -> bool {
+    codegraph_extract::project_dir(root).exists()
 }
 
 /// Không có subcommand → in help. Banner console cũ bị bỏ: giao diện chính giờ
@@ -105,13 +135,6 @@ async fn open_index(root: &Utf8Path) -> Result<GraphIndex> {
         Some(dsn) => Ok(GraphIndex::open(&dsn).await?),
         None => Ok(GraphIndex::in_memory()),
     }
-}
-
-/// Workspace đã init chưa — dấu hiệu là thư mục `.codegraph/` tồn tại (do
-/// `codegraph init` tạo). Backend-agnostic: không phụ thuộc db file tồn tại
-/// (lmdb dùng thư mục, redis không có file địa phương).
-fn is_initialized(root: &Utf8Path) -> bool {
-    codegraph_extract::project_dir(root).exists()
 }
 
 /// `codegraph init`: tạo `.codegraph/` + config, index ngay nếu `do_index`
@@ -164,7 +187,7 @@ fn cmd_deinit(root: &Utf8Path) -> Result<()> {
 }
 
 /// `codegraph serve --mcp`: chạy MCP server trên stdio.
-async fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
+async fn cmd_serve(root: &Utf8Path, mcp: bool, format: codegraph_mcp::OutputStyle) -> Result<()> {
     if !mcp {
         return Err(anyhow!("only --mcp transport supported"));
     }
@@ -182,9 +205,9 @@ async fn cmd_serve(root: &Utf8Path, mcp: bool) -> Result<()> {
         watcher::spawn(root.to_path_buf(), dsn.clone());
     }
     let server = if use_root {
-        CodegraphServer::with_root(root.to_path_buf()).await?
+        CodegraphServer::with_root_and_format(root.to_path_buf(), format).await?
     } else {
-        CodegraphServer::new()
+        CodegraphServer::new_with_format(format)
     };
     codegraph_mcp::serve_stdio(server).await
 }

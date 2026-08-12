@@ -24,7 +24,9 @@ authors = ["Cleboost <clement.balarot@gmail.com>"]
 [workspace.dependencies]
 # core
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: json!-built objects emit keys in written (documented) order
+# thay vì alphabet — derived structs luôn serialize theo declaration order.
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 async-trait = "0.1"
 anyhow = "1"

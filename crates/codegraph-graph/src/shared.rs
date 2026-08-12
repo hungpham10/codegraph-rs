@@ -81,6 +81,12 @@ impl SharedGraphIndex {
     /// Chỉ gọi khi `dsn.is_some()`.
     async fn current_version(&self) -> Option<u64> {
         let dsn = self.dsn.as_ref()?;
+        // `path` chỉ dùng bởi các backend có probe file độc lập (sqlite/lmdb);
+        // build không bật backend nào → biến thừa, cho phép bỏ qua lint.
+        #[cfg_attr(
+            not(any(feature = "sqlite", feature = "lmdb")),
+            allow(unused_variables)
+        )]
         let path = trim_scheme(dsn);
         match self.scheme() {
             #[cfg(feature = "sqlite")]

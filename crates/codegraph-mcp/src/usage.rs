@@ -92,21 +92,35 @@ impl UsageStats {
 
 /// Ước lượng source bytes mà một answer JSON "thay thế": gom mọi giá trị của
 /// key `file` (path của symbol trả về), map sang `FileInfo.bytes` trong index.
-/// Duyệt toàn bộ cây JSON — an toàn với mọi shape của answer.
-pub async fn estimate_source_bytes(api: &codegraph_api::GraphApi, answer_json: &Value) -> u64 {
+/// Duyệt toàn bộ cây JSON — an toàn với mọi shape của answer. `root` là
+/// workspace root: answer relativize `file` theo root (xem `tools::emit_value`),
+/// nên lookup key cũng strip root để khớp.
+pub async fn estimate_source_bytes(
+    api: &codegraph_api::GraphApi,
+    answer_json: &Value,
+    root: &str,
+) -> u64 {
     let mut paths = Vec::new();
     collect_file_paths(answer_json, &mut paths);
     if paths.is_empty() {
         return 0;
     }
-    // FileInfo.bytes của từng file (lazy — chỉ build khi cần).
+    // FileInfo.bytes của từng file (lazy — chỉ build khi cần). Key theo path
+    // tương đối với root — cùng dạng với `file` trong answer đã relativize.
     let files = api.files("").await;
-    let bytes_by_path: std::collections::HashMap<&str, u64> =
-        files.iter().map(|f| (f.path.as_str(), f.bytes)).collect();
+    let bytes_by_path: std::collections::HashMap<&str, u64> = files
+        .iter()
+        .map(|f| {
+            (
+                crate::tools::strip_root_prefix(f.path.as_str(), root),
+                f.bytes,
+            )
+        })
+        .collect();
     let mut seen = std::collections::HashSet::new();
     let mut total = 0u64;
     for p in paths {
-        if let Some(b) = bytes_by_path.get(p.as_str()) {
+        if let Some(b) = bytes_by_path.get(crate::tools::strip_root_prefix(&p, root)) {
             if seen.insert(p) {
                 total += b;
             }

@@ -35,6 +35,7 @@
 //! var-type alias, gom SaveCallRecords) → files → rebuild engines → bump version.
 
 pub use crate::search::Search;
+use crate::search::SearchResume;
 #[cfg(feature = "lmdb")]
 pub use crate::storage::lmdb::LmdbStorage;
 #[cfg(feature = "sqlite")]
@@ -49,6 +50,7 @@ use codegraph_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 #[cfg(feature = "bloom-search")]
@@ -136,6 +138,9 @@ pub struct GraphIndex {
     names: Search<u8>,
     /// `record - 1` → tên (song song với thứ tự insert name engine).
     name_records: Vec<String>,
+    /// Các tên distinct (lowercase) **đã sort** — dùng cho scan Prefix/Suffix/
+    /// Exact không cần sort lại (resume chỉ lưu vị trí, không lưu mảng).
+    sorted_name_keys: Vec<String>,
     /// symbol id → Symbol (registry — nguồn chân lý in-memory).
     symbols: HashMap<u64, Symbol>,
     /// tên (lowercase) → symbol ids (mở rộng trùng tên khi search/resolve).
@@ -154,6 +159,71 @@ pub struct GraphIndex {
     next_id: u64,
     /// index version (bump mỗi lần ingest — SharedGraphIndex dò stale).
     version: u64,
+}
+
+// ── Search resumable (deadline-aware, checkpointable) ──
+
+/// Phase của một search resumable. Cursor nằm server-side (session store ở
+/// tầng API) — LLM chỉ nhìn thấy một session id; state không serialize ra
+/// ngoài mà chỉ được tái lập từ (query, mode, kind, phase).
+#[derive(Debug, Clone)]
+pub enum SearchCursorPhase {
+    /// Mode `Contains`: đang giữa lúc chạy name engine (resumable). `names`
+    /// engine trả records không theo thứ tự tên — phase A xong phải sort
+    /// trước khi chuyển sang `Expand`.
+    Engine(SearchResume),
+    /// Mode `Prefix`/`Suffix`/`Exact`: đang quét `sorted_name_keys` từ
+    /// `name_pos` (mảng đã sort sẵn — resume chỉ cần lưu vị trí).
+    ScanNames { name_pos: usize },
+    /// Phase A xong: stream ids theo từng tên đã sort — filter `kind`, gom
+    /// vào `collected`. `name_index[name]` luôn tăng dần theo id nên
+    /// collected đã sort theo (name, id) — không cần sort cuối.
+    Expand {
+        names: Vec<String>,
+        name_idx: usize,
+        id_idx: usize,
+        collected: Vec<u64>,
+    },
+    /// Search đã hoàn tất: `collected` + `total` giữ để phân trang tiếp mà
+    /// không quét lại. Không chứa query — `SearchCursor.query` lo phần đó.
+    Paged { collected: Vec<u64>, total: usize },
+}
+
+/// Server-side cursor cho search resumable — validate theo (query, mode,
+/// kind); `limit`/`offset` KHÔNG nằm trong cursor (page có thể đổi giữa
+/// chừng khi retry).
+#[derive(Debug, Clone)]
+pub struct SearchCursor {
+    /// Query lowercase (khớp với cursor — thay đổi → resume không hợp lệ).
+    pub query: String,
+    pub mode: SymbolMatch,
+    pub kind: Option<SymbolKind>,
+    pub phase: SearchCursorPhase,
+}
+
+/// Kết quả của [`GraphIndex::search_symbol_paged_resumable`].
+#[derive(Debug)]
+pub struct PagedSearchOutcome {
+    /// Trang kết quả (chỉ đầy khi search hoàn tất; rỗng khi timed out).
+    pub page: Vec<Symbol>,
+    /// Tổng số khớp — chỉ chính xác khi search hoàn tất.
+    pub total: usize,
+    /// Deadline hết hạn giữa chừng → `cursor` là phase dở, phải retry.
+    pub timed_out: bool,
+    /// Tiến độ đo được lúc ngắt (names khớp khi đang phase A, symbols gom
+    /// được khi đang phase B) — dùng cho message báo LLM.
+    pub progress: usize,
+    /// Cursor tiếp tục: `Some(phase dở)` khi timed_out; `Some(Paged)` khi
+    /// hoàn tất nhưng còn page sau; `None` khi xong và hết page.
+    pub cursor: Option<SearchCursor>,
+}
+
+/// Phân trang cho search symbol: `limit` chặn số symbol mỗi trang
+/// (`0` = không giới hạn), `offset` bỏ qua `offset` symbol đầu.
+#[derive(Debug, Clone, Copy)]
+pub struct Pagination {
+    pub limit: usize,
+    pub offset: usize,
 }
 
 impl GraphIndex {
@@ -333,6 +403,7 @@ impl GraphIndex {
             names: Search::new(CHAIN_SHARDING, name_storage),
             storage,
             name_records: Vec::new(),
+            sorted_name_keys: Vec::new(),
             symbols: HashMap::new(),
             name_index: HashMap::new(),
             scope_index: HashMap::new(),
@@ -531,6 +602,7 @@ impl GraphIndex {
             p.phase("rebuild name-search engine", distinct.len());
         }
         let mut record = 0usize;
+        self.sorted_name_keys = distinct.iter().map(|s| s.to_string()).collect();
         for name in distinct {
             record += 1;
             let metas: Vec<Option<&[u8]>> = vec![None; name.len()];
@@ -583,6 +655,7 @@ impl GraphIndex {
         self.edges.clear();
         self.files.clear();
         self.name_records.clear();
+        self.sorted_name_keys.clear();
         self.next_id = SYMBOL_BASE;
 
         // ── Phase 1: register + remap ──
@@ -1606,74 +1679,258 @@ impl GraphIndex {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<Symbol>, usize)> {
+        let out = self
+            .search_symbol_paged_resumable(
+                query,
+                kind,
+                mode,
+                Pagination { limit, offset },
+                None,
+                None,
+            )
+            .await?;
+        Ok((out.page, out.total))
+    }
+    /// Phiên bản resumable + deadline-aware của [`search_symbol_paged`]: ngắt
+    /// giữa chừng khi `deadline` hết hạn, trả `PagedSearchOutcome { timed_out:
+    /// true, cursor: Some(phase dở) }` — caller gọi lại với `resume =
+    /// Some(cursor)` để tiếp tục từ đúng vị trí (không lặp phần đã duyệt).
+    ///
+    /// - Phase A (Contains: engine resumable; khác: scan `sorted_name_keys`)
+    ///   sinh danh sách tên khớp **đã sort** — chỉ hoàn tất sau khi quét hết
+    ///   (không thể sort từng phần vì tên mới có thể chèn vào giữa).
+    /// - Phase B (`Expand`) stream ids theo tên đã sort — `name_index[name]`
+    ///   tăng dần theo id nên collected đã sort (name, id) — **không cần sort
+    ///   cuối** (diệt O(n log n) của bản cũ). total chỉ chính xác khi quét xong.
+    /// - Hoàn tất + còn page sau → `cursor = Some(Paged)` để phân trang tiếp
+    ///   không cần quét lại.
+    ///
+    /// `resume` phải khớp (query, mode, kind) — sai → `InvalidArgument`.
+    pub async fn search_symbol_paged_resumable(
+        &self,
+        query: &str,
+        kind: Option<SymbolKind>,
+        mode: SymbolMatch,
+        pagination: Pagination,
+        resume: Option<SearchCursor>,
+        deadline: Option<Instant>,
+    ) -> Result<PagedSearchOutcome> {
         let q = query.to_lowercase();
-        let mut seen = HashSet::new();
-        let mut ids: Vec<u64> = Vec::new();
-        match mode {
-            // Substring qua name engine (radix — nhanh hơn duyệt toàn bộ tên).
-            SymbolMatch::Contains => {
-                let hits = match self.names.search(q.as_bytes(), None).await {
-                    Ok(h) => h,
-                    Err(_) => return Ok((Vec::new(), 0)),
-                };
-                for (record, _) in hits {
-                    if record == 0 {
-                        continue;
-                    }
-                    let Some(name) = self.name_records.get(record - 1) else {
-                        continue;
+
+        // Validate resume: query/mode/kind phải khớp (limit/offset không — page
+        // có thể đổi giữa chừng khi retry).
+        if let Some(c) = &resume
+            && (c.query != q || c.mode != mode || c.kind != kind)
+        {
+            return Err(Error::Invalid(
+                "resume cursor does not match this query".into(),
+            ));
+        }
+
+        // ── Khôi phục / khởi tạo phase ──
+        let (mut phase, mut timed_out) = match resume.map(|c| c.phase) {
+            Some(p) => (p, false),
+            None => (
+                match mode {
+                    SymbolMatch::Contains => SearchCursorPhase::Engine(SearchResume::default()),
+                    _ => SearchCursorPhase::ScanNames { name_pos: 0 },
+                },
+                false,
+            ),
+        };
+
+        // ── Phase A: sinh danh sách tên khớp (sort) ──
+        match &mut phase {
+            SearchCursorPhase::Engine(sr) => {
+                let page = self
+                    .names
+                    .search_resumable(q.as_bytes(), None, Some(sr.clone()), deadline)
+                    .await?;
+                if page.timed_out {
+                    phase = SearchCursorPhase::Engine(page.resume.unwrap_or_default());
+                    timed_out = true;
+                } else {
+                    // record → tên, sort → Expand.
+                    let mut names: Vec<String> = page
+                        .record_ids
+                        .iter()
+                        .filter_map(|&r| {
+                            if r == 0 {
+                                return None;
+                            }
+                            self.name_records.get(r - 1).cloned()
+                        })
+                        .collect();
+                    names.sort();
+                    phase = SearchCursorPhase::Expand {
+                        names,
+                        name_idx: 0,
+                        id_idx: 0,
+                        collected: Vec::new(),
                     };
-                    let Some(name_ids) = self.name_index.get(name) else {
-                        continue;
-                    };
-                    for &id in name_ids {
-                        if seen.insert(id) {
-                            ids.push(id);
-                        }
-                    }
                 }
             }
-            // Prefix/suffix/exact duyệt name_index (bộ nhỏ hơn symbol registry).
-            SymbolMatch::Prefix | SymbolMatch::Suffix | SymbolMatch::Exact => {
-                for (name, name_ids) in &self.name_index {
-                    let matched = match mode {
+            SearchCursorPhase::ScanNames { name_pos } => {
+                let mut matched: Vec<String> = Vec::new();
+                let mut pos = *name_pos;
+                loop {
+                    if let Some(dl) = deadline
+                        && Instant::now() >= dl
+                    {
+                        phase = SearchCursorPhase::ScanNames { name_pos: pos };
+                        timed_out = true;
+                        break;
+                    }
+                    if pos >= self.sorted_name_keys.len() {
+                        break;
+                    }
+                    let name = &self.sorted_name_keys[pos];
+                    let ok = match mode {
                         SymbolMatch::Prefix => name.starts_with(&q),
                         SymbolMatch::Suffix => name.ends_with(&q),
                         SymbolMatch::Exact => name == &q,
                         _ => false,
                     };
-                    if !matched {
-                        continue;
+                    if ok {
+                        matched.push(name.clone());
                     }
-                    for &id in name_ids {
-                        if seen.insert(id) {
-                            ids.push(id);
-                        }
+                    pos += 1;
+                }
+                if !timed_out {
+                    phase = SearchCursorPhase::Expand {
+                        names: matched,
+                        name_idx: 0,
+                        id_idx: 0,
+                        collected: Vec::new(),
+                    };
+                }
+            }
+            // Phase A xong rồi (timed out ở phase B trước) — không làm gì.
+            _ => {}
+        }
+
+        // ── Phase B: stream ids theo tên đã sort → collected ──
+        if !timed_out
+            && let SearchCursorPhase::Expand {
+                names,
+                name_idx,
+                id_idx,
+                collected,
+            } = &mut phase
+        {
+            loop {
+                if let Some(dl) = deadline
+                    && Instant::now() >= dl
+                {
+                    timed_out = true;
+                    break;
+                }
+                if *name_idx >= names.len() {
+                    break;
+                }
+                let name = &names[*name_idx];
+                let Some(name_ids) = self.name_index.get(name) else {
+                    *name_idx += 1;
+                    *id_idx = 0;
+                    continue;
+                };
+                if *id_idx >= name_ids.len() {
+                    *name_idx += 1;
+                    *id_idx = 0;
+                    continue;
+                }
+                let id = name_ids[*id_idx];
+                *id_idx += 1;
+                if let Some(k) = kind {
+                    if self.symbols.get(&id).is_some_and(|s| s.kind == k) {
+                        collected.push(id);
                     }
+                } else {
+                    collected.push(id);
                 }
             }
         }
-        let mut all: Vec<u64> = ids
-            .into_iter()
-            .filter(|&id| match kind {
-                Some(k) => self.symbols.get(&id).is_some_and(|s| s.kind == k),
-                None => true,
-            })
+
+        // ── Trang kết quả + cursor ──
+        if timed_out {
+            let progress = match &phase {
+                SearchCursorPhase::Engine(sr) => sr.record_ids.len(),
+                SearchCursorPhase::ScanNames { name_pos } => *name_pos,
+                SearchCursorPhase::Expand { collected, .. } => collected.len(),
+                SearchCursorPhase::Paged { .. } => 0,
+            };
+            return Ok(PagedSearchOutcome {
+                page: Vec::new(),
+                total: 0,
+                timed_out: true,
+                progress,
+                cursor: Some(SearchCursor {
+                    query: q,
+                    mode,
+                    kind,
+                    phase,
+                }),
+            });
+        }
+
+        // Hoàn tất: lấy collected + total từ Expand, hoặc dùng thẳng từ Paged.
+        let (collected, total) = match &phase {
+            SearchCursorPhase::Expand { collected, .. } => {
+                let total = collected.len();
+                (collected.clone(), total)
+            }
+            SearchCursorPhase::Paged { collected, total } => (collected.clone(), *total),
+            // Không thể tới đây khi chưa hoàn tất phase A.
+            _ => (Vec::new(), 0),
+        };
+
+        let cap = if pagination.limit == 0 {
+            usize::MAX
+        } else {
+            pagination.limit
+        };
+        let page: Vec<Symbol> = collected
+            .iter()
+            .skip(pagination.offset)
+            .take(cap)
+            .filter_map(|id| self.symbols.get(id).cloned())
             .collect();
-        all.sort_by(|&a, &b| {
-            let na = self.symbols.get(&a).map(|s| s.name.as_str()).unwrap_or("");
-            let nb = self.symbols.get(&b).map(|s| s.name.as_str()).unwrap_or("");
-            na.cmp(nb).then(a.cmp(&b))
-        });
-        let total = all.len();
-        let limit = if limit == 0 { usize::MAX } else { limit };
-        let page = all
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .filter_map(|id| self.symbols.get(&id).cloned())
-            .collect();
-        Ok((page, total))
+        let page_end = pagination.offset + page.len();
+        let more = page_end < total;
+
+        Ok(PagedSearchOutcome {
+            page,
+            total,
+            timed_out: false,
+            progress: total,
+            cursor: more.then_some(SearchCursor {
+                query: q,
+                mode,
+                kind,
+                phase: SearchCursorPhase::Paged { collected, total },
+            }),
+        })
+    }
+
+    /// Resumable + deadline-aware của `search_symbol_filtered` (mode Contains,
+    /// không lọc kind) — nền cho `codegraph_search`. `limit` chặn số symbol
+    /// trả về; kết quả sort theo (name, id).
+    pub async fn search_symbol_resumable(
+        &self,
+        query: &str,
+        limit: usize,
+        resume: Option<SearchCursor>,
+        deadline: Option<Instant>,
+    ) -> Result<PagedSearchOutcome> {
+        self.search_symbol_paged_resumable(
+            query,
+            None,
+            SymbolMatch::Contains,
+            Pagination { limit, offset: 0 },
+            resume,
+            deadline,
+        )
+        .await
     }
 
     /// Số liệu tổng hợp.
@@ -2226,8 +2483,8 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1);
         assert_eq!(hits[0].name, "validate");
-        // contains + pagination. Sort byte-wise (case-sensitive): uppercase
-        // "Order*" đứng trước "getOrders".
+        // contains + pagination. Sort theo tên lowercase (nhất quán với search
+        // case-insensitive): "getorders" đứng trước "order*".
         let (page0, total) = idx
             .search_symbol_paged("order", None, SymbolMatch::Contains, 2, 0)
             .await
@@ -2237,15 +2494,216 @@ mod tests {
             "OrderService, OrderController, OrderRepository + getOrders"
         );
         assert_eq!(page0.len(), 2);
-        assert_eq!(page0[0].name, "OrderController");
-        assert_eq!(page0[1].name, "OrderRepository");
+        assert_eq!(page0[0].name, "getOrders");
+        assert_eq!(page0[1].name, "OrderController");
         let (page1, _) = idx
             .search_symbol_paged("order", None, SymbolMatch::Contains, 2, 2)
             .await
             .unwrap();
         assert_eq!(page1.len(), 2);
-        assert_eq!(page1[0].name, "OrderService");
-        assert_eq!(page1[1].name, "getOrders");
+        assert_eq!(page1[0].name, "OrderRepository");
+        assert_eq!(page1[1].name, "OrderService");
+    }
+
+    /// Resumable search == direct search, mọi mode + kind filter + offset + tên
+    /// trùng. Dùng deadline ĐÃ HẾT HẠN ở call đầu — monotonic clock nên check
+    /// `now >= deadline` luôn true → chắc chắn timed_out ngay, sinh checkpoint
+    /// hợp lệ; call sau resume không deadline → hoàn tất. Kết quả phải khớp
+    /// `search_symbol_paged` (không lặp, không mất, cùng thứ tự).
+    #[tokio::test]
+    async fn search_paged_resumable_matches_direct() {
+        let mut idx = GraphIndex::in_memory();
+        let mut results = Vec::new();
+        let mut id = SYMBOL_BASE;
+        // 600 tên "order_*" (Function).
+        for i in 0..600 {
+            let name = format!("order_{i:04}");
+            results.push(result(
+                "a.ts",
+                vec![sym("a.ts", &name, id)],
+                HashMap::new(),
+                vec![],
+            ));
+            id += 1;
+        }
+        // 300 symbol Class TRÙNG TÊN "OrderService" — dedup theo (name, id),
+        // mỗi id là 1 kết quả riêng (test kind filter + duplicate names).
+        for _ in 0..300 {
+            let mut s = sym("a.ts", "OrderService", id);
+            s.kind = SymbolKind::Class;
+            results.push(result("a.ts", vec![s], HashMap::new(), vec![]));
+            id += 1;
+        }
+        // 100 tên "x_order_*" — khớp contains, không khớp prefix/exact/suffix "service".
+        for i in 0..100 {
+            let name = format!("x_order_{i:03}");
+            results.push(result(
+                "a.ts",
+                vec![sym("a.ts", &name, id)],
+                HashMap::new(),
+                vec![],
+            ));
+            id += 1;
+        }
+        idx.ingest(&results).await.unwrap();
+
+        // Driver: call đầu deadline hết hạn → timed_out (sinh checkpoint); call
+        // sau resume không deadline → hoàn tất. So với direct (không deadline).
+        async fn chained(
+            idx: &GraphIndex,
+            q: &str,
+            kind: Option<SymbolKind>,
+            mode: SymbolMatch,
+            limit: usize,
+            offset: usize,
+        ) -> PagedSearchOutcome {
+            let first = idx
+                .search_symbol_paged_resumable(
+                    q,
+                    kind,
+                    mode,
+                    Pagination { limit, offset },
+                    None,
+                    Some(Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert!(first.timed_out, "expired deadline must time out");
+            assert!(first.cursor.is_some(), "timeout must carry a cursor");
+            let out = idx
+                .search_symbol_paged_resumable(
+                    q,
+                    kind,
+                    mode,
+                    Pagination { limit, offset },
+                    first.cursor,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(!out.timed_out, "resume without deadline must complete");
+            out
+        }
+
+        let cases: Vec<(&str, Option<SymbolKind>, SymbolMatch, usize, usize)> = vec![
+            ("order", None, SymbolMatch::Contains, 20, 0),
+            (
+                "order",
+                Some(SymbolKind::Function),
+                SymbolMatch::Contains,
+                20,
+                0,
+            ),
+            (
+                "order",
+                Some(SymbolKind::Class),
+                SymbolMatch::Contains,
+                30,
+                7,
+            ),
+            ("order", None, SymbolMatch::Prefix, 10, 5),
+            ("service", None, SymbolMatch::Suffix, 20, 0),
+            (
+                "orderservice",
+                Some(SymbolKind::Class),
+                SymbolMatch::Exact,
+                20,
+                0,
+            ),
+        ];
+        for (q, kind, mode, limit, offset) in cases {
+            let (direct_page, direct_total) = idx
+                .search_symbol_paged(q, kind, mode, limit, offset)
+                .await
+                .unwrap();
+            let chained = chained(&idx, q, kind, mode, limit, offset).await;
+            assert_eq!(
+                chained.total, direct_total,
+                "total differs for {q} {mode:?} {kind:?}"
+            );
+            let got: Vec<(u64, String)> = chained
+                .page
+                .iter()
+                .map(|s| (s.id, s.name.clone()))
+                .collect();
+            let want: Vec<(u64, String)> =
+                direct_page.iter().map(|s| (s.id, s.name.clone())).collect();
+            assert_eq!(got, want, "page differs for {q} {mode:?} {kind:?}");
+        }
+    }
+
+    /// Multi-step resume chain: seed đủ lớn, deadline ngắn thật → mỗi call làm
+    /// ≥1 bước rồi timed out (có thể nhiều lần), chain tới khi hoàn tất. Kết
+    /// quả cuối phải khớp direct. Vòng lặp có cận phòng hờ (entry-expiry dưới
+    /// tải nặng có thể làm 1 call không tiến) — fail hẳn thay vì treo.
+    #[tokio::test]
+    async fn search_paged_resumable_multistep_chain() {
+        let mut idx = GraphIndex::in_memory();
+        let mut results = Vec::new();
+        for (id, i) in (SYMBOL_BASE..).zip(0..4000) {
+            let name = format!("order_{i:04}");
+            results.push(result(
+                "a.ts",
+                vec![sym("a.ts", &name, id)],
+                HashMap::new(),
+                vec![],
+            ));
+        }
+        idx.ingest(&results).await.unwrap();
+
+        let (direct_page, direct_total) = idx
+            .search_symbol_paged("order", None, SymbolMatch::Contains, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(direct_total, 4000);
+
+        // Call đầu deadline hết hạn → chắc chắn timed_out (tạo checkpoint).
+        let mut cursor = idx
+            .search_symbol_paged_resumable(
+                "order",
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                Some(Instant::now()),
+            )
+            .await
+            .unwrap()
+            .cursor;
+        assert!(cursor.is_some());
+
+        // Resume với deadline thật ngắn — lặp tới khi hoàn tất (mỗi lần tiến ≥1 bước).
+        let mut completed = None;
+        for _ in 0..2000 {
+            let out = idx
+                .search_symbol_paged_resumable(
+                    "order",
+                    None,
+                    SymbolMatch::Contains,
+                    Pagination {
+                        limit: 10,
+                        offset: 0,
+                    },
+                    cursor,
+                    Some(Instant::now() + std::time::Duration::from_millis(10)),
+                )
+                .await
+                .unwrap();
+            if out.timed_out {
+                cursor = out.cursor;
+                continue;
+            }
+            completed = Some(out);
+            break;
+        }
+        let out = completed.expect("resume chain must terminate");
+        assert_eq!(out.total, direct_total);
+        let got: Vec<(u64, String)> = out.page.iter().map(|s| (s.id, s.name.clone())).collect();
+        let want: Vec<(u64, String)> = direct_page.iter().map(|s| (s.id, s.name.clone())).collect();
+        assert_eq!(got, want);
     }
 
     /// dependencies_report — module prefix từ call names, internal vs external.

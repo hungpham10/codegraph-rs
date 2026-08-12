@@ -16,7 +16,8 @@ pub async fn serve_stdio<S>(service: S) -> anyhow::Result<()>
 where
     S: rmcp::ServerHandler,
 {
-    service.serve(rmcp::transport::io::stdio())
+    service
+        .serve(rmcp::transport::io::stdio())
         .await?
         .waiting()
         .await?;
