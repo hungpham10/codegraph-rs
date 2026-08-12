@@ -155,13 +155,25 @@ fn render_markdown(resp: &ContextResponse, strip: Option<&str>) -> String {
         if !h.callers.is_empty() {
             let _ = writeln!(out, "\n**Callers** ({}):", h.callers.len());
             for c in &h.callers {
-                let _ = writeln!(out, "- `{}` — `{}:{}`", c.name, rel_path(&c.file, strip), c.line);
+                let _ = writeln!(
+                    out,
+                    "- `{}` — `{}:{}`",
+                    c.name,
+                    rel_path(&c.file, strip),
+                    c.line
+                );
             }
         }
         if !h.callees.is_empty() {
             let _ = writeln!(out, "\n**Callees** ({}):", h.callees.len());
             for c in &h.callees {
-                let _ = writeln!(out, "- `{}` — `{}:{}`", c.name, rel_path(&c.file, strip), c.line);
+                let _ = writeln!(
+                    out,
+                    "- `{}` — `{}:{}`",
+                    c.name,
+                    rel_path(&c.file, strip),
+                    c.line
+                );
             }
         }
     }

@@ -232,7 +232,11 @@ async fn search_resumable_timeout_retry_roundtrip() {
     assert!(!out.timed_out);
     assert_eq!(out.total, capped, "total must match the full scan (capped)");
     let ids: std::collections::HashSet<u64> = out.page.iter().map(|s| s.id).collect();
-    assert_eq!(ids.len(), out.page.len(), "no duplicate results after resume");
+    assert_eq!(
+        ids.len(),
+        out.page.len(),
+        "no duplicate results after resume"
+    );
     assert_eq!(out.page.len(), 20);
 
     // Resume id không tồn tại → lỗi (LLM nên retry không resume).
@@ -312,9 +316,16 @@ async fn search_symbol_paged_resume_paging() {
     assert!(last.resume.is_none(), "last page: no more resume");
 
     // Resume id này thuộc query "order" — dùng cho query khác → lỗi.
-    assert!(
-        api.search_symbol_paged_resumable("zzz", None, SymbolMatch::Contains, 10, 0, Some(resume_id), 0)
-            .await
-            .is_err()
-    );
+    assert!(api
+        .search_symbol_paged_resumable(
+            "zzz",
+            None,
+            SymbolMatch::Contains,
+            10,
+            0,
+            Some(resume_id),
+            0
+        )
+        .await
+        .is_err());
 }

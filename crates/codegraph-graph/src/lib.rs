@@ -1905,8 +1905,16 @@ impl GraphIndex {
         resume: Option<SearchCursor>,
         deadline: Option<Instant>,
     ) -> Result<PagedSearchOutcome> {
-        self.search_symbol_paged_resumable(query, None, SymbolMatch::Contains, limit, 0, resume, deadline)
-            .await
+        self.search_symbol_paged_resumable(
+            query,
+            None,
+            SymbolMatch::Contains,
+            limit,
+            0,
+            resume,
+            deadline,
+        )
+        .await
     }
 
     /// Số liệu tổng hợp.
@@ -2494,7 +2502,12 @@ mod tests {
         // 600 tên "order_*" (Function).
         for i in 0..600 {
             let name = format!("order_{i:04}");
-            results.push(result("a.ts", vec![sym("a.ts", &name, id)], HashMap::new(), vec![]));
+            results.push(result(
+                "a.ts",
+                vec![sym("a.ts", &name, id)],
+                HashMap::new(),
+                vec![],
+            ));
             id += 1;
         }
         // 300 symbol Class TRÙNG TÊN "OrderService" — dedup theo (name, id),
@@ -2508,7 +2521,12 @@ mod tests {
         // 100 tên "x_order_*" — khớp contains, không khớp prefix/exact/suffix "service".
         for i in 0..100 {
             let name = format!("x_order_{i:03}");
-            results.push(result("a.ts", vec![sym("a.ts", &name, id)], HashMap::new(), vec![]));
+            results.push(result(
+                "a.ts",
+                vec![sym("a.ts", &name, id)],
+                HashMap::new(),
+                vec![],
+            ));
             id += 1;
         }
         idx.ingest(&results).await.unwrap();
@@ -2524,7 +2542,15 @@ mod tests {
             offset: usize,
         ) -> PagedSearchOutcome {
             let first = idx
-                .search_symbol_paged_resumable(q, kind, mode, limit, offset, None, Some(Instant::now()))
+                .search_symbol_paged_resumable(
+                    q,
+                    kind,
+                    mode,
+                    limit,
+                    offset,
+                    None,
+                    Some(Instant::now()),
+                )
                 .await
                 .unwrap();
             assert!(first.timed_out, "expired deadline must time out");
@@ -2539,11 +2565,29 @@ mod tests {
 
         let cases: Vec<(&str, Option<SymbolKind>, SymbolMatch, usize, usize)> = vec![
             ("order", None, SymbolMatch::Contains, 20, 0),
-            ("order", Some(SymbolKind::Function), SymbolMatch::Contains, 20, 0),
-            ("order", Some(SymbolKind::Class), SymbolMatch::Contains, 30, 7),
+            (
+                "order",
+                Some(SymbolKind::Function),
+                SymbolMatch::Contains,
+                20,
+                0,
+            ),
+            (
+                "order",
+                Some(SymbolKind::Class),
+                SymbolMatch::Contains,
+                30,
+                7,
+            ),
             ("order", None, SymbolMatch::Prefix, 10, 5),
             ("service", None, SymbolMatch::Suffix, 20, 0),
-            ("orderservice", Some(SymbolKind::Class), SymbolMatch::Exact, 20, 0),
+            (
+                "orderservice",
+                Some(SymbolKind::Class),
+                SymbolMatch::Exact,
+                20,
+                0,
+            ),
         ];
         for (q, kind, mode, limit, offset) in cases {
             let (direct_page, direct_total) = idx
@@ -2560,10 +2604,8 @@ mod tests {
                 .iter()
                 .map(|s| (s.id, s.name.clone()))
                 .collect();
-            let want: Vec<(u64, String)> = direct_page
-                .iter()
-                .map(|s| (s.id, s.name.clone()))
-                .collect();
+            let want: Vec<(u64, String)> =
+                direct_page.iter().map(|s| (s.id, s.name.clone())).collect();
             assert_eq!(got, want, "page differs for {q} {mode:?} {kind:?}");
         }
     }
@@ -2579,7 +2621,12 @@ mod tests {
         let mut id = SYMBOL_BASE;
         for i in 0..4000 {
             let name = format!("order_{i:04}");
-            results.push(result("a.ts", vec![sym("a.ts", &name, id)], HashMap::new(), vec![]));
+            results.push(result(
+                "a.ts",
+                vec![sym("a.ts", &name, id)],
+                HashMap::new(),
+                vec![],
+            ));
             id += 1;
         }
         idx.ingest(&results).await.unwrap();
@@ -2630,11 +2677,7 @@ mod tests {
         }
         let out = completed.expect("resume chain must terminate");
         assert_eq!(out.total, direct_total);
-        let got: Vec<(u64, String)> = out
-            .page
-            .iter()
-            .map(|s| (s.id, s.name.clone()))
-            .collect();
+        let got: Vec<(u64, String)> = out.page.iter().map(|s| (s.id, s.name.clone())).collect();
         let want: Vec<(u64, String)> = direct_page.iter().map(|s| (s.id, s.name.clone())).collect();
         assert_eq!(got, want);
     }

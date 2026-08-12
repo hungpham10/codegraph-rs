@@ -758,8 +758,13 @@ impl<T: Element> Radix<T> {
                             break;
                         }
 
-                        let children =
-                            { self.storage.read().await.get_children(frame.node_id).await? };
+                        let children = {
+                            self.storage
+                                .read()
+                                .await
+                                .get_children(frame.node_id)
+                                .await?
+                        };
                         let mut descended = false;
                         while frame.cont_idx < result.continuations.len() {
                             let pp = result.continuations[frame.cont_idx];
@@ -791,15 +796,10 @@ impl<T: Element> Radix<T> {
                                     let remaining_len = pattern.len() - pp;
                                     if remaining_len <= bloom_cfg::MATCH_CAP {
                                         let bloom_bytes = {
-                                            self.storage
-                                                .read()
-                                                .await
-                                                .get_node_bloom(child)
-                                                .await?
+                                            self.storage.read().await.get_node_bloom(child).await?
                                         };
                                         if let Some(bloom_bytes) = bloom_bytes
-                                            && let Some(bf) =
-                                                BloomFilter::deserialize(&bloom_bytes)
+                                            && let Some(bf) = BloomFilter::deserialize(&bloom_bytes)
                                             && !bf.contains(&Self::from_vec(&pattern[pp..]))
                                         {
                                             continue;
@@ -843,8 +843,7 @@ impl<T: Element> Radix<T> {
                         if record != EMPTY {
                             records.push(record);
                         }
-                        let children =
-                            { self.storage.read().await.get_children(node_id).await? };
+                        let children = { self.storage.read().await.get_children(node_id).await? };
                         if child_idx < children.len() {
                             stack.push((node_id, child_idx + 1));
                             stack.push((children[child_idx], 0));

@@ -137,7 +137,10 @@ impl GraphApi {
 
     /// Dùng chung session store (resume id) — server MCP giữ store ở vòng đời
     /// server để resume id sống qua nhiều tool call.
-    pub fn new_with_sessions(index: Arc<SharedGraphIndex>, sessions: Arc<SearchSessionStore>) -> Self {
+    pub fn new_with_sessions(
+        index: Arc<SharedGraphIndex>,
+        sessions: Arc<SearchSessionStore>,
+    ) -> Self {
         Self {
             shared_index: index,
             sessions,
@@ -217,10 +220,9 @@ impl GraphApi {
         // ── Validate resume id (nếu có) ──
         let cursor = match &resume {
             Some(id) => {
-                let (stored_version, stored) = self
-                    .sessions
-                    .get(id)
-                    .ok_or_else(|| Error::Invalid("resume id expired or unknown — retry without resume".into()))?;
+                let (stored_version, stored) = self.sessions.get(id).ok_or_else(|| {
+                    Error::Invalid("resume id expired or unknown — retry without resume".into())
+                })?;
                 if stored_version != version {
                     return Err(Error::Invalid(
                         "index was re-built since this resume was created — retry without resume"
