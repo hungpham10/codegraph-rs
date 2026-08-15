@@ -1,8 +1,8 @@
+use super::{Result, Storage, StorageError, Tx, decode_chain, encode_chain};
 use async_trait::async_trait;
+use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
-use super::{decode_chain, encode_chain, Result, Storage, StorageError, Tx};
-use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 
 /// PostgreSQL implementation của `Storage` trait — multi-tenant theo thiết kế
 /// `sql/README.md`: mọi bảng dẫn đầu bằng `repo_id`, 1 repository = 1 partition.
@@ -492,12 +492,11 @@ impl Storage for PostgresStorage {
     }
 
     async fn load_next_id(&self) -> Result<u64> {
-        let row: Option<(i64,)> =
-            sqlx::query_as("SELECT next FROM sg_next_id WHERE repo_id = $1")
-                .bind(self.repo_id as i64)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db_err)?;
+        let row: Option<(i64,)> = sqlx::query_as("SELECT next FROM sg_next_id WHERE repo_id = $1")
+            .bind(self.repo_id as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
         Ok(row.map(|(v,)| v as u64).unwrap_or(0))
     }
 
@@ -616,11 +615,12 @@ impl Storage for PostgresStorage {
     }
 
     async fn load_all_files(&self) -> Result<Vec<FileInfo>> {
-        let rows = sqlx::query("SELECT path, language, bytes, lines FROM sg_files WHERE repo_id = $1")
-            .bind(self.repo_id as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
+        let rows =
+            sqlx::query("SELECT path, language, bytes, lines FROM sg_files WHERE repo_id = $1")
+                .bind(self.repo_id as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(db_err)?;
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             out.push(FileInfo {
@@ -755,12 +755,11 @@ impl PostgresStorage {
             .connect(dsn)
             .await
             .map_err(db_err)?;
-        let row: Option<(i64,)> =
-            sqlx::query_as("SELECT version FROM sg_meta WHERE repo_id = $1")
-                .bind(repo_id as i64)
-                .fetch_optional(&pool)
-                .await
-                .map_err(db_err)?;
+        let row: Option<(i64,)> = sqlx::query_as("SELECT version FROM sg_meta WHERE repo_id = $1")
+            .bind(repo_id as i64)
+            .fetch_optional(&pool)
+            .await
+            .map_err(db_err)?;
         Ok(row.map(|(v,)| v as u64).unwrap_or(0))
     }
 }
@@ -798,7 +797,8 @@ impl Tx for PostgresTx {
         prefix: Option<Vec<u8>>,
         record: Option<usize>,
     ) -> Result<()> {
-        self.ops.push(super::TxOp::UpdateNode { id, prefix, record });
+        self.ops
+            .push(super::TxOp::UpdateNode { id, prefix, record });
         Ok(())
     }
 

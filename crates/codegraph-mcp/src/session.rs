@@ -149,7 +149,10 @@ impl Session {
             let _ = ExtractConfig::ensure_repo_id(&root);
             let route = ExtractConfig::load(&root).storage_route(&root);
             let shared_index = Arc::new(SharedGraphIndex::open_route(route.clone()).await?);
-            SessionState::Ready { route, shared_index }
+            SessionState::Ready {
+                route,
+                shared_index,
+            }
         } else {
             SessionState::Empty
         };
@@ -214,7 +217,10 @@ impl Session {
             *self.format.write().await = f;
         }
         let mut st = self.state.write().await;
-        *st = SessionState::Ready { route, shared_index };
+        *st = SessionState::Ready {
+            route,
+            shared_index,
+        };
         Ok(InitOutcome { root, dir, indexed })
     }
 
@@ -268,7 +274,10 @@ impl Session {
         let was_empty = matches!(&*st, SessionState::Empty);
         if was_empty {
             let shared_index = Arc::new(SharedGraphIndex::open_route(route.clone()).await?);
-            *st = SessionState::Ready { route, shared_index };
+            *st = SessionState::Ready {
+                route,
+                shared_index,
+            };
         } else if let SessionState::Ready {
             route: cur,
             shared_index,

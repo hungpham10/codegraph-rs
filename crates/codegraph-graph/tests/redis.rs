@@ -15,7 +15,7 @@
 #![cfg(feature = "redis")]
 
 use codegraph_core::{
-    CallRecord, EffectType, ScopeLevel, StorageRoute, SYMBOL_BASE, Symbol, SymbolKind,
+    CallRecord, EffectType, SYMBOL_BASE, ScopeLevel, StorageRoute, Symbol, SymbolKind,
 };
 use codegraph_graph::{GraphIndex, ParseResult};
 use std::collections::HashMap;

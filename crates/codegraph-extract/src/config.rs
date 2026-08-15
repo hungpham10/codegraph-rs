@@ -194,11 +194,7 @@ impl ExtractConfig {
                 })
             }
             StorageKind::Sqlite | StorageKind::Lmdb | StorageKind::Redis => {
-                let dsn = self
-                    .storage
-                    .dsn
-                    .clone()
-                    .or_else(|| self.storage_dsn(root));
+                let dsn = self.storage.dsn.clone().or_else(|| self.storage_dsn(root));
                 Some(StorageRoute::Local(dsn?))
             }
         }

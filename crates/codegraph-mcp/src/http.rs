@@ -80,7 +80,6 @@ pub async fn serve_http(
 // Deprecated original serve_http – replaced by extended version with observability and auth support.
 // The old implementation has been removed to avoid duplicate symbol definitions.
 
-
 /// Smoke test: POST `initialize` qua tower oneshot (không cần TCP) → HTTP
 /// 200 + response SSE chứa `serverInfo.name = codegraph`. Module này chỉ
 /// compile khi feature `http` bật (lib.rs gate toàn bộ `mod http`).

@@ -1,8 +1,8 @@
+use super::{Result, Storage, StorageError, Tx, decode_chain, encode_chain};
 use async_trait::async_trait;
+use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 use sqlx::mysql::{MySqlPoolOptions, MySqlRow};
 use sqlx::{MySqlPool, Row};
-use super::{decode_chain, encode_chain, Result, Storage, StorageError, Tx};
-use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 
 /// MySQL implementation của `Storage` trait — multi-tenant (mọi bảng dẫn đầu bằng
 /// `repo_id`), theo thiết kế `sql/README.md`. Instance được bind vào một `repo_id`.
@@ -314,7 +314,7 @@ impl Storage for MySqlStorage {
             .bind(self.repo_id as i64)
             .execute(&self.pool)
             .await
-        .map_err(db_err)?;
+            .map_err(db_err)?;
         Ok(())
     }
 
@@ -366,7 +366,7 @@ impl Storage for MySqlStorage {
             .bind(self.repo_id as i64)
             .execute(&self.pool)
             .await
-        .map_err(db_err)?;
+            .map_err(db_err)?;
         Ok(())
     }
 
@@ -402,7 +402,7 @@ impl Storage for MySqlStorage {
             .bind(self.repo_id as i64)
             .execute(&self.pool)
             .await
-        .map_err(db_err)?;
+            .map_err(db_err)?;
         Ok(())
     }
 
@@ -535,7 +535,7 @@ impl Storage for MySqlStorage {
             .bind(self.repo_id as i64)
             .fetch_all(&self.pool)
             .await
-        .map_err(db_err)?;
+            .map_err(db_err)?;
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             let func: i64 = r.try_get("func").map_err(db_err)?;
@@ -576,7 +576,7 @@ impl Storage for MySqlStorage {
             .bind(self.repo_id as i64)
             .fetch_all(&self.pool)
             .await
-        .map_err(db_err)?;
+            .map_err(db_err)?;
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             let name: String = r.try_get("name").map_err(db_err)?;
@@ -604,11 +604,12 @@ impl Storage for MySqlStorage {
     }
 
     async fn load_all_files(&self) -> Result<Vec<FileInfo>> {
-        let rows = sqlx::query("SELECT path, language, bytes, lines FROM sg_files WHERE repo_id = ?")
-            .bind(self.repo_id as i64)
-            .fetch_all(&self.pool)
-            .await
-        .map_err(db_err)?;
+        let rows =
+            sqlx::query("SELECT path, language, bytes, lines FROM sg_files WHERE repo_id = ?")
+                .bind(self.repo_id as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(db_err)?;
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             out.push(FileInfo {
@@ -626,7 +627,7 @@ impl Storage for MySqlStorage {
             .bind(self.repo_id as i64)
             .fetch_optional(&self.pool)
             .await
-        .map_err(db_err)?;
+            .map_err(db_err)?;
         Ok(row.map(|(v,)| v as u64).unwrap_or(0))
     }
 
@@ -683,11 +684,13 @@ impl Storage for MySqlStorage {
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
-        sqlx::query("INSERT IGNORE INTO rt_nodes (repo_id, id, prefix, record) VALUES (?, 0, '', 0)")
-            .bind(rid)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
+        sqlx::query(
+            "INSERT IGNORE INTO rt_nodes (repo_id, id, prefix, record) VALUES (?, 0, '', 0)",
+        )
+        .bind(rid)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
         Ok(())
     }
@@ -784,7 +787,8 @@ impl Tx for MySqlTx {
         prefix: Option<Vec<u8>>,
         record: Option<usize>,
     ) -> Result<()> {
-        self.ops.push(super::TxOp::UpdateNode { id, prefix, record });
+        self.ops
+            .push(super::TxOp::UpdateNode { id, prefix, record });
         Ok(())
     }
 

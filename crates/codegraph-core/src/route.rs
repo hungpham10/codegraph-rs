@@ -7,8 +7,7 @@
 ///
 /// `PartialEq` dùng để session/MCP so sánh route hiện tại với route mới khi root
 /// đổi (`ensure_ready` swap index nếu khác).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StorageRoute {
     /// In-memory (test/dev, không persist).
     #[default]
@@ -65,4 +64,3 @@ impl StorageRoute {
         }
     }
 }
-

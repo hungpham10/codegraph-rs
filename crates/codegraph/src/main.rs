@@ -268,7 +268,14 @@ async fn cmd_serve(
         if use_root && is_initialized(root) {
             watcher::spawn(root.to_path_buf(), storage_dsn(root));
         }
-        return codegraph_mcp::serve_http(format, addr, allowed_hosts, enable_observability, api_key).await;
+        return codegraph_mcp::serve_http(
+            format,
+            addr,
+            allowed_hosts,
+            enable_observability,
+            api_key,
+        )
+        .await;
     }
     if !mcp {
         return Err(anyhow!(

@@ -127,7 +127,9 @@ impl SharedGraphIndex {
                     Some(StorageRoute::Local(d)) => d.as_str(),
                     _ => return None,
                 };
-                crate::storage::lmdb::probe_version(trim_scheme(dsn)).await.ok()
+                crate::storage::lmdb::probe_version(trim_scheme(dsn))
+                    .await
+                    .ok()
             }
             #[cfg(feature = "postgres")]
             "postgres" => {

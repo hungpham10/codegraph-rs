@@ -38,13 +38,13 @@ pub use crate::search::Search;
 use crate::search::SearchResume;
 #[cfg(feature = "lmdb")]
 pub use crate::storage::lmdb::LmdbStorage;
+#[cfg(feature = "mysql")]
+pub use crate::storage::mysql::MySqlStorage;
+#[cfg(feature = "postgres")]
+pub use crate::storage::postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use crate::storage::sqlite::SqliteStorage;
 pub use crate::storage::{InMemoryStorage, Storage, Tx};
-#[cfg(feature = "postgres")]
-pub use crate::storage::postgres::PostgresStorage;
-#[cfg(feature = "mysql")]
-pub use crate::storage::mysql::MySqlStorage;
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
     EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult,
@@ -368,16 +368,20 @@ impl GraphIndex {
             .trim_start_matches("redis://")
             .rsplit('/')
             .next()
-            .and_then(|s| if s.is_empty() { None } else { s.parse::<u32>().ok() })
+            .and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    s.parse::<u32>().ok()
+                }
+            })
             .unwrap_or(0);
-        let client = redis::Client::open(dsn)
-            .map_err(|e| Error::Db(format!("redis client: {e}")))?;
-        let storage = crate::storage::redis::RedisStorage::new(
-            client,
-            &format!("codegraph:idx:{db}"),
-        )
-        .await
-        .map_err(serr)?;
+        let client =
+            redis::Client::open(dsn).map_err(|e| Error::Db(format!("redis client: {e}")))?;
+        let storage =
+            crate::storage::redis::RedisStorage::new(client, &format!("codegraph:idx:{db}"))
+                .await
+                .map_err(serr)?;
         let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
         let mut idx = Self::new_with_storage(storage);
         idx.rebuild().await?;
@@ -408,9 +412,9 @@ impl GraphIndex {
                 let shard = route.shard_of(repo_id).ok_or_else(|| {
                     Error::Db("không tính được shard từ StorageRoute::Sharded".into())
                 })?;
-                let dsn = dsns.get(shard).ok_or_else(|| {
-                    Error::Db(format!("shard {shard} vượt quá số lượng DSN"))
-                })?;
+                let dsn = dsns
+                    .get(shard)
+                    .ok_or_else(|| Error::Db(format!("shard {shard} vượt quá số lượng DSN")))?;
                 let result: Result<Self> = if dsn.starts_with("postgres://") {
                     #[cfg(feature = "postgres")]
                     {
@@ -458,7 +462,6 @@ impl GraphIndex {
             }
         }
     }
-
 
     fn new_with_storage(storage: Arc<RwLock<dyn crate::storage::Storage>>) -> Self {
         // Name engine luôn in-memory (như semgraph SearchIndex) — storage riêng
