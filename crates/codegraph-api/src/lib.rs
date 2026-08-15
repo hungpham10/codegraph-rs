@@ -298,15 +298,14 @@ impl GraphApi {
                             .into(),
                     ));
                 }
-                let c = match stored {
-                    ResumeCursor::Name(c) => c,
-                    _ => {
-                        return Err(Error::Invalid(
+                let c =
+                    match stored {
+                        ResumeCursor::Name(c) => c,
+                        _ => return Err(Error::Invalid(
                             "resume id was created for a different query — retry without resume"
                                 .into(),
-                        ))
-                    }
-                };
+                        )),
+                    };
                 if c.query != q || c.mode != mode || c.kind != kind {
                     return Err(Error::Invalid(
                         "resume id was created for a different query — retry without resume".into(),

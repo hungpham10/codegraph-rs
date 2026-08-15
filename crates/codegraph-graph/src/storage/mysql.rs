@@ -588,9 +588,9 @@ impl Storage for MySqlStorage {
 
     async fn upsert_file(&mut self, f: &FileInfo) -> Result<()> {
         sqlx::query(
-            "INSERT INTO sg_files (repo_id, path, language, bytes, lines) VALUES (?, ?, ?, ?, ?) \
+            "INSERT INTO sg_files (repo_id, path, language, bytes, `lines`) VALUES (?, ?, ?, ?, ?) \
              ON DUPLICATE KEY UPDATE \
-                language = VALUES(language), bytes = VALUES(bytes), lines = VALUES(lines)",
+                language = VALUES(language), bytes = VALUES(bytes), `lines` = VALUES(`lines`)",
         )
         .bind(self.repo_id as i64)
         .bind(&f.path)
@@ -605,7 +605,7 @@ impl Storage for MySqlStorage {
 
     async fn load_all_files(&self) -> Result<Vec<FileInfo>> {
         let rows =
-            sqlx::query("SELECT path, language, bytes, lines FROM sg_files WHERE repo_id = ?")
+            sqlx::query("SELECT path, language, bytes, `lines` FROM sg_files WHERE repo_id = ?")
                 .bind(self.repo_id as i64)
                 .fetch_all(&self.pool)
                 .await

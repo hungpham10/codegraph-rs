@@ -30,7 +30,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS repos (
     repo_id    BIGINT      NOT NULL PRIMARY KEY,     -- repo_id (số u64, random lúc init)
     shard      INT         NOT NULL,                 -- shard server được gán (index vào dsns)
-    root       TEXT        NOT NULL,                 -- root path chuẩn để lookup
+    root       TEXT,                                 -- root path chuẩn để lookup (nullable: route có thể không có root)
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- Lookup theo root (adopt cùng repo_id cho clone/máy khác).

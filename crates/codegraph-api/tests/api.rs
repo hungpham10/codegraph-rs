@@ -203,7 +203,12 @@ async fn seed_annotations(db: &str, count: usize) {
     for (id, i) in (SYMBOL_BASE..).zip(0..count) {
         let mut s = sym(id, &format!("svc_{i}"));
         s.annotations = vec![codegraph_core::Annotation {
-            name: (if i % 2 == 0 { "@RestController" } else { "@Service" }).into(),
+            name: (if i % 2 == 0 {
+                "@RestController"
+            } else {
+                "@Service"
+            })
+            .into(),
             args: HashMap::new(),
             line: 1,
         }];
@@ -275,9 +280,7 @@ async fn search_resumable_timeout_retry_roundtrip() {
         .await
         .unwrap();
     assert!(first.timed_out, "expired deadline must time out");
-    let resume_id = first
-        .resume
-        .expect("timeout must carry a resume id");
+    let resume_id = first.resume.expect("timeout must carry a resume id");
 
     // Retry: cùng args + resume, không giới hạn thời gian → hoàn tất.
     let out = api
@@ -325,7 +328,10 @@ async fn annotation_search_resumable_timeout_retry() {
         .search_by_annotation_resumable(
             "@RestController",
             None,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             None,
             codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
         )
@@ -339,7 +345,10 @@ async fn annotation_search_resumable_timeout_retry() {
         .search_by_annotation_resumable(
             "@RestController",
             None,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             Some(resume_id.clone()),
             0,
         )
@@ -356,7 +365,10 @@ async fn annotation_search_resumable_timeout_retry() {
         api.search_by_annotation_resumable(
             "@RestController",
             None,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
             Some("deadbeef00000000".into()),
             0,
         )
@@ -369,7 +381,10 @@ async fn annotation_search_resumable_timeout_retry() {
         api.search_by_annotation_resumable(
             "@Service",
             None,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
             Some(resume_id),
             0,
         )
@@ -391,7 +406,10 @@ async fn references_resumable_timeout_retry() {
     let first = api
         .references_resumable(
             "log.println",
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             None,
             codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
         )
@@ -403,7 +421,10 @@ async fn references_resumable_timeout_retry() {
     let out = api
         .references_resumable(
             "log.println",
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             Some(resume_id.clone()),
             0,
         )
@@ -419,7 +440,10 @@ async fn references_resumable_timeout_retry() {
     assert!(
         api.references_resumable(
             "log.println",
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
             Some("deadbeef00000000".into()),
             0,
         )
@@ -431,7 +455,10 @@ async fn references_resumable_timeout_retry() {
     assert!(
         api.references_resumable(
             "other.call",
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
             Some(resume_id),
             0,
         )
@@ -456,7 +483,10 @@ async fn flow_search_resumable_timeout_retry() {
     let first = api
         .search_flow_pattern_resumable(
             &pattern,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             None,
             codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
         )
@@ -468,21 +498,31 @@ async fn flow_search_resumable_timeout_retry() {
     let out = api
         .search_flow_pattern_resumable(
             &pattern,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             Some(resume_id.clone()),
             0,
         )
         .await
         .unwrap();
     assert!(!out.timed_out);
-    assert_eq!(out.page.len(), 2, "two functions have chain containing callee");
+    assert_eq!(
+        out.page.len(),
+        2,
+        "two functions have chain containing callee"
+    );
     assert!(out.resume.is_none());
 
     // Resume id của pattern khác → lỗi.
     assert!(
         api.search_flow_pattern_resumable(
             &caller.to_string(),
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
             Some(resume_id),
             0,
         )

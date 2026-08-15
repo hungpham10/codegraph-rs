@@ -460,7 +460,12 @@ pub async fn dispatch_with_api(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(20000);
             let out = api
-                .search_flow_pattern_resumable(pattern, Pagination { limit, offset }, resume, timeout_ms)
+                .search_flow_pattern_resumable(
+                    pattern,
+                    Pagination { limit, offset },
+                    resume,
+                    timeout_ms,
+                )
                 .await?;
             if out.timed_out {
                 return Err(Error::Other(format!(
@@ -691,7 +696,12 @@ pub async fn dispatch_with_api(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(20000);
             let out = api
-                .list_by_kind_resumable(SymbolKind::Class, Pagination { limit, offset }, resume, timeout_ms)
+                .list_by_kind_resumable(
+                    SymbolKind::Class,
+                    Pagination { limit, offset },
+                    resume,
+                    timeout_ms,
+                )
                 .await?;
             if out.timed_out {
                 return Err(Error::Other(format!(
@@ -734,7 +744,12 @@ pub async fn dispatch_with_api(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(20000);
             let out = api
-                .list_by_kind_resumable(SymbolKind::Interface, Pagination { limit, offset }, resume, timeout_ms)
+                .list_by_kind_resumable(
+                    SymbolKind::Interface,
+                    Pagination { limit, offset },
+                    resume,
+                    timeout_ms,
+                )
                 .await?;
             if out.timed_out {
                 return Err(Error::Other(format!(
@@ -821,7 +836,13 @@ pub async fn dispatch_with_api(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(20000);
             let out = api
-                .search_by_annotation_resumable(annotation, kind, Pagination { limit, offset }, resume, timeout_ms)
+                .search_by_annotation_resumable(
+                    annotation,
+                    kind,
+                    Pagination { limit, offset },
+                    resume,
+                    timeout_ms,
+                )
                 .await?;
             if out.timed_out {
                 return Err(Error::Other(format!(

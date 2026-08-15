@@ -35,7 +35,7 @@
 CREATE TABLE IF NOT EXISTS repos (
     repo_id    BIGINT       NOT NULL PRIMARY KEY,     -- repo_id (số u64, random lúc init)
     shard      INT          NOT NULL,                 -- shard server được gán (index vào dsns)
-    root       VARCHAR(700) NOT NULL,                 -- root path chuẩn để lookup
+    root       VARCHAR(700),                        -- root path chuẩn để lookup (nullable: route có thể không có root)
     created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 -- Lookup theo root (adopt cùng repo_id cho clone/máy khác).

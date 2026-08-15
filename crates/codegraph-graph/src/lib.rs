@@ -1542,7 +1542,11 @@ impl GraphIndex {
             Err(_) => return Ok((Vec::new(), None)),
         };
         let limit = if limit == 0 { usize::MAX } else { limit };
-        let cap = if limit == usize::MAX { usize::MAX } else { offset + limit };
+        let cap = if limit == usize::MAX {
+            usize::MAX
+        } else {
+            offset + limit
+        };
         let mut out = Vec::new();
         for (record, _) in hits {
             if deadline.is_some_and(|dl| Instant::now() >= dl) {
@@ -1653,7 +1657,11 @@ impl GraphIndex {
                 .then(a.func_id.cmp(&b.func_id))
         });
         let limit = if limit == 0 { usize::MAX } else { limit };
-        let cap = if limit == usize::MAX { usize::MAX } else { offset + limit };
+        let cap = if limit == usize::MAX {
+            usize::MAX
+        } else {
+            offset + limit
+        };
         if out.len() > cap {
             out.truncate(cap);
         }
