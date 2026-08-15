@@ -72,7 +72,8 @@ async fn rdbms_ingest_reopen_roundtrip() {
     let repo_id: u64 = std::env::var("TEST_RDBMS_REPO_ID")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + 100; // partition riêng: test chạy song song với rdbms_empty_ingest_wipes_store
 
     let route = StorageRoute::Sharded {
         dsns: vec![dsn],
@@ -138,7 +139,8 @@ async fn rdbms_empty_ingest_wipes_store() {
     let repo_id: u64 = std::env::var("TEST_RDBMS_REPO_ID")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + 200; // partition riêng: test chạy song song với rdbms_ingest_reopen_roundtrip
 
     let route = StorageRoute::Sharded {
         dsns: vec![dsn],

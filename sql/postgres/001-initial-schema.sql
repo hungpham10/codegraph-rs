@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS sg_symbols (
     end_line    INTEGER     NOT NULL DEFAULT 0,
     signature   TEXT,
     doc         TEXT,
-    annotations JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    annotations TEXT        NOT NULL DEFAULT '[]',       -- lưu JSON string (app ghi/đọc bằng serde_json to_string/from_str)
     language    TEXT        NOT NULL DEFAULT '',
     PRIMARY KEY (repo_id, id)
 );

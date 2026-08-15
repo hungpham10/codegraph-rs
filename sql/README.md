@@ -64,7 +64,7 @@ parquet ở phase DuckDB):
 
 | Bảng | PK | Nội dung |
 |---|---|---|
-| `sg_symbols` | `(repo_id, id)` | `Symbol` — cột thật; `annotations` là cột JSON |
+| `sg_symbols` | `(repo_id, id)` | `Symbol` — cột thật; `annotations` là cột `TEXT` (app lưu JSON string qua `serde_json`, đọc bằng `from_str` — không dùng JSON/JSONB để sqlx decode `String` được) |
 | `sg_files` | `(repo_id, path)` | `FileInfo` |
 | `sg_call_records` | `(repo_id, func)` | call records của từng function (JSON bytes) |
 | `sg_call_names` | `(repo_id, name)` | inverted index call name → call sites (JSON bytes) |

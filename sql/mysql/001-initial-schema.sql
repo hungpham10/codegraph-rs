@@ -10,8 +10,10 @@
 --     khóa hoặc được index dùng `VARCHAR(700)` (đủ ngắn để nằm dưới giới hạn
 --     index key 3072 bytes với utf8mb4, kể cả PK ghép với repo_id). Trường hợp
 --     key dài hơn 700 ký tự → dùng hash key (md5/sha256) ở phase sau.
---   * `COLLATE utf8mb4_bin` giữ so sánh chính xác theo byte (name/path là key
---     case-sensitive; collation mặc định *_ci sẽ gộp 'Foo'/'foo').
+--   * `COLLATE utf8mb4_0900_as_cs` giữ so sánh case-sensitive (name/path là key
+--     phân biệt hoa/thường) NHƯNG vẫn là charset utf8mb4 (không phải binary) —
+--     sqlx decode VARCHAR/TEXT thành String được. Collations *_bin bị MySQL báo
+--     về client dưới dạng VARBINARY nên sqlx từ chối decode thành String.
 --   * id dùng BIGINT signed như sqlite hiện tại (u64 → i64, không đổi hành vi).
 -- =============================================================================
 
@@ -19,7 +21,7 @@
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version    VARCHAR(64)  NOT NULL PRIMARY KEY,
     applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Entity store (sg_*) — partition theo repo_id
@@ -40,12 +42,12 @@ CREATE TABLE IF NOT EXISTS sg_symbols (
     end_line    INT          NOT NULL DEFAULT 0,
     signature   TEXT,
     doc         TEXT,
-    annotations JSON         NOT NULL,             -- app luôn ghi giá trị (JSON không cho DEFAULT)
+    annotations TEXT        NOT NULL,                 -- lưu JSON string (app luôn ghi giá trị nên không cần DEFAULT)
     language    VARCHAR(64)  NOT NULL DEFAULT '',
     PRIMARY KEY (repo_id, id),
     KEY idx_sg_symbols_repo_file (repo_id, file),
     KEY idx_sg_symbols_repo_name (repo_id, name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- FileInfo — metadata file đã index.
 -- `lines` được quote vì LINES là reserved word trong MySQL (LOAD DATA ... LINES).
@@ -56,7 +58,7 @@ CREATE TABLE IF NOT EXISTS sg_files (
     bytes    BIGINT       NOT NULL DEFAULT 0,
     `lines`  INT          NOT NULL DEFAULT 0,
     PRIMARY KEY (repo_id, path)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Call records của từng function — JSON bytes của `Vec<CallRecord>`.
 CREATE TABLE IF NOT EXISTS sg_call_records (
@@ -64,7 +66,7 @@ CREATE TABLE IF NOT EXISTS sg_call_records (
     func    BIGINT      NOT NULL,                  -- caller symbol id
     records LONGBLOB    NOT NULL,                  -- serde_json bytes
     PRIMARY KEY (repo_id, func)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Inverted index call name → call sites — JSON bytes của `Vec<CallSite>`.
 CREATE TABLE IF NOT EXISTS sg_call_names (
@@ -72,21 +74,21 @@ CREATE TABLE IF NOT EXISTS sg_call_names (
     name    VARCHAR(700) NOT NULL,                 -- tên call (lowercase)
     sites   LONGBLOB     NOT NULL,                 -- serde_json bytes
     PRIMARY KEY (repo_id, name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Version index của repo — `SharedGraphIndex::ensure_fresh` probe ở đây.
 CREATE TABLE IF NOT EXISTS sg_meta (
     repo_id BIGINT NOT NULL,
     version BIGINT      NOT NULL DEFAULT 0,
     PRIMARY KEY (repo_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Registry counter — symbol id tiếp theo (SYMBOL_BASE = 100).
 CREATE TABLE IF NOT EXISTS sg_next_id (
     repo_id BIGINT NOT NULL,
     next    BIGINT      NOT NULL DEFAULT 100,      -- SYMBOL_BASE
     PRIMARY KEY (repo_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Radix trie (rt_*) — partition theo repo_id, giữ nguyên sharding element % 64
@@ -99,7 +101,7 @@ CREATE TABLE IF NOT EXISTS rt_nodes (
     prefix  LONGBLOB    NOT NULL,
     record  BIGINT      NOT NULL DEFAULT 0,
     PRIMARY KEY (repo_id, id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Cạnh cha-con của trie.
 CREATE TABLE IF NOT EXISTS rt_children (
@@ -108,7 +110,7 @@ CREATE TABLE IF NOT EXISTS rt_children (
     child   BIGINT      NOT NULL,
     PRIMARY KEY (repo_id, parent, child),
     KEY idx_rt_children_repo_parent (repo_id, parent)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Gốc mỗi shard: shard ∈ [0, 64). root = 0 nghĩa EMPTY — row tạo LAZY lần đầu
 -- dùng shard (giống sqlite: get_root trả EMPTY khi thiếu row).
@@ -117,7 +119,7 @@ CREATE TABLE IF NOT EXISTS rt_roots (
     shard   INT         NOT NULL,
     root    BIGINT      NOT NULL DEFAULT 0,        -- EMPTY = 0
     PRIMARY KEY (repo_id, shard)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Metadata opaque theo record (call-site info v.v.).
 CREATE TABLE IF NOT EXISTS rt_meta (
@@ -125,7 +127,7 @@ CREATE TABLE IF NOT EXISTS rt_meta (
     record  BIGINT      NOT NULL,
     meta    LONGBLOB,
     PRIMARY KEY (repo_id, record)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Độ dài key (số element) theo record — filter depth trong search.
 CREATE TABLE IF NOT EXISTS rt_keylen (
@@ -133,7 +135,7 @@ CREATE TABLE IF NOT EXISTS rt_keylen (
     record  BIGINT      NOT NULL,
     len     INT         NOT NULL,
     PRIMARY KEY (repo_id, record)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Shortcut index (substring search): node có prefix chứa elem → ứng viên KMP.
 CREATE TABLE IF NOT EXISTS rt_shortcuts (
@@ -143,7 +145,7 @@ CREATE TABLE IF NOT EXISTS rt_shortcuts (
     node_id BIGINT      NOT NULL,
     PRIMARY KEY (repo_id, shard, elem(255), node_id),
     KEY idx_rt_shortcuts_repo_shard_elem (repo_id, shard, elem(255))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Chain của function (record → bytes u64 LE mỗi element). Nguồn chân lý để
 -- rebuild engine khi reopen (`GraphIndex::rebuild` → `all_chains()`).
@@ -152,7 +154,7 @@ CREATE TABLE IF NOT EXISTS rt_chains (
     record  BIGINT      NOT NULL,                  -- func id
     chain   LONGBLOB    NOT NULL,
     PRIMARY KEY (repo_id, record)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Edge data stream (legacy — Storage trait còn giữ, GraphIndex chưa dùng).
 CREATE TABLE IF NOT EXISTS rt_edges (
@@ -160,7 +162,7 @@ CREATE TABLE IF NOT EXISTS rt_edges (
     id      BIGINT      NOT NULL,
     data    LONGBLOB,
     PRIMARY KEY (repo_id, id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Node metadata stream (Node JSON theo element — legacy, chưa dùng).
 CREATE TABLE IF NOT EXISTS rt_node_meta (
@@ -168,7 +170,7 @@ CREATE TABLE IF NOT EXISTS rt_node_meta (
     elem    BIGINT      NOT NULL,
     meta    LONGBLOB,
     PRIMARY KEY (repo_id, elem)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Bloom filter per node (feature `bloom-search`).
 CREATE TABLE IF NOT EXISTS rt_node_blooms (
@@ -176,14 +178,14 @@ CREATE TABLE IF NOT EXISTS rt_node_blooms (
     id      BIGINT      NOT NULL,
     bloom   LONGBLOB,
     PRIMARY KEY (repo_id, id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- Node-id allocator (per repo — các shard dùng chung một dãy id như sqlite).
 CREATE TABLE IF NOT EXISTS rt_counter (
     repo_id BIGINT NOT NULL,
     next    BIGINT      NOT NULL DEFAULT 1,
     PRIMARY KEY (repo_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pattern dùng chung (thực thi ở tầng storage — KHÔNG nằm trong migration,
