@@ -68,6 +68,12 @@ async fn redis_ingest_reopen_roundtrip() {
             return;
         }
     };
+    // Use DB 1 to isolate from other test (DB 2) and internal tests (DB 15)
+    let dsn = if dsn.contains('/') && dsn.rsplit('/').next().unwrap().parse::<u32>().is_ok() {
+        dsn // already has DB number
+    } else {
+        format!("{}/1", dsn.trim_end_matches('/'))
+    };
 
     let calls = vec![CallRecord {
         caller_id: SYMBOL_BASE,
@@ -126,6 +132,12 @@ async fn redis_empty_ingest_wipes_store() {
             eprintln!("skip: TEST_REDIS_DSN not set");
             return;
         }
+    };
+    // Use DB 2 to isolate from other test (DB 1)
+    let dsn = if dsn.contains('/') && dsn.rsplit('/').next().unwrap().parse::<u32>().is_ok() {
+        dsn // already has DB number
+    } else {
+        format!("{}/2", dsn.trim_end_matches('/'))
     };
 
     let r = result(
