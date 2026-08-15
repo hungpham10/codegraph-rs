@@ -46,16 +46,39 @@ enum Cmd {
     },
     /// Remove the .codegraph/ directory.
     Deinit,
-    /// Run as MCP server over stdio.
+    /// Run as MCP server (stdio qua `--mcp`, hoặc Streamable HTTP qua `--http`).
     Serve {
         #[arg(long)]
         mcp: bool,
+        /// Serve qua Streamable HTTP (POST/GET/DELETE + SSE) thay vì stdio —
+        /// mount ở cả `/` và `/mcp`. Default bind 0.0.0.0:8123 (docker-friendly).
+        #[arg(long)]
+        http: bool,
+        /// Địa chỉ bind cho `--http` (`HOST:PORT`).
+        #[arg(long, default_value = "0.0.0.0:8123")]
+        addr: std::net::SocketAddr,
+        /// `Host` header được chấp nhận bởi `--http` (lặp được) — thêm IP hoặc
+        /// hostname LAN để mở ngoài loopback (rmcp chặn host lạ chống DNS rebinding).
+        #[arg(long = "allow-host")]
+        allow_host: Vec<String>,
+        /// Bỏ kiểm tra `Host` header cho `--http` (trusted LAN / docker) — chấp
+        /// nhận mọi host. Không khuyến khích cho deployment công khai.
+        #[arg(long = "allow-any-host")]
+        allow_any_host: bool,
         /// Output format cho mọi response (Binance-style minimal):
         /// minimize (mặc định) = symbol thành mảng vị trí cố định; medium = giữ
         /// key, lược field có value mặc định. Ghi đè được theo session
         /// (codegraph_init {"format": ...}) và từng call (arg "format").
         #[arg(long, value_enum, default_value_t = OutputFormat::Minimize)]
         format: OutputFormat,
+        /// Bật endpoint observability: `/health`, `/metrics`, `/metrics/prometheus`.
+        #[arg(long = "enable-observability", default_value_t = true)]
+        enable_observability: bool,
+        /// API key cho HTTP MCP server (lặp được). Nếu set, yêu cầu header
+        /// `Authorization: Bearer <key>` cho route MCP (`/` và `/mcp`).
+        /// Health/metrics endpoints KHÔNG yêu cầu auth.
+        #[arg(long = "api-key")]
+        api_key: Vec<String>,
     },
 }
 
@@ -103,7 +126,29 @@ async fn main() -> Result<()> {
     match cmd {
         Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
         Cmd::Deinit => cmd_deinit(&root),
-        Cmd::Serve { mcp, format } => cmd_serve(&root, mcp, format.style()).await,
+        Cmd::Serve {
+            mcp,
+            http,
+            addr,
+            allow_host,
+            allow_any_host,
+            format,
+            enable_observability,
+            api_key,
+        } => {
+            cmd_serve(
+                &root,
+                mcp,
+                http,
+                addr,
+                allow_host,
+                allow_any_host,
+                format.style(),
+                enable_observability,
+                api_key,
+            )
+            .await
+        }
     }
 }
 
@@ -124,15 +169,18 @@ async fn cmd_default(_root: &Utf8Path) -> Result<()> {
 }
 
 /// DSN (kèm scheme) của backend storage trong config — `None` = in-memory.
+/// Chỉ dùng cho watcher (cần DSN string); RDBMS trả `None` (watcher không spawn).
 fn storage_dsn(root: &Utf8Path) -> Option<String> {
     codegraph_extract::ExtractConfig::load(root).storage_dsn(root)
 }
 
-/// Mở index theo backend đã config (DSN scheme → `GraphIndex::open`).
+/// Mở index theo backend đã config (`StorageRoute` → `GraphIndex::open_route`).
 async fn open_index(root: &Utf8Path) -> Result<GraphIndex> {
-    // `.codegraph/` đã được init (có config) — lúc này storage dsn đã biết.
-    match storage_dsn(root) {
-        Some(dsn) => Ok(GraphIndex::open(&dsn).await?),
+    // `.codegraph/` đã được init (có config) — lúc này storage route đã biết.
+    // RDBMS cần repo_id (partition key) — sinh nếu thiếu (self-heal).
+    let _ = codegraph_extract::ExtractConfig::ensure_repo_id(root);
+    match codegraph_extract::ExtractConfig::load(root).storage_route(root) {
+        Some(route) => Ok(GraphIndex::open_route(&route).await?),
         None => Ok(GraphIndex::in_memory()),
     }
 }
@@ -142,6 +190,8 @@ async fn open_index(root: &Utf8Path) -> Result<GraphIndex> {
 async fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
     let dir = codegraph_extract::init_project(root)?;
     eprintln!("initialized {}", dir);
+    // RDBMS cần repo_id (partition key) — sinh ngẫu nhiên nếu thiếu (self-heal).
+    let _ = codegraph_extract::ExtractConfig::ensure_repo_id(root);
 
     if do_index {
         let stats = index_all(root, show_progress).await?;
@@ -187,9 +237,51 @@ fn cmd_deinit(root: &Utf8Path) -> Result<()> {
 }
 
 /// `codegraph serve --mcp`: chạy MCP server trên stdio.
-async fn cmd_serve(root: &Utf8Path, mcp: bool, format: codegraph_mcp::OutputStyle) -> Result<()> {
+/// `codegraph serve --http`: chạy MCP server trên Streamable HTTP.
+#[allow(clippy::too_many_arguments)]
+async fn cmd_serve(
+    root: &Utf8Path,
+    mcp: bool,
+    http: bool,
+    addr: std::net::SocketAddr,
+    allow_host: Vec<String>,
+    allow_any_host: bool,
+    format: codegraph_mcp::OutputStyle,
+    enable_observability: bool,
+    api_key: Vec<String>,
+) -> Result<()> {
+    if http {
+        // Mỗi session HTTP (mcp-session-id) được rmcp cấp một CodegraphServer
+        // riêng → session bắt đầu TRỐNG; agent bind root bằng codegraph_init
+        // trong phiên của mình. `--path` lúc khởi động chỉ gắn watcher (như
+        // stdio), không pre-seed root cho mọi phiên HTTP.
+        let mut allowed_hosts = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ];
+        if allow_any_host {
+            allowed_hosts.clear(); // rỗng = rmcp chấp nhận mọi Host header
+        } else {
+            allowed_hosts.extend(allow_host);
+        }
+        let use_root = root.as_str() != "/";
+        if use_root && is_initialized(root) {
+            watcher::spawn(root.to_path_buf(), storage_dsn(root));
+        }
+        return codegraph_mcp::serve_http(
+            format,
+            addr,
+            allowed_hosts,
+            enable_observability,
+            api_key,
+        )
+        .await;
+    }
     if !mcp {
-        return Err(anyhow!("only --mcp transport supported"));
+        return Err(anyhow!(
+            "only --mcp (stdio) or --http (Streamable HTTP) supported"
+        ));
     }
 
     // MCP is session-driven: the agent binds a workspace at runtime via

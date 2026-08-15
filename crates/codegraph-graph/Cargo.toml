@@ -42,6 +42,10 @@ default = []
 redis = ["dep:redis", "dep:zstd", "dep:bincode", "dep:url"]
 sqlite = ["dep:sqlx", "dep:libsqlite3-sys"]
 lmdb = ["dep:lmdb-rkv"]
+# Backend RDBMS sharded (sqlx postgres/mysql) — một module `storage/rdbms.rs`,
+# mỗi feature bật driver tương ứng; bật cả 2 được.
+postgres = ["dep:sqlx"]
+mysql = ["dep:sqlx"]
 bloom-search = []
 
 [dev-dependencies]

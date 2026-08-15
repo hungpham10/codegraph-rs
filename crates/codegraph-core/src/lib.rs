@@ -4,9 +4,11 @@
 //! semgraph (`semgraph` module) — wire breaking đã chốt ở plan.
 
 mod error;
+mod route;
 mod semgraph;
 
 pub use error::{Error, Result};
+pub use route::StorageRoute;
 pub use semgraph::{
     is_marker, marker_id, marker_name, Annotation, CallRecord, CallSite, CallSiteResult, ClassInfo,
     DbStats as SemgraphStats, DependenciesReport, Dependency, EdgeMeta, EffectCallPattern,

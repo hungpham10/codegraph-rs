@@ -7,14 +7,18 @@
 //! pre-seed, không bắt buộc.
 //!
 //! Hai transport module: [`stdio`] (luồng chính, 1 process = 1 session cố định)
-//! và [`http`] (luồng riêng — stub, sẽ quản lý session theo session-id header).
+//! và [`http`] (Streamable HTTP — rmcp cấp một `CodegraphServer` riêng per
+//! `mcp-session-id`, mỗi phiên bind root riêng).
 
+#[cfg(feature = "http")]
 pub mod http;
 mod session;
 pub mod stdio;
 mod tools;
 mod usage;
 
+#[cfg(feature = "http")]
+pub use http::serve_http;
 pub use session::{DetailLevel, InitOutcome, OutputStyle, Session};
 pub use stdio::serve_stdio;
 

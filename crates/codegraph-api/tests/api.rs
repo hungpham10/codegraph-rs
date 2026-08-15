@@ -3,7 +3,7 @@ use codegraph_core::{
     CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind, SymbolMatch, SYMBOL_BASE,
 };
 use codegraph_graph::{GraphIndex, ParseResult, SharedGraphIndex};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 fn sym(id: u64, name: &str) -> Symbol {
@@ -195,8 +195,75 @@ async fn seed_many(db: &str, count: usize) {
     idx.ingest(&results).await.unwrap();
 }
 
+/// Seed N symbol, mỗi symbol gắn annotation `@RestController` (chẵn) / `@Service`
+/// (lẻ) — dùng test resumable cho `search_by_annotation`.
+async fn seed_annotations(db: &str, count: usize) {
+    let mut idx = GraphIndex::open(db).await.unwrap();
+    let mut results = Vec::new();
+    for (id, i) in (SYMBOL_BASE..).zip(0..count) {
+        let mut s = sym(id, &format!("svc_{i}"));
+        s.annotations = vec![codegraph_core::Annotation {
+            name: (if i % 2 == 0 {
+                "@RestController"
+            } else {
+                "@Service"
+            })
+            .into(),
+            args: HashMap::new(),
+            line: 1,
+        }];
+        results.push(ParseResult {
+            path: "src/a.ts".into(),
+            language: "typescript".into(),
+            bytes: 10,
+            lines: 4,
+            symbols: vec![s],
+            chains: HashMap::new(),
+            calls: vec![],
+        });
+    }
+    idx.ingest(&results).await.unwrap();
+}
+
+/// Seed N caller, mỗi caller gọi một library call lowercase `log.println` — dùng
+/// test resumable cho `references` (call_name lowercase để khớp substring, do
+/// engine filter `name.contains(&q)` với `q` đã lowercased).
+async fn seed_references(db: &str, count: usize) {
+    let mut idx = GraphIndex::open(db).await.unwrap();
+    let mut results = Vec::new();
+    for i in 0..count {
+        let caller = SYMBOL_BASE + i as u64;
+        results.push(ParseResult {
+            path: "src/a.ts".into(),
+            language: "typescript".into(),
+            bytes: 10,
+            lines: 4,
+            symbols: vec![sym(caller, &format!("caller_{i}"))],
+            chains: HashMap::new(),
+            calls: vec![CallRecord {
+                caller_id: caller,
+                call_name: "log.println".to_string(),
+                position: 1,
+                arg_exprs: vec!["msg".into()],
+                line: 3,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::Log,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+            }],
+        });
+    }
+    idx.ingest(&results).await.unwrap();
+}
+
 /// Resume roundtrip: timeout → lấy resume id → retry cùng args + resume → kết
 /// quả đầy đủ, không lặp/không mất. Resume id sai → lỗi bảo retry không resume.
+///
+/// Dùng [`TIMEOUT_EXPIRE_IMMEDIATELY`] để deadline **đã hết hạn ngay** →
+/// `timed_out` được đảm bảo trên mọi máy (không phụ thuộc tốc độ đồng hồ tường
+/// như `timeout_ms = 1`, vốn có thể "chạy quá nhanh" và skip luồng resume).
 #[tokio::test]
 async fn search_resumable_timeout_retry_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
@@ -205,22 +272,15 @@ async fn search_resumable_timeout_retry_roundtrip() {
     seed_many(&db_str, 6000).await;
     let api = api(&db_str).await;
 
-    // Call 1: timeout_ms=1 — trên seed 6000 symbol debug build chắc chắn trễ
-    // hơn 1ms. Nếu máy quá nhanh (không timeout) test vẫn đúng — chỉ bỏ qua
-    // nhánh retry. total = 5000 vì name engine chặn cứng MAX_RESULTS tên distinct.
+    // Call 1: deadline đã hết hạn ngay → chắc chắn timed_out, sinh resume id.
+    // total = 5000 vì name engine chặn cứng MAX_RESULTS tên distinct.
     let capped = 5000;
-    let first = api.search_resumable("order", 20, None, 1).await.unwrap();
-    let resume_id = if first.timed_out {
-        assert!(first.resume.is_some(), "timeout must carry a resume id");
-        first.resume.unwrap()
-    } else {
-        // Hoàn tất ngay — verify kết quả rồi dừng (không cần retry).
-        let ids: std::collections::HashSet<u64> = first.page.iter().map(|s| s.id).collect();
-        assert_eq!(ids.len(), first.page.len(), "no duplicate results");
-        assert_eq!(first.total, capped);
-        assert_eq!(first.page.len(), 20);
-        return;
-    };
+    let first = api
+        .search_resumable("order", 20, None, codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY)
+        .await
+        .unwrap();
+    assert!(first.timed_out, "expired deadline must time out");
+    let resume_id = first.resume.expect("timeout must carry a resume id");
 
     // Retry: cùng args + resume, không giới hạn thời gian → hoàn tất.
     let out = api
@@ -250,6 +310,225 @@ async fn search_resumable_timeout_retry_roundtrip() {
             .await
             .is_err(),
         "resume id for a different query must be rejected"
+    );
+}
+
+/// Resumable timeout→retry cho `search_by_annotation` — deterministic qua
+/// `TIMEOUT_EXPIRE_IMMEDIATELY` (deadline đã hết hạn ngay lập tức trên mọi máy).
+#[tokio::test]
+async fn annotation_search_resumable_timeout_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("db.sqlite");
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    seed_annotations(&db_str, 200).await;
+    let api = api(&db_str).await;
+
+    // Lần 1: deadline hết hạn ngay → chắc chắn timed_out + mang resume id.
+    let first = api
+        .search_by_annotation_resumable(
+            "@RestController",
+            None,
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
+            None,
+            codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
+        )
+        .await
+        .unwrap();
+    assert!(first.timed_out, "expired deadline must time out");
+    let resume_id = first.resume.expect("timeout must carry a resume id");
+
+    // Lần 2: retry cùng args + resume id, timeout_ms=0 → hoàn tất.
+    let out = api
+        .search_by_annotation_resumable(
+            "@RestController",
+            None,
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
+            Some(resume_id.clone()),
+            0,
+        )
+        .await
+        .unwrap();
+    assert!(!out.timed_out);
+    // 200 symbol, i % 2 == 0 → 100 gắn @RestController.
+    assert_eq!(out.total, 100, "total must match full scan");
+    assert_eq!(out.page.len(), 20);
+    assert!(out.resume.is_none());
+
+    // Resume id sai → lỗi.
+    assert!(
+        api.search_by_annotation_resumable(
+            "@RestController",
+            None,
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
+            Some("deadbeef00000000".into()),
+            0,
+        )
+        .await
+        .is_err(),
+        "unknown resume id must be rejected"
+    );
+    // Resume id của query khác → lỗi.
+    assert!(
+        api.search_by_annotation_resumable(
+            "@Service",
+            None,
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
+            Some(resume_id),
+            0,
+        )
+        .await
+        .is_err(),
+        "resume id for a different query must be rejected"
+    );
+}
+
+/// Resumable timeout→retry cho `references` (deterministic).
+#[tokio::test]
+async fn references_resumable_timeout_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("db.sqlite");
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    seed_references(&db_str, 50).await; // 50 caller, mỗi gọi "log.println"
+    let api = api(&db_str).await;
+
+    let first = api
+        .references_resumable(
+            "log.println",
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
+            None,
+            codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
+        )
+        .await
+        .unwrap();
+    assert!(first.timed_out, "expired deadline must time out");
+    let resume_id = first.resume.expect("timeout must carry a resume id");
+
+    let out = api
+        .references_resumable(
+            "log.println",
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
+            Some(resume_id.clone()),
+            0,
+        )
+        .await
+        .unwrap();
+    assert!(!out.timed_out);
+    assert_eq!(out.page.len(), 20);
+    let ids: HashSet<u64> = out.page.iter().map(|c| c.func_id).collect();
+    assert_eq!(ids.len(), 20, "no duplicate callers across the page");
+    assert!(out.resume.is_none());
+
+    // Resume id sai → lỗi.
+    assert!(
+        api.references_resumable(
+            "log.println",
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
+            Some("deadbeef00000000".into()),
+            0,
+        )
+        .await
+        .is_err(),
+        "unknown resume id must be rejected"
+    );
+    // Resume id của query khác → lỗi.
+    assert!(
+        api.references_resumable(
+            "other.call",
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
+            Some(resume_id),
+            0,
+        )
+        .await
+        .is_err(),
+        "resume id for a different query must be rejected"
+    );
+}
+
+/// Resumable timeout→retry cho `search_flow_pattern` (deterministic).
+#[tokio::test]
+async fn flow_search_resumable_timeout_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("db.sqlite");
+    let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+    let (caller, callee, _helper) = seed_index(&db_str).await;
+    let api = api(&db_str).await;
+
+    // Chain chứa callee → 2 hit (caller→[caller,callee], callee→[callee,helper]).
+    let pattern = callee.to_string();
+
+    let first = api
+        .search_flow_pattern_resumable(
+            &pattern,
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
+            None,
+            codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
+        )
+        .await
+        .unwrap();
+    assert!(first.timed_out, "expired deadline must time out");
+    let resume_id = first.resume.expect("timeout must carry a resume id");
+
+    let out = api
+        .search_flow_pattern_resumable(
+            &pattern,
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
+            Some(resume_id.clone()),
+            0,
+        )
+        .await
+        .unwrap();
+    assert!(!out.timed_out);
+    assert_eq!(
+        out.page.len(),
+        2,
+        "two functions have chain containing callee"
+    );
+    assert!(out.resume.is_none());
+
+    // Resume id của pattern khác → lỗi.
+    assert!(
+        api.search_flow_pattern_resumable(
+            &caller.to_string(),
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
+            Some(resume_id),
+            0,
+        )
+        .await
+        .is_err(),
+        "resume id for a different pattern must be rejected"
     );
 }
 

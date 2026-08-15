@@ -76,14 +76,16 @@ finds every `*Service` class), and `exact`. Use `total` + `offset` to page.
 
 ## Large indexes: timeout + resume
 
-On very large indexes a broad search (`codegraph_search` / `codegraph_search_symbol`)
-can exceed its time budget. Both tools accept `timeout_ms` (default `2000`;
+On very large indexes a broad search (`codegraph_search`, `codegraph_search_symbol`,
+`codegraph_search_by_annotation`, `codegraph_search_flow`, `codegraph_references`,
+`codegraph_search_by_call`, `codegraph_list_classes`, `codegraph_list_interfaces`)
+can exceed its time budget. All of these tools accept `timeout_ms` (default `20000`;
 `0` = no limit). When the budget runs out mid-search the tool **errors** and
 does NOT return partial results — the message includes `"resume": "<id>"` and a
 progress count:
 
 ```
-codegraph_search_symbol timed out after 2000ms (collected 134 symbols so far).
+codegraph_search_symbol timed out after 20000ms (collected 134 symbols so far).
 Retry the same call with the same arguments plus "resume": "<id>" to continue
 the search from where it stopped.
 ```

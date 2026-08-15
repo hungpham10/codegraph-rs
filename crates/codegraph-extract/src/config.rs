@@ -1,7 +1,7 @@
 use crate::languages::effects::EffectClassifier;
 use crate::project::{project_db_path, project_dir};
 use camino::Utf8Path;
-use codegraph_core::{EffectCallPattern, EffectRule, EffectType};
+use codegraph_core::{EffectCallPattern, EffectRule, EffectType, StorageRoute};
 use serde::Deserialize;
 use std::fs;
 
@@ -27,6 +27,10 @@ pub enum StorageKind {
     Redis,
     /// In-memory — không persist.
     Memory,
+    /// PostgreSQL — multi-tenant, partition theo `repo_id`.
+    Postgres,
+    /// MySQL — multi-tenant, partition theo `repo_id`.
+    MySql,
 }
 
 impl StorageKind {
@@ -35,8 +39,15 @@ impl StorageKind {
             "lmdb" => StorageKind::Lmdb,
             "redis" => StorageKind::Redis,
             "memory" | "in-memory" | "in_memory" => StorageKind::Memory,
+            "postgres" | "postgresql" | "pg" => StorageKind::Postgres,
+            "mysql" | "maria" | "mariadb" => StorageKind::MySql,
             _ => StorageKind::Sqlite,
         }
+    }
+
+    /// Backend này có phải RDBMS (Postgres/MySQL) hay không.
+    pub fn is_rdbms(self) -> bool {
+        matches!(self, StorageKind::Postgres | StorageKind::MySql)
     }
 }
 
@@ -54,12 +65,19 @@ struct ConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 struct StorageSection {
-    /// `"sqlite"`, `"lmdb"`, `"redis"`, `"memory"`.
+    /// `"sqlite"`, `"lmdb"`, `"redis"`, `"memory"`, `"postgres"`, `"mysql"`.
     #[serde(default, rename = "type")]
     type_: Option<String>,
     /// DSN override — ví dụ `lmdb:///data/codegraph.db`.
     #[serde(default)]
     dsn: Option<String>,
+    /// `repo_id` (u64) dùng làm partition key cho backend RDBMS
+    /// (Postgres/MySQL, multi-tenant). Tự sinh bởi `codegraph init` nếu thiếu.
+    #[serde(default)]
+    repo_id: Option<u64>,
+    /// Danh sách DSN shard cho backend RDBMS. Shard = `repo_id % len(dsns)`.
+    #[serde(default)]
+    dsns: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -94,6 +112,11 @@ pub struct StorageConfig {
     pub kind: StorageKind,
     /// DSN override (`None` = dựng từ `kind` + project path).
     pub dsn: Option<String>,
+    /// `repo_id` (u64) — partition key cho backend RDBMS. `None` nếu chưa sinh
+    /// (chỉ hợp lệ khi `kind` không phải RDBMS).
+    pub repo_id: Option<u64>,
+    /// Danh sách DSN shard cho backend RDBMS (shard = `repo_id % len`).
+    pub dsns: Vec<String>,
 }
 
 impl ExtractConfig {
@@ -120,6 +143,8 @@ impl ExtractConfig {
                     .map(StorageKind::parse)
                     .unwrap_or_default(),
                 dsn: file.storage.dsn,
+                repo_id: file.storage.repo_id,
+                dsns: file.storage.dsns,
             },
         }
     }
@@ -141,7 +166,72 @@ impl ExtractConfig {
             StorageKind::Lmdb => Some(format!("lmdb://{}", project_dir(root).join("db.lmdb"))),
             StorageKind::Redis => None,
             StorageKind::Memory => None,
+            StorageKind::Postgres | StorageKind::MySql => None,
         }
+    }
+
+    /// `StorageRoute` mô tả cách mở index — thay thế cho `storage_dsn` khi
+    /// backend có thể là RDBMS (multi-tenant + sharding).
+    ///
+    /// - `memory` → `Memory`
+    /// - `sqlite` / `lmdb` / `redis` → `Local(dsn)`
+    /// - `postgres` / `mysql` → `Sharded { dsns, repo_id, root }`
+    ///   (`repo_id` phải đã được sinh bởi `ensure_repo_id`; nếu thiếu → `None`)
+    pub fn storage_route(&self, root: &Utf8Path) -> Option<StorageRoute> {
+        match self.storage.kind {
+            StorageKind::Memory => Some(StorageRoute::Memory),
+            StorageKind::Postgres | StorageKind::MySql => {
+                let repo_id = self.storage.repo_id?;
+                let dsns = if self.storage.dsns.is_empty() {
+                    vec![self.storage.dsn.clone()?]
+                } else {
+                    self.storage.dsns.clone()
+                };
+                Some(StorageRoute::Sharded {
+                    dsns,
+                    repo_id: Some(repo_id),
+                    root: Some(root.to_string()),
+                })
+            }
+            StorageKind::Sqlite | StorageKind::Lmdb | StorageKind::Redis => {
+                let dsn = self.storage.dsn.clone().or_else(|| self.storage_dsn(root));
+                Some(StorageRoute::Local(dsn?))
+            }
+        }
+    }
+
+    /// Sinh `repo_id` ngẫu nhiên (u64) nếu backend là RDBMS và config chưa có,
+    /// rồi ghi vào `[storage]` của `config.toml` (self-heal). Trả `Some(repo_id)`
+    /// nếu là RDBMS (kể cả khi đã có sẵn), `None` nếu không phải RDBMS.
+    pub fn ensure_repo_id(root: &Utf8Path) -> Option<u64> {
+        if !ExtractConfig::load(root).storage.kind.is_rdbms() {
+            return None;
+        }
+        if let Some(id) = ExtractConfig::load(root).storage.repo_id {
+            return Some(id);
+        }
+        let repo_id = {
+            let mut buf = [0u8; 8];
+            let _ = getrandom::getrandom(&mut buf);
+            u64::from_le_bytes(buf)
+        };
+        let path = root.join(".codegraph").join("config.toml");
+        if let Ok(text) = fs::read_to_string(path.as_std_path()) {
+            let inserted = if let Some(idx) = text.find("[storage]") {
+                let header = "[storage]";
+                let mut s = String::with_capacity(text.len() + 40);
+                s.push_str(&text[..idx]);
+                s.push_str(header);
+                s.push_str("\n# repo_id (partition key) — sinh bởi `codegraph init`.\n");
+                s.push_str(&format!("repo_id = {repo_id}\n"));
+                s.push_str(&text[idx + header.len()..]);
+                s
+            } else {
+                format!("{text}\n[storage]\nrepo_id = {repo_id}\n")
+            };
+            let _ = fs::write(path.as_std_path(), inserted);
+        }
+        Some(repo_id)
     }
 }
 
@@ -189,12 +279,15 @@ headers = "auto"
 # effect = "sql_query"
 
 [storage]
-# Backend lưu index: "sqlite", "lmdb", "redis", hoặc "memory".
+# Backend lưu index: "sqlite", "lmdb", "redis", "memory", "postgres", hoặc "mysql".
 type = "sqlite"
 # DSN override (mặc định dựng từ `type` + project path):
 #   sqlite → sqlite://<root>/.codegraph/db.sqlite
 #   lmdb   → lmdb://<root>/.codegraph/db.lmdb
 #   redis  → bắt buộc khai dsn, ví dụ redis://localhost:6379
+#   postgres/mysql → bắt buộc khai `dsns` (hoặc `dsn` nếu 1 shard), ví dụ:
+#     dsns = ["postgres://user:pass@db1:5432/codegraph", "postgres://user:pass@db2:5432/codegraph"]
+#     repo_id = 14028493579208694412   # sinh bởi `codegraph init` (partition key)
 # dsn = "sqlite:///tmp/codegraph.db"
 "#;
 
