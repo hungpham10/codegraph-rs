@@ -40,12 +40,12 @@ fn tool_defs() -> Vec<ToolDef> {
     vec![
         tool(
             "codegraph_search",
-            "Search symbols by name (substring, case-insensitive). On large indexes this can take a while — pass timeout_ms (default 2000) and, if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue the search from where it stopped.",
+            "Search symbols by name (substring, case-insensitive). On large indexes this can take a while — pass timeout_ms (default 20000) and, if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue the search from where it stopped.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string" },
                 "limit": { "type": "integer", "default": 10 },
                 "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." },
-                "timeout_ms": { "type": "integer", "default": 2000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
                 "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["query"] }),
@@ -99,9 +99,13 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_search_flow",
-            "Find functions whose call chain contains a pattern. Pattern = comma-separated tokens: numeric ids, marker names (LOOP, IF_TRUE, IF_FALSE, BRANCH_END, RETURN, LOOP_BACK, SWITCH_CASE, SWITCH_END, BREAK, CONTINUE, THROW) or symbol names.",
+            "Find functions whose call chain contains a pattern. Pattern = comma-separated tokens: numeric ids, marker names (LOOP, IF_TRUE, IF_FALSE, BRANCH_END, RETURN, LOOP_BACK, SWITCH_CASE, SWITCH_END, BREAK, CONTINUE, THROW) or symbol names. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
-                "pattern": { "type": "string" }
+                "pattern": { "type": "string" },
+                "limit": { "type": "integer", "default": 20 },
+                "offset": { "type": "integer", "default": 0 },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             }, "required": ["pattern"] }),
         ),
         tool(
@@ -116,10 +120,13 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_references",
-            "Functions that call a library call whose name contains the query (includes unresolved external calls).",
+            "Functions that call a library call whose name contains the query (includes unresolved external calls). On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string" },
-                "limit": { "type": "integer", "default": 10 }
+                "limit": { "type": "integer", "default": 10 },
+                "offset": { "type": "integer", "default": 0 },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             }, "required": ["query"] }),
         ),
         tool(
@@ -156,7 +163,7 @@ fn tool_defs() -> Vec<ToolDef> {
         // ── Enhanced symbol search (semgraph_search_symbol) ──
         tool(
             "codegraph_search_symbol",
-            "Search symbols by name with optional kind filter, match mode, and pagination. match: 'contains' (substring anywhere, default), 'prefix' (name starts with), 'suffix' (name ENDS with — e.g. query=\"Service\" finds every *Service class), 'exact' (exact name, case-insensitive). Use 'total' with 'offset' to fetch further pages until offset >= total. On large indexes pass timeout_ms (default 2000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue. When more results remain, the response includes a resume id you can pass to page further without re-scanning.",
+            "Search symbols by name with optional kind filter, match mode, and pagination. match: 'contains' (substring anywhere, default), 'prefix' (name starts with), 'suffix' (name ENDS with — e.g. query=\"Service\" finds every *Service class), 'exact' (exact name, case-insensitive). Use 'total' with 'offset' to fetch further pages until offset >= total. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue. When more results remain, the response includes a resume id you can pass to page further without re-scanning.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string" },
                 "kind": { "type": "string", "enum": ["function", "method", "class", "interface", "enum", "variable", "constant", "parameter", "field", "module", "file"] },
@@ -164,7 +171,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "limit": { "type": "integer", "default": 20 },
                 "offset": { "type": "integer", "default": 0 },
                 "resume": { "type": "string", "description": "Resume id from a previous timeout (or from a previous response with more pages) — retry the same call with this to continue where it stopped." },
-                "timeout_ms": { "type": "integer", "default": 2000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
                 "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["query"] }),
@@ -191,22 +198,26 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_list_classes",
-            "List all class symbols in the index (paginated).",
+            "List all class symbols in the index (paginated). On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
                 "limit": { "type": "integer", "default": 20 },
                 "offset": { "type": "integer", "default": 0 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             } }),
         ),
         tool(
             "codegraph_list_interfaces",
-            "List all interface symbols in the index (paginated).",
+            "List all interface symbols in the index (paginated). On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
                 "limit": { "type": "integer", "default": 20 },
                 "offset": { "type": "integer", "default": 0 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             } }),
         ),
         tool(
@@ -221,22 +232,27 @@ fn tool_defs() -> Vec<ToolDef> {
         // ── Annotation / call / dependency queries ──
         tool(
             "codegraph_search_by_annotation",
-            "Search symbols by annotation (e.g. @RestController, @GetMapping, @Autowired, @Override). Case-insensitive substring match. Optional kind filter.",
+            "Search symbols by annotation (e.g. @RestController, @GetMapping, @Autowired, @Override). Case-insensitive substring match. Optional kind filter. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
                 "annotation": { "type": "string" },
                 "kind": { "type": "string", "enum": ["function", "method", "class", "interface", "enum", "variable", "constant", "parameter", "field", "module", "file"] },
                 "limit": { "type": "integer", "default": 20 },
                 "offset": { "type": "integer", "default": 0 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             }, "required": ["annotation"] }),
         ),
         tool(
             "codegraph_search_by_call",
-            "Find functions that call a given class/method name inside their bodies (e.g. \"LogManager\" or \"LogManager.getLogger\"). Matches ALL call names captured by the parser — including external library calls that don't resolve to in-repo symbols. Each result includes per-call-site context: line, surrounding condition, whether inside a loop, and the call arguments.",
+            "Find functions that call a given class/method name inside their bodies (e.g. \"LogManager\" or \"LogManager.getLogger\"). Matches ALL call names captured by the parser — including external library calls that don't resolve to in-repo symbols. Each result includes per-call-site context: line, surrounding condition, whether inside a loop, and the call arguments. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
                 "call_name": { "type": "string" },
-                "limit": { "type": "integer", "default": 20 }
+                "limit": { "type": "integer", "default": 20 },
+                "offset": { "type": "integer", "default": 0 },
+                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             }, "required": ["call_name"] }),
         ),
         tool(
@@ -320,7 +336,7 @@ pub async fn dispatch_with_api(
             let timeout_ms = args
                 .get("timeout_ms")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(2000);
+                .unwrap_or(20000);
             let out = api.search_resumable(q, limit, resume, timeout_ms).await?;
             if out.timed_out {
                 // Không trả kết quả nửa chừng — báo lỗi kèm resume id để LLM retry
@@ -433,8 +449,30 @@ pub async fn dispatch_with_api(
         }
         "codegraph_search_flow" => {
             let pattern = arg_str(&args, "pattern")?;
-            let hits = api.search_flow_pattern(pattern).await?;
-            emit(root.as_str(), &hits)
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let resume = args
+                .get("resume")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20000);
+            let out = api
+                .search_flow_pattern_resumable(pattern, Pagination { limit, offset }, resume, timeout_ms)
+                .await?;
+            if out.timed_out {
+                return Err(Error::Other(format!(
+                    "codegraph_search_flow timed out after {}ms (collected {} results so far). \
+                     Retry the same call with the same arguments plus \"resume\": \"{}\" \
+                     to continue the search from where it stopped.",
+                    timeout_ms,
+                    out.progress,
+                    out.resume.as_deref().unwrap_or("")
+                )));
+            }
+            emit(root.as_str(), &out.page)
         }
         "codegraph_context" => {
             let req = ContextRequest {
@@ -453,8 +491,29 @@ pub async fn dispatch_with_api(
         "codegraph_references" => {
             let q = arg_str(&args, "query")?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
-            let report = api.references(q, limit).await?;
-            emit(root.as_str(), &report)
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let resume = args
+                .get("resume")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20000);
+            let out = api
+                .references_resumable(q, Pagination { limit, offset }, resume, timeout_ms)
+                .await?;
+            if out.timed_out {
+                return Err(Error::Other(format!(
+                    "codegraph_references timed out after {}ms (collected {} results so far). \
+                     Retry the same call with the same arguments plus \"resume\": \"{}\" \
+                     to continue the search from where it stopped.",
+                    timeout_ms,
+                    out.progress,
+                    out.resume.as_deref().unwrap_or("")
+                )));
+            }
+            emit(root.as_str(), &out.page)
         }
         "codegraph_files" => {
             let prefix = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -498,7 +557,7 @@ pub async fn dispatch_with_api(
             let timeout_ms = args
                 .get("timeout_ms")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(2000);
+                .unwrap_or(20000);
             let out = api
                 .search_symbol_paged_resumable(
                     q,
@@ -623,10 +682,31 @@ pub async fn dispatch_with_api(
         "codegraph_list_classes" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let (results, total) = api.list_by_kind(SymbolKind::Class, limit, offset).await;
+            let resume = args
+                .get("resume")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20000);
+            let out = api
+                .list_by_kind_resumable(SymbolKind::Class, Pagination { limit, offset }, resume, timeout_ms)
+                .await?;
+            if out.timed_out {
+                return Err(Error::Other(format!(
+                    "codegraph_list_classes timed out after {}ms (collected {} symbols so far). \
+                     Retry the same call with the same arguments plus \"resume\": \"{}\" \
+                     to continue from where it stopped.",
+                    timeout_ms,
+                    out.progress,
+                    out.resume.as_deref().unwrap_or("")
+                )));
+            }
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
-            let results: Vec<Value> = results
+            let results: Vec<Value> = out
+                .page
                 .into_iter()
                 .map(|s| symbol_json(root.as_str(), &s, detail, format))
                 .collect();
@@ -635,19 +715,41 @@ pub async fn dispatch_with_api(
                 json!({
                     "kind": "class",
                     "results": results,
-                    "total": total,
+                    "total": out.total,
                     "limit": limit,
                     "offset": offset,
+                    "resume": out.resume,
                 }),
             )
         }
         "codegraph_list_interfaces" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let (results, total) = api.list_by_kind(SymbolKind::Interface, limit, offset).await;
+            let resume = args
+                .get("resume")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20000);
+            let out = api
+                .list_by_kind_resumable(SymbolKind::Interface, Pagination { limit, offset }, resume, timeout_ms)
+                .await?;
+            if out.timed_out {
+                return Err(Error::Other(format!(
+                    "codegraph_list_interfaces timed out after {}ms (collected {} symbols so far). \
+                     Retry the same call with the same arguments plus \"resume\": \"{}\" \
+                     to continue from where it stopped.",
+                    timeout_ms,
+                    out.progress,
+                    out.resume.as_deref().unwrap_or("")
+                )));
+            }
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
-            let results: Vec<Value> = results
+            let results: Vec<Value> = out
+                .page
                 .into_iter()
                 .map(|s| symbol_json(root.as_str(), &s, detail, format))
                 .collect();
@@ -656,9 +758,10 @@ pub async fn dispatch_with_api(
                 json!({
                     "kind": "interface",
                     "results": results,
-                    "total": total,
+                    "total": out.total,
                     "limit": limit,
                     "offset": offset,
+                    "resume": out.resume,
                 }),
             )
         }
@@ -709,12 +812,31 @@ pub async fn dispatch_with_api(
                 .and_then(SymbolKind::parse);
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let (results, total, truncated) = api
-                .search_by_annotation(annotation, kind, offset, limit)
-                .await;
+            let resume = args
+                .get("resume")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20000);
+            let out = api
+                .search_by_annotation_resumable(annotation, kind, Pagination { limit, offset }, resume, timeout_ms)
+                .await?;
+            if out.timed_out {
+                return Err(Error::Other(format!(
+                    "codegraph_search_by_annotation timed out after {}ms (collected {} symbols so far). \
+                     Retry the same call with the same arguments plus \"resume\": \"{}\" \
+                     to continue the search from where it stopped.",
+                    timeout_ms,
+                    out.progress,
+                    out.resume.as_deref().unwrap_or("")
+                )));
+            }
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
-            let results: Vec<Value> = results
+            let results: Vec<Value> = out
+                .page
                 .into_iter()
                 .map(|s| symbol_json(root.as_str(), &s, detail, format))
                 .collect();
@@ -724,22 +846,44 @@ pub async fn dispatch_with_api(
                     "annotation": annotation,
                     "kind": kind.map(|k| k.as_str()),
                     "results": results,
-                    "total": total,
+                    "total": out.total,
                     "offset": offset,
-                    "truncated": truncated,
+                    "resume": out.resume,
                 }),
             )
         }
         "codegraph_search_by_call" => {
             let call_name = arg_str(&args, "call_name")?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
-            let hits = api.references(call_name, limit).await?;
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let resume = args
+                .get("resume")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20000);
+            let out = api
+                .references_resumable(call_name, Pagination { limit, offset }, resume, timeout_ms)
+                .await?;
+            if out.timed_out {
+                return Err(Error::Other(format!(
+                    "codegraph_search_by_call timed out after {}ms (collected {} results so far). \
+                     Retry the same call with the same arguments plus \"resume\": \"{}\" \
+                     to continue the search from where it stopped.",
+                    timeout_ms,
+                    out.progress,
+                    out.resume.as_deref().unwrap_or("")
+                )));
+            }
             emit_value(
                 root.as_str(),
                 json!({
                     "call_name": call_name,
-                    "results": hits,
-                    "total": hits.len(),
+                    "results": out.page,
+                    "total": out.page.len(),
+                    "resume": out.resume,
                 }),
             )
         }

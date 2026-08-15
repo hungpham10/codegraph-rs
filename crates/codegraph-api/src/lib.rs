@@ -21,7 +21,42 @@ pub struct GraphApi {
     sessions: Arc<SearchSessionStore>,
 }
 
+/// Giá trị `timeout_ms` đặc biệt: deadline **đã hết hạn ngay tại thời điểm gọi**
+/// → search chắc chắn `timed_out` trên mọi máy (dùng cho test xác định, không
+/// phụ thuộc tốc độ đồng hồ tường như `timeout_ms = 1`).
+pub const TIMEOUT_EXPIRE_IMMEDIATELY: u64 = u64::MAX;
+
 // ==================== Search session store ====================
+
+/// Loại search tạo resume — dùng validate resume id (không cho cross-tool
+/// resume: id của `codegraph_search` không dùng được cho `codegraph_references`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeKind {
+    Name,
+    Annotation,
+    ListKind,
+    References,
+    Flow,
+}
+
+/// Mô tả query lưu trong resume để validate: tool-type + query + kind phải
+/// khớp. Sai → lỗi bảo LLM retry không có `resume`.
+#[derive(Debug, Clone)]
+pub struct ResumeDesc {
+    pub ty: ResumeKind,
+    pub query: String,
+    pub kind: Option<SymbolKind>,
+}
+
+/// Cursor resume lưu trong session store.
+/// - `Name`: name search (DFS checkpoint từ engine).
+/// - `Offset`: các search scan tuyến tính (annotation/list_by_kind/references/
+///   flow) — tiếp tục từ `next` offset; `desc` để validate resume.
+#[derive(Debug, Clone)]
+pub enum ResumeCursor {
+    Name(SearchCursor),
+    Offset { next: usize, desc: ResumeDesc },
+}
 
 /// Cursor session lưu **phía server** — LLM chỉ cầm một id ngắn (hex) và echo
 /// lại khi retry. Id vô nghĩa ngoài tiến trình này: index version đổi (re-ingest)
@@ -30,7 +65,7 @@ struct StoredResume {
     created: Instant,
     /// Version index lúc tạo — đổi (re-ingest) → cursor mất giá trị.
     index_version: u64,
-    cursor: SearchCursor,
+    cursor: ResumeCursor,
 }
 
 /// Store in-process cho resume id → cursor. Không persist; purge theo TTL khi
@@ -60,7 +95,7 @@ impl SearchSessionStore {
 
     /// Lưu cursor, trả id hex ngắn. Trước khi thêm: purge session quá TTL, chặn
     /// số session tối đa (evict session già nhất).
-    pub fn put(&self, cursor: SearchCursor, index_version: u64) -> String {
+    pub fn put(&self, cursor: ResumeCursor, index_version: u64) -> String {
         let mut map = self.inner.lock().unwrap();
         let now = Instant::now();
         map.retain(|_, s| now.duration_since(s.created) < self.ttl);
@@ -88,7 +123,7 @@ impl SearchSessionStore {
     }
 
     /// Đọc cursor theo id — `None` nếu không có / quá TTL.
-    pub fn get(&self, id: &str) -> Option<(u64, SearchCursor)> {
+    pub fn get(&self, id: &str) -> Option<(u64, ResumeCursor)> {
         let map = self.inner.lock().unwrap();
         map.get(id).map(|s| (s.index_version, s.cursor.clone()))
     }
@@ -124,6 +159,30 @@ pub struct ResumeSearchOutcome {
     pub resume: Option<String>,
     /// Version index mà search chạy trên — đổi giữa các lần retry → resume
     /// không còn giá trị.
+    pub index_version: u64,
+}
+
+/// Kết quả resumable cho search trả `Vec<CallSiteResult>` (`codegraph_references`
+/// / `codegraph_search_by_call`). Cùng hình dạng [`ResumeSearchOutcome`].
+#[derive(Debug)]
+pub struct ResumeCallSiteOutcome {
+    pub page: Vec<CallSiteResult>,
+    pub timed_out: bool,
+    /// Số kết quả đã collect lúc ngắt (dùng cho message báo LLM).
+    pub progress: usize,
+    /// Resume id để retry khi `timed_out`; `None` khi hoàn tất.
+    pub resume: Option<String>,
+    pub index_version: u64,
+}
+
+/// Kết quả resumable cho search trả `Vec<SearchFlowResult>`
+/// (`codegraph_search_flow`). Cùng hình dạng [`ResumeSearchOutcome`].
+#[derive(Debug)]
+pub struct ResumeFlowOutcome {
+    pub page: Vec<SearchFlowResult>,
+    pub timed_out: bool,
+    pub progress: usize,
+    pub resume: Option<String>,
     pub index_version: u64,
 }
 
@@ -170,6 +229,8 @@ impl GraphApi {
 
     /// Resumable + deadline-aware của [`Self::search`] — nền cho
     /// `codegraph_search`. `timeout_ms = 0` = không giới hạn thời gian.
+    /// `timeout_ms = u64::MAX` ([`TIMEOUT_EXPIRE_IMMEDIATELY`]) = deadline đã
+    /// hết hạn ngay → chắc chắn `timed_out` (dùng cho test xác định).
     /// `resume` = id trả về từ lần timeout trước (phải cùng query).
     pub async fn search_resumable(
         &self,
@@ -206,7 +267,9 @@ impl GraphApi {
     }
 
     /// Resumable + deadline-aware của [`Self::search_symbol_paged`] — nền cho
-    /// `codegraph_search_symbol`. `timeout_ms = 0` = không giới hạn.
+    /// `codegraph_search_symbol`. `timeout_ms = 0` = không giới hạn;
+    /// `timeout_ms = u64::MAX` ([`TIMEOUT_EXPIRE_IMMEDIATELY`]) = chắc chắn
+    /// `timed_out` (dùng cho test xác định).
     ///
     /// `resume` được validate (index version + query/mode/kind phải khớp) —
     /// sai → lỗi báo LLM retry không có `resume`.
@@ -235,21 +298,35 @@ impl GraphApi {
                             .into(),
                     ));
                 }
-                if stored.query != q || stored.mode != mode || stored.kind != kind {
+                let c = match stored {
+                    ResumeCursor::Name(c) => c,
+                    _ => {
+                        return Err(Error::Invalid(
+                            "resume id was created for a different query — retry without resume"
+                                .into(),
+                        ))
+                    }
+                };
+                if c.query != q || c.mode != mode || c.kind != kind {
                     return Err(Error::Invalid(
                         "resume id was created for a different query — retry without resume".into(),
                     ));
                 }
-                Some(stored)
+                Some(c)
             }
             None => None,
         };
 
         // ── Deadline ──
-        let deadline = if timeout_ms == 0 {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_millis(timeout_ms))
+        // `timeout_ms == 0`            → không giới hạn (None)
+        // `timeout_ms == u64::MAX`     → [`TIMEOUT_EXPIRE_IMMEDIATELY`]: deadline
+        //                                 đã hết hạn ngay → chắc chắn timed_out
+        //                                 (dùng cho test xác định)
+        // khác                         → now + timeout_ms
+        let deadline = match timeout_ms {
+            0 => None,
+            u64::MAX => Some(Instant::now()),
+            _ => Some(Instant::now() + Duration::from_millis(timeout_ms)),
         };
 
         let out = idx
@@ -269,7 +346,7 @@ impl GraphApi {
         // ── Quản lý session: lưu khi còn tiếp tục (timeout / còn page), xoá
         // khi xong hẳn. ──
         let resume_id = match &out.cursor {
-            Some(c) => Some(self.sessions.put(c.clone(), version)),
+            Some(c) => Some(self.sessions.put(ResumeCursor::Name(c.clone()), version)),
             None => {
                 if let Some(id) = &resume {
                     self.sessions.remove(id);
@@ -368,31 +445,7 @@ impl GraphApi {
     /// symbol (resolve exact — trùng tên lấy ứng viên đầu).
     pub async fn search_flow_pattern(&self, pattern: &str) -> Result<Vec<SearchFlowResult>> {
         let idx = self.index().await;
-        let mut ids = Vec::new();
-        for tok in pattern.split(',') {
-            let t = tok.trim();
-            if t.is_empty() {
-                continue;
-            }
-            if let Ok(n) = t.parse::<u64>() {
-                ids.push(n);
-                continue;
-            }
-            if let Some(m) = codegraph_core::marker_id(t) {
-                ids.push(m);
-                continue;
-            }
-            let r = idx.resolve_by_name_or_id(t, 0)?;
-            let sid = r
-                .symbol
-                .map(|s| s.id)
-                .or_else(|| r.matches.first().map(|s| s.id))
-                .ok_or_else(|| Error::Invalid(format!("unknown flow token: {t}")))?;
-            ids.push(sid);
-        }
-        if ids.is_empty() {
-            return Err(Error::Invalid("empty flow pattern".into()));
-        }
+        let ids = resolve_flow_pattern_ids(&idx, pattern)?;
         idx.search_flow(&ids).await
     }
 
@@ -402,6 +455,250 @@ impl GraphApi {
             .await
             .callers_by_call_name(query, limit as usize)
             .await
+    }
+
+    /// Validate resume id (nếu có) cho các search scan tuyến tính (Offset cursor):
+    /// index version + tool-type + query + kind phải khớp. Trả `Some(offset)` để
+    /// tiếp tục, hoặc `None` (không resume → caller dùng `pagination.offset`).
+    fn resolve_offset(
+        &self,
+        resume: &Option<String>,
+        version: u64,
+        ty: ResumeKind,
+        q: &str,
+        kind: Option<SymbolKind>,
+    ) -> Result<Option<usize>> {
+        match resume {
+            Some(id) => {
+                let (stored_version, stored) = self.sessions.get(id).ok_or_else(|| {
+                    Error::Invalid("resume id expired or unknown — retry without resume".into())
+                })?;
+                if stored_version != version {
+                    return Err(Error::Invalid(
+                        "index was re-built since this resume was created — retry without resume"
+                            .into(),
+                    ));
+                }
+                match stored {
+                    ResumeCursor::Offset { next, desc } => {
+                        if desc.ty != ty || desc.query != q || desc.kind != kind {
+                            return Err(Error::Invalid(
+                                "resume id was created for a different query — retry without resume"
+                                    .into(),
+                            ));
+                        }
+                        Ok(Some(next))
+                    }
+                    _ => Err(Error::Invalid(
+                        "resume id was created for a different query — retry without resume".into(),
+                    )),
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resumable + deadline-aware của [`Self::search_by_annotation`]. `timeout_ms`
+    /// như [`Self::search_symbol_paged_resumable`] (0 = không giới hạn, `u64::MAX`
+    /// = chắc chắn timed_out). `resume` validate (index version + annotation +
+    /// kind phải khớp) — sai → lỗi bảo LLM retry không có `resume`.
+    pub async fn search_by_annotation_resumable(
+        &self,
+        annotation: &str,
+        kind: Option<SymbolKind>,
+        pagination: Pagination,
+        resume: Option<String>,
+        timeout_ms: u64,
+    ) -> Result<ResumeSearchOutcome> {
+        let idx = self.index().await;
+        let version = idx.version();
+        let q = annotation.to_lowercase();
+        let offset = self
+            .resolve_offset(&resume, version, ResumeKind::Annotation, &q, kind)?
+            .unwrap_or(pagination.offset as usize);
+        let deadline = deadline_from(timeout_ms);
+        let (page, total, cont) = idx.search_by_annotation_resumable(
+            annotation,
+            kind,
+            offset,
+            pagination.limit as usize,
+            deadline,
+        );
+        let timed_out = cont.is_some();
+        let progress = page.len();
+        let resume_id = if timed_out {
+            Some(self.sessions.put(
+                ResumeCursor::Offset {
+                    next: offset,
+                    desc: ResumeDesc {
+                        ty: ResumeKind::Annotation,
+                        query: q,
+                        kind,
+                    },
+                },
+                version,
+            ))
+        } else {
+            if let Some(id) = &resume {
+                self.sessions.remove(id);
+            }
+            None
+        };
+        Ok(ResumeSearchOutcome {
+            page,
+            total,
+            timed_out,
+            progress,
+            resume: resume_id,
+            index_version: version,
+        })
+    }
+
+    /// Resumable + deadline-aware của [`Self::list_by_kind`]. `timeout_ms` như
+    /// [`Self::search_symbol_paged_resumable`]. `resume` validate (index version
+    /// + kind phải khớp).
+    pub async fn list_by_kind_resumable(
+        &self,
+        kind: SymbolKind,
+        pagination: Pagination,
+        resume: Option<String>,
+        timeout_ms: u64,
+    ) -> Result<ResumeSearchOutcome> {
+        let idx = self.index().await;
+        let version = idx.version();
+        let offset = self
+            .resolve_offset(&resume, version, ResumeKind::ListKind, "", Some(kind))?
+            .unwrap_or(pagination.offset as usize);
+        let deadline = deadline_from(timeout_ms);
+        let (page, total, cont) =
+            idx.list_symbols_by_kind_resumable(kind, offset, pagination.limit as usize, deadline);
+        let timed_out = cont.is_some();
+        let progress = page.len();
+        let resume_id = if timed_out {
+            Some(self.sessions.put(
+                ResumeCursor::Offset {
+                    next: offset,
+                    desc: ResumeDesc {
+                        ty: ResumeKind::ListKind,
+                        query: String::new(),
+                        kind: Some(kind),
+                    },
+                },
+                version,
+            ))
+        } else {
+            if let Some(id) = &resume {
+                self.sessions.remove(id);
+            }
+            None
+        };
+        Ok(ResumeSearchOutcome {
+            page,
+            total,
+            timed_out,
+            progress,
+            resume: resume_id,
+            index_version: version,
+        })
+    }
+
+    /// Resumable + deadline-aware của [`Self::references`]. `timeout_ms` như
+    /// [`Self::search_symbol_paged_resumable`]. `resume` validate (index version
+    /// + query phải khớp).
+    pub async fn references_resumable(
+        &self,
+        query: &str,
+        pagination: Pagination,
+        resume: Option<String>,
+        timeout_ms: u64,
+    ) -> Result<ResumeCallSiteOutcome> {
+        let idx = self.index().await;
+        let version = idx.version();
+        let q = query.to_lowercase();
+        let offset = self
+            .resolve_offset(&resume, version, ResumeKind::References, &q, None)?
+            .unwrap_or(pagination.offset as usize);
+        let deadline = deadline_from(timeout_ms);
+        let (page, cont) = idx
+            .callers_by_call_name_resumable(query, offset, pagination.limit as usize, deadline)
+            .await?;
+        let timed_out = cont.is_some();
+        let progress = page.len();
+        let resume_id = if timed_out {
+            Some(self.sessions.put(
+                ResumeCursor::Offset {
+                    next: offset,
+                    desc: ResumeDesc {
+                        ty: ResumeKind::References,
+                        query: q,
+                        kind: None,
+                    },
+                },
+                version,
+            ))
+        } else {
+            if let Some(id) = &resume {
+                self.sessions.remove(id);
+            }
+            None
+        };
+        Ok(ResumeCallSiteOutcome {
+            page,
+            timed_out,
+            progress,
+            resume: resume_id,
+            index_version: version,
+        })
+    }
+
+    /// Resumable + deadline-aware của [`Self::search_flow_pattern`]. `timeout_ms`
+    /// như [`Self::search_symbol_paged_resumable`]. `resume` validate (index
+    /// version + pattern phải khớp).
+    pub async fn search_flow_pattern_resumable(
+        &self,
+        pattern: &str,
+        pagination: Pagination,
+        resume: Option<String>,
+        timeout_ms: u64,
+    ) -> Result<ResumeFlowOutcome> {
+        let idx = self.index().await;
+        let version = idx.version();
+        let q = pattern.to_lowercase();
+        let offset = self
+            .resolve_offset(&resume, version, ResumeKind::Flow, &q, None)?
+            .unwrap_or(pagination.offset as usize);
+        let ids = resolve_flow_pattern_ids(&idx, pattern)?;
+        let deadline = deadline_from(timeout_ms);
+        let (page, cont) = idx
+            .search_flow_resumable(&ids, offset, pagination.limit as usize, deadline)
+            .await?;
+        let timed_out = cont.is_some();
+        let progress = page.len();
+        let resume_id = if timed_out {
+            Some(self.sessions.put(
+                ResumeCursor::Offset {
+                    next: offset,
+                    desc: ResumeDesc {
+                        ty: ResumeKind::Flow,
+                        query: q,
+                        kind: None,
+                    },
+                },
+                version,
+            ))
+        } else {
+            if let Some(id) = &resume {
+                self.sessions.remove(id);
+            }
+            None
+        };
+        Ok(ResumeFlowOutcome {
+            page,
+            timed_out,
+            progress,
+            resume: resume_id,
+            index_version: version,
+        })
     }
 
     pub async fn context_markdown(&self, req: &ContextRequest) -> Result<String> {
@@ -424,4 +721,46 @@ impl GraphApi {
     pub async fn stats(&self) -> codegraph_core::SemgraphStats {
         self.index().await.stats()
     }
+}
+
+/// Deadline từ `timeout_ms`: `0` = không giới hạn (None), `u64::MAX`
+/// ([`TIMEOUT_EXPIRE_IMMEDIATELY`]) = đã hết hạn ngay (chắc chắn timed_out),
+/// khác = `now + timeout_ms`.
+fn deadline_from(timeout_ms: u64) -> Option<Instant> {
+    match timeout_ms {
+        0 => None,
+        u64::MAX => Some(Instant::now()),
+        _ => Some(Instant::now() + Duration::from_millis(timeout_ms)),
+    }
+}
+
+/// Resolve pattern string thành danh sách id (số / marker / tên symbol) — dùng
+/// chung cho [`GraphApi::search_flow_pattern`] và bản resumable.
+fn resolve_flow_pattern_ids(idx: &GraphIndex, pattern: &str) -> Result<Vec<u64>> {
+    let mut ids = Vec::new();
+    for tok in pattern.split(',') {
+        let t = tok.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Ok(n) = t.parse::<u64>() {
+            ids.push(n);
+            continue;
+        }
+        if let Some(m) = codegraph_core::marker_id(t) {
+            ids.push(m);
+            continue;
+        }
+        let r = idx.resolve_by_name_or_id(t, 0)?;
+        let sid = r
+            .symbol
+            .map(|s| s.id)
+            .or_else(|| r.matches.first().map(|s| s.id))
+            .ok_or_else(|| Error::Invalid(format!("unknown flow token: {t}")))?;
+        ids.push(sid);
+    }
+    if ids.is_empty() {
+        return Err(Error::Invalid("empty flow pattern".into()));
+    }
+    Ok(ids)
 }

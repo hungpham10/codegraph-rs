@@ -253,6 +253,7 @@ impl GraphIndex {
         match Self::split_dsn(dsn) {
             Some(("sqlite", path)) => Self::open_sqlite_dispatch(path).await,
             Some(("lmdb", path)) => Self::open_lmdb_dispatch(path).await,
+            Some(("redis", _)) => Self::open_redis_dispatch(dsn).await,
             _ => Self::open_default(dsn).await,
         }
     }
@@ -280,14 +281,28 @@ impl GraphIndex {
         Err(backend_unavailable("lmdb"))
     }
 
+    /// `redis://` rõ ràng — compile trường redis; không compile → báo lỗi.
+    #[cfg(feature = "redis")]
+    async fn open_redis_dispatch(dsn: &str) -> Result<Self> {
+        Self::open_redis(dsn).await
+    }
+    /// `redis://` rõ ràng nhưng feature không bật → không thể mở.
+    #[cfg(not(feature = "redis"))]
+    async fn open_redis_dispatch(_dsn: &str) -> Result<Self> {
+        Err(backend_unavailable("redis"))
+    }
+
     /// Tách `scheme://` khỏi DSN: trả `(scheme, phần còn lại)` hoặc `None`
-    /// nếu không có scheme (plain path / redis url giữ nguyên).
+    /// nếu không có scheme (plain path).
     fn split_dsn(dsn: &str) -> Option<(&'static str, &str)> {
         if let Some(rest) = dsn.strip_prefix("sqlite://") {
             return Some(("sqlite", rest));
         }
         if let Some(rest) = dsn.strip_prefix("lmdb://") {
             return Some(("lmdb", rest));
+        }
+        if dsn.starts_with("redis://") || dsn.starts_with("rediss://") {
+            return Some(("redis", dsn));
         }
         None
     }
@@ -307,11 +322,6 @@ impl GraphIndex {
         #[cfg(all(feature = "lmdb", not(any(feature = "sqlite", feature = "redis"))))]
         {
             return Self::open_lmdb(dsn).await;
-        }
-        // Chỉ redis được compile — plain path = redis.
-        #[cfg(all(feature = "redis", not(any(feature = "sqlite", feature = "lmdb"))))]
-        {
-            return Self::open_redis(dsn).await;
         }
         // Nhiều backend (≥2) — DSN không nói scheme → mơ hồ.
         #[cfg(any(
@@ -1514,6 +1524,48 @@ impl GraphIndex {
         Ok(out)
     }
 
+    /// Resumable + deadline-aware của [`Self::search_flow`]. `deadline` hết hạn
+    /// giữa chừng → trả `(Vec::new(), Some(offset))` (không kết quả nửa chừng),
+    /// caller retry với `offset` tiếp tục. `deadline = None` = chạy tới cùng.
+    pub async fn search_flow_resumable(
+        &self,
+        pattern: &[u64],
+        offset: usize,
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> Result<(Vec<SearchFlowResult>, Option<usize>)> {
+        if pattern.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let hits = match self.chains.search(pattern, None).await {
+            Ok(h) => h,
+            Err(_) => return Ok((Vec::new(), None)),
+        };
+        let limit = if limit == 0 { usize::MAX } else { limit };
+        let cap = if limit == usize::MAX { usize::MAX } else { offset + limit };
+        let mut out = Vec::new();
+        for (record, _) in hits {
+            if deadline.is_some_and(|dl| Instant::now() >= dl) {
+                return Ok((Vec::new(), Some(offset)));
+            }
+            let func_id = record as u64;
+            if let Some(sym) = self.symbols.get(&func_id) {
+                let chain = self.chains_map.get(&func_id).cloned().unwrap_or_default();
+                out.push(SearchFlowResult {
+                    function_id: func_id,
+                    function_name: sym.name.clone(),
+                    chain,
+                    match_count: 1,
+                });
+            }
+            if out.len() >= cap {
+                break;
+            }
+        }
+        let page = out.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+        Ok((page, None))
+    }
+
     /// Tìm function gọi một library call có tên chứa `query` (case-insensitive
     /// substring trên call-name index, kể cả call unresolved). Gom theo caller,
     /// sort theo FuncName rồi FuncID.
@@ -1554,6 +1606,59 @@ impl GraphIndex {
         let limit = if limit == 0 { usize::MAX } else { limit };
         out.truncate(limit);
         Ok(out)
+    }
+
+    /// Resumable + deadline-aware của [`Self::callers_by_call_name`]. Tương tự
+    /// [`Self::search_flow_resumable`]: timeout → `(Vec::new(), Some(offset))`,
+    /// caller retry với `offset` tiếp tục. `deadline = None` = chạy tới cùng.
+    pub async fn callers_by_call_name_resumable(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> Result<(Vec<CallSiteResult>, Option<usize>)> {
+        let q = query.to_lowercase();
+        let mut matched: Vec<(&String, &Vec<CallSite>)> = self
+            .call_names
+            .iter()
+            .filter(|(name, _)| name.contains(&q))
+            .collect();
+        if deadline.is_some_and(|dl| Instant::now() >= dl) {
+            return Ok((Vec::new(), Some(offset)));
+        }
+        matched.sort_by_key(|(name, _)| (*name).clone());
+        let mut by_func: HashMap<u64, CallSiteResult> = HashMap::new();
+        for (_, sites) in matched {
+            if deadline.is_some_and(|dl| Instant::now() >= dl) {
+                return Ok((Vec::new(), Some(offset)));
+            }
+            for site in sites {
+                let entry = by_func.entry(site.caller_id).or_insert_with(|| {
+                    let sym = self.symbols.get(&site.caller_id);
+                    CallSiteResult {
+                        func_id: site.caller_id,
+                        func_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                        file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                        call_sites: Vec::new(),
+                    }
+                });
+                entry.call_sites.push(site.clone());
+            }
+        }
+        let mut out: Vec<CallSiteResult> = by_func.into_values().collect();
+        out.sort_by(|a, b| {
+            a.func_name
+                .cmp(&b.func_name)
+                .then(a.func_id.cmp(&b.func_id))
+        });
+        let limit = if limit == 0 { usize::MAX } else { limit };
+        let cap = if limit == usize::MAX { usize::MAX } else { offset + limit };
+        if out.len() > cap {
+            out.truncate(cap);
+        }
+        let page = out.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+        Ok((page, None))
     }
 
     /// Files trong graph.
@@ -1663,6 +1768,32 @@ impl GraphIndex {
         (all.into_iter().skip(offset).take(limit).collect(), total)
     }
 
+    /// Resumable + deadline-aware của [`Self::list_symbols_by_kind`]. Timeout →
+    /// `(Vec::new(), 0, Some(offset))` (không kết quả nửa chừng), retry với
+    /// `offset` tiếp tục. `deadline = None` = chạy tới cùng.
+    pub fn list_symbols_by_kind_resumable(
+        &self,
+        kind: SymbolKind,
+        offset: usize,
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> (Vec<Symbol>, usize, Option<usize>) {
+        let mut all: Vec<Symbol> = Vec::new();
+        for s in self.symbols.values() {
+            if deadline.is_some_and(|dl| Instant::now() >= dl) {
+                return (Vec::new(), 0, Some(offset));
+            }
+            if s.kind == kind {
+                all.push(s.clone());
+            }
+        }
+        all.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        let total = all.len();
+        let limit = if limit == 0 { usize::MAX } else { limit };
+        let page = all.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+        (page, total, None)
+    }
+
     /// Tìm symbol theo annotation (case-insensitive substring trên tên
     /// annotation). Trả về (page, total, truncated) — total là con số thật,
     /// truncated=true khi còn trang sau.
@@ -1691,6 +1822,38 @@ impl GraphIndex {
         let page = all.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
         let truncated = offset + page.len() < total;
         (page, total, truncated)
+    }
+
+    /// Resumable + deadline-aware của [`Self::search_by_annotation`]. Timeout →
+    /// `(Vec::new(), 0, Some(offset))` (không kết quả nửa chừng), retry với
+    /// `offset` tiếp tục. `deadline = None` = chạy tới cùng.
+    pub fn search_by_annotation_resumable(
+        &self,
+        annotation: &str,
+        kind: Option<SymbolKind>,
+        offset: usize,
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> (Vec<Symbol>, usize, Option<usize>) {
+        let q = annotation.to_lowercase();
+        let mut all: Vec<Symbol> = Vec::new();
+        for s in self.symbols.values() {
+            if deadline.is_some_and(|dl| Instant::now() >= dl) {
+                return (Vec::new(), 0, Some(offset));
+            }
+            if s.annotations
+                .iter()
+                .any(|a| a.name.to_lowercase().contains(&q))
+                && kind.is_none_or(|k| s.kind == k)
+            {
+                all.push(s.clone());
+            }
+        }
+        all.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        let total = all.len();
+        let limit = if limit == 0 { usize::MAX } else { limit };
+        let page = all.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+        (page, total, None)
     }
 
     /// Ước lượng dependencies từ call names: tách module prefix (phần trước dấu
