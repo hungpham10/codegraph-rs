@@ -238,6 +238,7 @@ fn cmd_deinit(root: &Utf8Path) -> Result<()> {
 
 /// `codegraph serve --mcp`: chạy MCP server trên stdio.
 /// `codegraph serve --http`: chạy MCP server trên Streamable HTTP.
+#[allow(clippy::too_many_arguments)]
 async fn cmd_serve(
     root: &Utf8Path,
     mcp: bool,
