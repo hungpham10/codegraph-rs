@@ -183,6 +183,17 @@ impl ScopeLevel {
             Self::Parameter => "parameter",
         }
     }
+
+    /// Parse từ chuỗi (`as_str()` ngược lại) — `None` nếu không khớp.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "global" => Self::Global,
+            "object_field" => Self::ObjectField,
+            "local" => Self::Local,
+            "parameter" => Self::Parameter,
+            _ => return None,
+        })
+    }
 }
 
 /// Phân loại tác động bên ngoài của một call (để impact/report).

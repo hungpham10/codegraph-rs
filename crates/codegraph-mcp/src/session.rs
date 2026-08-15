@@ -17,6 +17,7 @@
 
 use anyhow::{anyhow, Result};
 use camino::{Utf8Path, Utf8PathBuf};
+use codegraph_core::StorageRoute;
 use codegraph_extract::{init_project, project_dir, ExtractConfig, ExtractStats, Orchestrator};
 use codegraph_graph::{GraphIndex, SharedGraphIndex};
 use serde_json::{json, Value};
@@ -93,7 +94,7 @@ enum SessionState {
     Empty,
     /// Đã bind vào một workspace root, storage + index dùng chung sẵn sàng.
     Ready {
-        dsn: Option<String>,
+        route: Option<StorageRoute>,
         shared_index: Arc<SharedGraphIndex>,
     },
 }
@@ -144,9 +145,11 @@ impl Session {
     /// `with_root()` nhưng seed sẵn output format từ CLI lúc khởi động.
     pub async fn with_root_and_format(root: Utf8PathBuf, format: OutputStyle) -> Result<Self> {
         let state = if project_dir(&root).exists() {
-            let dsn = ExtractConfig::load(&root).storage_dsn(&root);
-            let shared_index = Arc::new(SharedGraphIndex::open(dsn.clone()).await?);
-            SessionState::Ready { dsn, shared_index }
+            // RDBMS cần repo_id — đảm bảo đã sinh (self-heal) trước khi tính route.
+            let _ = ExtractConfig::ensure_repo_id(&root);
+            let route = ExtractConfig::load(&root).storage_route(&root);
+            let shared_index = Arc::new(SharedGraphIndex::open_route(route.clone()).await?);
+            SessionState::Ready { route, shared_index }
         } else {
             SessionState::Empty
         };
@@ -190,25 +193,28 @@ impl Session {
     ) -> Result<InitOutcome> {
         let root = normalize_root(path)?;
         let dir = init_project(&root)?;
+        // RDBMS backend (postgres/mysql) cần `repo_id` làm partition key —
+        // sinh ngẫu nhiên rồi ghi vào config nếu thiếu (self-heal).
+        let _ = ExtractConfig::ensure_repo_id(&root);
         let indexed = if do_index {
             Some(run_index(&root).await?)
         } else {
             None
         };
 
-        // Config giờ đã tồn tại → load đúng backend (sqlite/lmdb/redis/...).
-        let dsn = ExtractConfig::load(&root).storage_dsn(&root);
-        let shared_index = Arc::new(SharedGraphIndex::open(dsn.clone()).await?);
+        // Config giờ đã tồn tại → load đúng backend (sqlite/lmdb/redis/rdbms/...).
+        let route = ExtractConfig::load(&root).storage_route(&root);
+        let shared_index = Arc::new(SharedGraphIndex::open_route(route.clone()).await?);
 
         // Root set trước state — mọi `ensure_ready` đồng thời đọc root mới sẽ
-        // tự swap state theo DSN mới (xem `ensure_ready`).
+        // tự swap state theo route mới (xem `ensure_ready`).
         *self.root.write().await = Some(root.clone());
         *self.detail.write().await = detail;
         if let Some(f) = format {
             *self.format.write().await = f;
         }
         let mut st = self.state.write().await;
-        *st = SessionState::Ready { dsn, shared_index };
+        *st = SessionState::Ready { route, shared_index };
         Ok(InitOutcome { root, dir, indexed })
     }
 
@@ -252,28 +258,30 @@ impl Session {
                  codegraph_index {{}} to build the index."
             ));
         }
-        let dsn = ExtractConfig::load(&root).storage_dsn(&root);
+        // RDBMS cần repo_id — đảm bảo đã sinh (self-heal) trước khi tính route.
+        let _ = ExtractConfig::ensure_repo_id(&root);
+        let route = ExtractConfig::load(&root).storage_route(&root);
         let mut st = self.state.write().await;
 
         // Root được init giữa chừng (vd sau khi init() lỗi part-way) → chuyển
         // từ Empty sang Ready bằng cách load storage.
         let was_empty = matches!(&*st, SessionState::Empty);
         if was_empty {
-            let shared_index = Arc::new(SharedGraphIndex::open(dsn.clone()).await?);
-            *st = SessionState::Ready { dsn, shared_index };
+            let shared_index = Arc::new(SharedGraphIndex::open_route(route.clone()).await?);
+            *st = SessionState::Ready { route, shared_index };
         } else if let SessionState::Ready {
-            dsn: cur,
+            route: cur,
             shared_index,
         } = &mut *st
         {
             // Config đổi backend giữa chừng → load lại storage.
-            if *cur != dsn {
-                match SharedGraphIndex::open(dsn.clone()).await {
+            if *cur != route {
+                match SharedGraphIndex::open_route(route.clone()).await {
                     Ok(sgi) => {
                         *shared_index = Arc::new(sgi);
-                        *cur = dsn;
+                        *cur = route;
                     }
-                    Err(e) => eprintln!("[codegraph] open index for {dsn:?} failed: {e}"),
+                    Err(e) => eprintln!("[codegraph] open index for {route:?} failed: {e}"),
                 }
             }
         }
@@ -326,8 +334,10 @@ fn normalize_root(path: Utf8PathBuf) -> Result<Utf8PathBuf> {
 /// (ingest = full re-index, bump version → snapshot cũ bị `ensure_fresh` thấy
 /// stale và rebuild ở lần query kế).
 async fn run_index(root: &Utf8Path) -> Result<ExtractStats> {
-    let mut idx = match ExtractConfig::load(root).storage_dsn(root) {
-        Some(dsn) => GraphIndex::open(&dsn).await?,
+    // RDBMS cần repo_id (partition key) — sinh nếu thiếu trước khi mở index.
+    let _ = ExtractConfig::ensure_repo_id(root);
+    let mut idx = match ExtractConfig::load(root).storage_route(root) {
+        Some(route) => GraphIndex::open_route(&route).await?,
         None => GraphIndex::in_memory(),
     };
     Orchestrator::with_registry()

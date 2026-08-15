@@ -169,15 +169,18 @@ async fn cmd_default(_root: &Utf8Path) -> Result<()> {
 }
 
 /// DSN (kèm scheme) của backend storage trong config — `None` = in-memory.
+/// Chỉ dùng cho watcher (cần DSN string); RDBMS trả `None` (watcher không spawn).
 fn storage_dsn(root: &Utf8Path) -> Option<String> {
     codegraph_extract::ExtractConfig::load(root).storage_dsn(root)
 }
 
-/// Mở index theo backend đã config (DSN scheme → `GraphIndex::open`).
+/// Mở index theo backend đã config (`StorageRoute` → `GraphIndex::open_route`).
 async fn open_index(root: &Utf8Path) -> Result<GraphIndex> {
-    // `.codegraph/` đã được init (có config) — lúc này storage dsn đã biết.
-    match storage_dsn(root) {
-        Some(dsn) => Ok(GraphIndex::open(&dsn).await?),
+    // `.codegraph/` đã được init (có config) — lúc này storage route đã biết.
+    // RDBMS cần repo_id (partition key) — sinh nếu thiếu (self-heal).
+    let _ = codegraph_extract::ExtractConfig::ensure_repo_id(root);
+    match codegraph_extract::ExtractConfig::load(root).storage_route(root) {
+        Some(route) => Ok(GraphIndex::open_route(&route).await?),
         None => Ok(GraphIndex::in_memory()),
     }
 }
@@ -187,6 +190,8 @@ async fn open_index(root: &Utf8Path) -> Result<GraphIndex> {
 async fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
     let dir = codegraph_extract::init_project(root)?;
     eprintln!("initialized {}", dir);
+    // RDBMS cần repo_id (partition key) — sinh ngẫu nhiên nếu thiếu (self-heal).
+    let _ = codegraph_extract::ExtractConfig::ensure_repo_id(root);
 
     if do_index {
         let stats = index_all(root, show_progress).await?;

@@ -9,6 +9,9 @@ repository.workspace = true
 # Luồng HTTP MCP riêng (session theo mcp-session-id): dùng rmcp
 # `transport-streamable-http-server` + axum để mount StreamableHttpService.
 http = ["rmcp/transport-streamable-http-server", "dep:axum"]
+# Backend RDBMS (Postgres/MySQL, multi-tenant + sharding). Bật để MCP server
+# (và CLI `codegraph serve`) có thể mở index trên Postgres/MySQL.
+rdbms = ["codegraph-graph/postgres", "codegraph-graph/mysql"]
 
 [dependencies]
 codegraph-api    = { path = "../codegraph-api" }

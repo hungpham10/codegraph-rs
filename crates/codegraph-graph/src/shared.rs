@@ -1,20 +1,21 @@
 //! SharedGraphIndex — index dùng chung cho production (GraphApi/MCP/viz).
 //!
 //! Mọi request dùng chung 1 snapshot `Arc<GraphIndex>`. Index sống trong một
-//! backend persistent mà DSN chỉ rõ (`sqlite://...` / `lmdb://...` / `redis://...`):
+//! backend persistent mà `StorageRoute` chỉ rõ (`sqlite://...` / `lmdb://...` /
+//! `redis://...` / `Sharded{dsns, repo_id, ...}` cho Postgres/MySQL):
 //! `GraphIndex::ingest` (CLI/watcher, tiến trình riêng) bump `index_version`
 //! trong store; `ensure_fresh` probe version (đọc thẳng store — không cần
 //! sidecar) và rebuild snapshot khi stale dưới `rebuild_lock` (N request stale
-//! đồng thời chỉ 1 lần rebuild), đổi snapshot dưới `RwLock`. `dsn = None`:
+//! đồng thời chỉ 1 lần rebuild), đổi snapshot dưới `RwLock`. `route = None`:
 //! in-memory — không có writer ngoài, snapshot coi như luôn fresh sau lần
 //! build đầu.
 //!
-//! DSN là **source duy nhất** cho cả `rebuild` (mở backend) lẫn `current_version`
-//! (probe) — nên khi nhiều backend cùng được bật (vd `sqlite` + `lmdb`), backend
-//! được chọn theo scheme trong DSN, không phải theo thứ tự feature.
+//! `StorageRoute` là **source duy nhất** cho cả `rebuild` (mở backend) lẫn
+//! `current_version` (probe) — nên khi nhiều backend cùng được bật, backend
+//! được chọn theo scheme trong route, không phải theo thứ tự feature.
 
 use crate::GraphIndex;
-use codegraph_core::Result;
+use codegraph_core::{Result, StorageRoute};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -32,25 +33,25 @@ struct IndexState {
 /// chiếu 1 instance. Rebuild đồng bộ theo version file — request đầu sau khi
 /// re-index xong chờ rebuild, các request sau thấy đã fresh.
 pub struct SharedGraphIndex {
-    /// DSN nơi persist index (`None` = in-memory, không có writer ngoài).
-    dsn: Option<String>,
+    /// Route persist index (`None` = in-memory, không có writer ngoài).
+    route: Option<StorageRoute>,
     state: RwLock<IndexState>,
     /// Serialize rebuild — N request stale đồng thời chỉ 1 lần rebuild.
     rebuild_lock: Arc<Mutex<()>>,
 }
 
 impl SharedGraphIndex {
-    /// Mở index dùng chung.
-    ///
-    /// `dsn = Some(d)`: chưa build — `ensure_fresh` sẽ mở đúng backend theo
-    /// scheme rồi rebuild index từ store lần đầu. `dsn = None`: in-memory.
-    ///
-    /// `dsn` phải là DSN đầy đủ scheme (vd `sqlite:///path/db.sqlite`,
-    /// `lmdb:///path/db`) — không phải plain path, để nhiều backend cùng bật
-    /// vẫn chọn đúng backend.
+    /// Mở index dùng chung từ một DSN string (sqlite/lmdb/redis). Tiện ích bọc
+    /// `open_route` với `StorageRoute::Local`.
     pub async fn open(dsn: Option<String>) -> Result<Self> {
+        Self::open_route(dsn.map(StorageRoute::Local)).await
+    }
+
+    /// Mở index dùng chung theo `StorageRoute` (hỗ trợ multi-tenant + sharding
+    /// RDBMS). `route = None` → in-memory.
+    pub async fn open_route(route: Option<StorageRoute>) -> Result<Self> {
         Ok(Self {
-            dsn,
+            route,
             state: RwLock::new(IndexState {
                 index: Arc::new(GraphIndex::in_memory()),
                 version: 0,
@@ -60,42 +61,88 @@ impl SharedGraphIndex {
         })
     }
 
-    /// Scheme của DSN (`"sqlite"`, `"lmdb"`, `"redis"`) — `None` nếu in-memory.
-    fn scheme(&self) -> Option<&'static str> {
-        let dsn = self.dsn.as_ref()?;
-        if dsn.starts_with("sqlite://") {
-            return Some("sqlite");
+    /// Scheme của backend (`"sqlite"`, `"lmdb"`, `"redis"`, `"postgres"`,
+    /// `"mysql"`) — `None` nếu in-memory hoặc không đo được version độc lập.
+    fn backend_scheme(&self) -> Option<&'static str> {
+        let route = self.route.as_ref()?;
+        match route {
+            StorageRoute::Memory => None,
+            StorageRoute::Local(dsn) => {
+                if dsn.starts_with("sqlite://") {
+                    Some("sqlite")
+                } else if dsn.starts_with("lmdb://") {
+                    Some("lmdb")
+                } else if dsn.starts_with("redis://") {
+                    Some("redis")
+                } else {
+                    None
+                }
+            }
+            StorageRoute::Sharded { dsns, .. } => {
+                let dsn = dsns.first()?;
+                if dsn.starts_with("postgres://") {
+                    Some("postgres")
+                } else if dsn.starts_with("mysql://") {
+                    Some("mysql")
+                } else {
+                    None
+                }
+            }
         }
-        if dsn.starts_with("lmdb://") {
-            return Some("lmdb");
+    }
+
+    /// Với route `Sharded`, giải shard → `(dsn, repo_id)` để probe/open.
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    fn sharded_target(&self) -> Option<(String, u64)> {
+        let route = self.route.as_ref()?;
+        match route {
+            StorageRoute::Sharded { dsns, repo_id, .. } => {
+                let repo_id = (*repo_id)?;
+                let shard = route.shard_of(repo_id)?;
+                let dsn = dsns.get(shard)?;
+                Some((dsn.clone(), repo_id))
+            }
+            _ => None,
         }
-        if dsn.starts_with("redis://") {
-            return Some("redis");
-        }
-        // Các scheme/DSN khác (chưa biết) — không đo được version độc lập.
-        None
     }
 
     /// Version index trên đĩa hiện tại — `None` nếu probe thất bại (store chưa
-    /// có hoặc đang bị re-index), hay backend không probe độc lập được (redis).
-    /// Chỉ gọi khi `dsn.is_some()`.
+    /// có hoặc đang bị re-index), hay backend không probe độc lập được (redis/
+    /// in-memory/unknown scheme).
     async fn current_version(&self) -> Option<u64> {
-        let dsn = self.dsn.as_ref()?;
-        // `path` chỉ dùng bởi các backend có probe file độc lập (sqlite/lmdb);
-        // build không bật backend nào → biến thừa, cho phép bỏ qua lint.
-        #[cfg_attr(
-            not(any(feature = "sqlite", feature = "lmdb")),
-            allow(unused_variables)
-        )]
-        let path = trim_scheme(dsn);
-        match self.scheme() {
+        match self.backend_scheme()? {
             #[cfg(feature = "sqlite")]
-            Some("sqlite") => crate::storage::sqlite::SqliteStorage::probe_version(path)
-                .await
-                .ok(),
+            "sqlite" => {
+                let dsn = match &self.route {
+                    Some(StorageRoute::Local(d)) => d.as_str(),
+                    _ => return None,
+                };
+                crate::storage::sqlite::SqliteStorage::probe_version(trim_scheme(dsn))
+                    .await
+                    .ok()
+            }
             #[cfg(feature = "lmdb")]
-            Some("lmdb") => crate::storage::lmdb::probe_version(path).await.ok(),
-            // redis không có probe file ngoài — không đo được → stale.
+            "lmdb" => {
+                let dsn = match &self.route {
+                    Some(StorageRoute::Local(d)) => d.as_str(),
+                    _ => return None,
+                };
+                crate::storage::lmdb::probe_version(trim_scheme(dsn)).await.ok()
+            }
+            #[cfg(feature = "postgres")]
+            "postgres" => {
+                let (dsn, repo_id) = self.sharded_target()?;
+                crate::storage::postgres::PostgresStorage::probe_version(&dsn, repo_id)
+                    .await
+                    .ok()
+            }
+            #[cfg(feature = "mysql")]
+            "mysql" => {
+                let (dsn, repo_id) = self.sharded_target()?;
+                crate::storage::mysql::MySqlStorage::probe_version(&dsn, repo_id)
+                    .await
+                    .ok()
+            }
             _ => None,
         }
     }
@@ -104,7 +151,7 @@ impl SharedGraphIndex {
     /// → không có writer ngoài → luôn fresh. Backend không probe được (redis/
     /// unknown scheme) → coi là stale để rebuilt lại.
     async fn is_fresh(&self, version: u64) -> bool {
-        if self.dsn.is_none() {
+        if self.route.is_none() {
             return true;
         }
         matches!(self.current_version().await, Some(v) if v == version)
@@ -138,17 +185,13 @@ impl SharedGraphIndex {
         self.state.read().await.index.clone()
     }
 
-    /// Build index từ DSN hiện tại rồi swap snapshot (gọi trong `rebuild_lock`).
-    /// `GraphIndex::open` tự route theo scheme — không cần nhánh cfg.
+    /// Build index từ route hiện tại rồi swap snapshot (gọi trong `rebuild_lock`).
+    /// `GraphIndex::open_route` tự route theo scheme — không cần nhánh cfg.
     async fn rebuild_inner(&self) -> Result<()> {
-        #[cfg(any(feature = "sqlite", feature = "lmdb", feature = "redis"))]
-        let index = match &self.dsn {
-            Some(d) => GraphIndex::open(d).await?,
+        let index = match &self.route {
+            Some(route) => GraphIndex::open_route(route).await?,
             None => GraphIndex::in_memory(),
         };
-        #[cfg(not(any(feature = "sqlite", feature = "lmdb", feature = "redis")))]
-        let index = GraphIndex::in_memory();
-
         let version = index.version();
         let mut state = self.state.write().await;
         state.index = Arc::new(index);
@@ -159,6 +202,7 @@ impl SharedGraphIndex {
 }
 
 /// Bỏ `scheme://` khỏi DSN — trả phần còn lại (path cho probe file).
+#[cfg(any(feature = "sqlite", feature = "lmdb"))]
 fn trim_scheme(dsn: &str) -> &str {
     dsn.strip_prefix("sqlite://")
         .or_else(|| dsn.strip_prefix("lmdb://"))

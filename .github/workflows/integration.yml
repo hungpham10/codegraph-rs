@@ -1,0 +1,121 @@
+name: Integration (Postgres / MySQL / Redis)
+
+# Chạy test tích hợp trên backend thật (Postgres/MySQL/Redis) qua service
+# container của GitHub Actions. Schema được apply thủ công (`sql/<engine>/*`)
+# trước khi chạy test — khớp thiết kế "migration thủ công" của repo.
+#
+# Test trong `tests/rdbms.rs` / `tests/redis.rs` bị `#[ignore]` và chỉ chạy khi
+# có DSN tương ứng → không ảnh hưởng `cargo test` thường (CI chính ở ci.yml).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy-gated:
+    name: clippy (rdbms + redis test targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Đảm bảo các file test gated (tests/rdbms.rs, tests/redis.rs) vẫn
+      # clippy-sạch dù CI chính chỉ build với default features.
+      - run: cargo clippy -p codegraph-graph --features postgres,mysql,redis --tests -- -D warnings
+
+  postgres:
+    name: postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: codegraph
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_RDBMS_DSN: "postgres://postgres:postgres@127.0.0.1:5432/codegraph"
+      TEST_RDBMS_REPO_ID: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply schema (manual migration)
+        run: |
+          psql "$TEST_RDBMS_DSN" -f sql/postgres/001-initial-schema.sql
+          psql "$TEST_RDBMS_DSN" -f sql/postgres/002-add-repos-registry.sql
+      - name: Run integration tests
+        run: cargo test -p codegraph-graph --features postgres --test rdbms -- --ignored --nocapture
+
+  mysql:
+    name: mysql
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: postgres
+          MYSQL_DATABASE: codegraph
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -ppostgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_RDBMS_DSN: "mysql://root:postgres@127.0.0.1:3306/codegraph"
+      TEST_RDBMS_REPO_ID: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mysql-client
+        run: sudo apt-get update && sudo apt-get install -y mysql-client
+      - name: Apply schema (manual migration)
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/001-initial-schema.sql
+          mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/002-add-repos-registry.sql
+      - name: Run integration tests
+        run: cargo test -p codegraph-graph --features mysql --test rdbms -- --ignored --nocapture
+
+  redis:
+    name: redis
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_REDIS_DSN: "redis://127.0.0.1:6379"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Unit test nội bộ (storage/redis.rs) chạy trên DB 15.
+      - name: Run storage unit tests
+        run: cargo test -p codegraph-graph --features redis
+      # Integration test (GraphIndex roundtrip) chạy trên DB 0 (DSN mặc định).
+      - name: Run integration tests
+        run: cargo test -p codegraph-graph --features redis --test redis -- --ignored --nocapture

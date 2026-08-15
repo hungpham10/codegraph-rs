@@ -268,6 +268,54 @@ exclude = [
 ]
 ```
 
+### Postgres / MySQL (multi-tenant, sharded)
+
+CodeGraph can store the index in PostgreSQL or MySQL instead of the local
+SQLite file. Every table is partitioned by a leading `repo_id` (a `u64`
+partition key), so each project root (`.codegraph/`) maps to its own
+partition — re-indexing or deleting one repo never touches another. Sharding
+is `repo_id % N` across the configured DSN list.
+
+Build with the `rdbms` feature (it is **on by default** for the `codegraph`
+binary):
+
+```bash
+cargo build --features rdbms          # default for `codegraph`
+cargo build -p codegraph-mcp --features rdbms
+```
+
+`.codegraph/config.toml`:
+
+```toml
+[storage]
+type = "postgres"
+# type = "mysql"
+# Shard DSNs — shard = repo_id % len(dsns). One entry = single shard.
+dsns = [
+  "postgres://user:pass@db1:5432/codegraph",
+  "postgres://user:pass@db2:5432/codegraph",
+]
+# repo_id is generated automatically by `codegraph init` (self-heal) and
+# written here. Do not edit it by hand.
+# repo_id = 14028493579208694412
+```
+
+**Schema is applied manually** — the binary does not run migrations. Run the
+SQL files from `sql/<engine>/` in order (currently `001-initial-schema.sql`
+and `002-add-repos-registry.sql`) against every shard server before indexing:
+
+```bash
+psql "$DSN" -f sql/postgres/001-initial-schema.sql
+psql "$DSN" -f sql/postgres/002-add-repos-registry.sql
+# mysql:
+#   mysql "$DB" < sql/mysql/001-initial-schema.sql
+#   mysql "$DB" < sql/mysql/002-add-repos-registry.sql
+```
+
+Then `codegraph init` (CLI) or `codegraph_init` (MCP tool) generates the
+`repo_id` and stores the index on the right shard automatically. See
+`sql/README.md` for the full multi-tenant + sharding design.
+
 ### C vs C++ headers (`.h`)
 
 By default, `.h` files are resolved automatically:
@@ -344,11 +392,18 @@ cargo test -p codegraph-extract --features lang-python
 Feature flags on `codegraph-graph`:
 - `sqlite` — sqlite storage backend (enabled on `codegraph`, `codegraph-mcp`, `codegraph-viz`)
 - `redis` — redis storage backend (compile-only verify, runtime needs server)
+- `postgres` — PostgreSQL storage backend (multi-tenant, sharded)
+- `mysql` — MySQL storage backend (multi-tenant, sharded)
+
+The `codegraph` and `codegraph-mcp` binaries expose a convenience `rdbms`
+feature that turns on both `postgres` and `mysql` (it is **on by default**
+for `codegraph`):
 
 ```sh
 # Full feature verification
 cargo check --workspace --features sqlite
 cargo check -p codegraph-graph --features redis
+cargo check -p codegraph --features rdbms
 ```
 
 ## License

@@ -56,5 +56,13 @@ impl StorageRoute {
             _ => None,
         }
     }
+
+    /// Root path chuẩn hiện có trong route (`None` nếu không phải `Sharded`).
+    pub fn root(&self) -> Option<&str> {
+        match self {
+            StorageRoute::Sharded { root, .. } => root.as_deref(),
+            _ => None,
+        }
+    }
 }
 

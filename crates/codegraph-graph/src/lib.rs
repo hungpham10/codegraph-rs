@@ -41,11 +41,15 @@ pub use crate::storage::lmdb::LmdbStorage;
 #[cfg(feature = "sqlite")]
 pub use crate::storage::sqlite::SqliteStorage;
 pub use crate::storage::{InMemoryStorage, Storage, Tx};
+#[cfg(feature = "postgres")]
+pub use crate::storage::postgres::PostgresStorage;
+#[cfg(feature = "mysql")]
+pub use crate::storage::mysql::MySqlStorage;
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
     EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult,
-    SYMBOL_BASE, SearchFlowResult, SemgraphStats, Symbol, SymbolKind, SymbolMatch, is_marker,
-    marker_name,
+    SYMBOL_BASE, SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch,
+    is_marker, marker_name,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -353,31 +357,106 @@ impl GraphIndex {
         Ok(idx)
     }
 
-    /// Mở index từ redis dsn (feature `redis`) — rebuild từ entity store.
-    #[cfg(feature = "postgres")]
-    async fn open_postgres_dispatch(path: &str) -> Result<Self> {
-        Self::open_postgres(path).await
-    }
-    #[cfg(feature = "postgres")]
-    async fn open_postgres(path: &str) -> Result<Self> {
-        let storage = crate::storage::postgres::PostgresStorage::open(path).await?;
+    /// Mở index trên Redis (`redis://` / `rediss://`). Keyspace prefix được
+    /// dẫn xuất từ số DB trong DSN (`redis://host:port/15` → `codegraph:idx:15`)
+    /// để nhiều index không đụng nhau. Redis không multi-tenant theo `repo_id`
+    /// như RDBMS — mỗi DB number = một index riêng.
+    #[cfg(feature = "redis")]
+    async fn open_redis(dsn: &str) -> Result<Self> {
+        let db = dsn
+            .trim_start_matches("rediss://")
+            .trim_start_matches("redis://")
+            .rsplit('/')
+            .next()
+            .and_then(|s| if s.is_empty() { None } else { s.parse::<u32>().ok() })
+            .unwrap_or(0);
+        let client = redis::Client::open(dsn)
+            .map_err(|e| Error::Db(format!("redis client: {e}")))?;
+        let storage = crate::storage::redis::RedisStorage::new(
+            client,
+            &format!("codegraph:idx:{db}"),
+        )
+        .await
+        .map_err(serr)?;
         let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
         let mut idx = Self::new_with_storage(storage);
         idx.rebuild().await?;
         Ok(idx)
     }
 
-    #[cfg(feature = "mysql")]
-    async fn open_mysql_dispatch(path: &str) -> Result<Self> {
-        Self::open_mysql(path).await
-    }
-    #[cfg(feature = "mysql")]
-    async fn open_mysql(path: &str) -> Result<Self> {
-        let storage = crate::storage::mysql::MySqlStorage::open(path).await?;
-        let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
-        let mut idx = Self::new_with_storage(storage);
-        idx.rebuild().await?;
-        Ok(idx)
+    /// Mở index theo `StorageRoute` — hỗ trợ multi-tenant + sharding RDBMS.
+    ///
+    /// - `Memory` → in-memory.
+    /// - `Local(dsn)` → `open(dsn)` (sqlite/lmdb/redis).
+    /// - `Sharded { dsns, repo_id, root }` → tính `shard = repo_id % N`
+    ///   (`StorageRoute::shard_of`), mở backend per-repo (`PostgresStorage`/
+    ///   `MySqlStorage`) trên `dsns[shard]`, ensure row `repos`, rebuild.
+    pub async fn open_route(route: &StorageRoute) -> Result<Self> {
+        match route {
+            StorageRoute::Memory => Ok(Self::in_memory()),
+            StorageRoute::Local(dsn) => Self::open(dsn).await,
+            StorageRoute::Sharded { dsns, repo_id, .. } => {
+                let repo_id = repo_id.ok_or_else(|| {
+                    Error::Db(
+                        "StorageRoute::Sharded thiếu repo_id — chạy `codegraph init` để sinh"
+                            .into(),
+                    )
+                })?;
+                if dsns.is_empty() {
+                    return Err(Error::Db("StorageRoute::Sharded không có DSN nào".into()));
+                }
+                let shard = route.shard_of(repo_id).ok_or_else(|| {
+                    Error::Db("không tính được shard từ StorageRoute::Sharded".into())
+                })?;
+                let dsn = dsns.get(shard).ok_or_else(|| {
+                    Error::Db(format!("shard {shard} vượt quá số lượng DSN"))
+                })?;
+                let result: Result<Self> = if dsn.starts_with("postgres://") {
+                    #[cfg(feature = "postgres")]
+                    {
+                        let storage = crate::storage::postgres::PostgresStorage::open(dsn, repo_id)
+                            .await
+                            .map_err(serr)?;
+                        storage
+                            .ensure_registered(shard, route.root())
+                            .await
+                            .map_err(serr)?;
+                        let storage = Arc::new(RwLock::new(storage))
+                            as Arc<RwLock<dyn crate::storage::Storage>>;
+                        let mut idx = Self::new_with_storage(storage);
+                        idx.rebuild().await?;
+                        Ok(idx)
+                    }
+                    #[cfg(not(feature = "postgres"))]
+                    {
+                        Err(Error::Db("feature 'postgres' chưa bật".into()))
+                    }
+                } else if dsn.starts_with("mysql://") {
+                    #[cfg(feature = "mysql")]
+                    {
+                        let storage = crate::storage::mysql::MySqlStorage::open(dsn, repo_id)
+                            .await
+                            .map_err(serr)?;
+                        storage
+                            .ensure_registered(shard, route.root())
+                            .await
+                            .map_err(serr)?;
+                        let storage = Arc::new(RwLock::new(storage))
+                            as Arc<RwLock<dyn crate::storage::Storage>>;
+                        let mut idx = Self::new_with_storage(storage);
+                        idx.rebuild().await?;
+                        Ok(idx)
+                    }
+                    #[cfg(not(feature = "mysql"))]
+                    {
+                        Err(Error::Db("feature 'mysql' chưa bật".into()))
+                    }
+                } else {
+                    Err(Error::Db(format!("Sharded DSN scheme không hỗ trợ: {dsn}")))
+                };
+                result
+            }
+        }
     }
 
 

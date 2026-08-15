@@ -26,4 +26,7 @@ camino = { workspace = true }
 indicatif = "0.18.6"
 
 [features]
-default = []
+# Mặc định bật RDBMS (Postgres/MySQL) để CLI + MCP server có thể serve backend
+# multi-tenant. Tắt để build nhẹ: `cargo build --no-default-features`.
+default = ["rdbms"]
+rdbms = ["codegraph-graph/postgres", "codegraph-graph/mysql", "codegraph-mcp/rdbms"]

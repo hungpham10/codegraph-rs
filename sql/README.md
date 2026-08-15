@@ -38,9 +38,10 @@ sql/
 
 ### 1. Partition theo repository
 
-- Mọi bảng dữ liệu dẫn đầu bằng cột `repo_id VARCHAR(64) NOT NULL` — là **UUID**
-  sinh lúc `codegraph init`, lưu trong `.codegraph/config.toml` (`[storage]
-  repo_id = "…"`). Một project root (`.codegraph/`) = một repository.
+- Mọi bảng dữ liệu dẫn đầu bằng cột `repo_id BIGINT NOT NULL` — là **số u64**
+  sinh ngẫu nhiên lúc `codegraph init`, lưu trong `.codegraph/config.toml`
+  (`[storage] repo_id = <số nguyên>`). Một project root (`.codegraph/`) = một
+  repository.
 - PK composite `(repo_id, …)` trên mọi bảng → các repo cô lập hoàn toàn;
   re-index / xoá một repo chỉ là `DELETE … WHERE repo_id = ?`.
 - `repo_id` nằm trong **handle của backend** (thuộc `Storage` impl), không đụng
@@ -115,11 +116,11 @@ giữ cột bytea/blob; vẫn partition theo `repo_id`):
 | case-sensitivity | chính xác theo byte | `COLLATE utf8mb4_bin` để giữ case-sensitive cho name/path |
 | composite key `rt_shortcuts` | PK `(repo_id, shard, elem, node_id)` | `elem LONGBLOB` không vào PK được → index `elem(255)` prefix + PK không gồm elem (xem ghi chú) |
 
-> Ghi chú MySQL về giới hạn key: index key tối đa 3072 bytes (utf8mb4 → 768 ký
-> tự). `repo_id VARCHAR(64)` + `name/file/path VARCHAR(700)` = 764 ký tự × 4 =
-> 3056 bytes — vừa đủ. Giá trị dài hơn 700 ký tự cần hash key (md5/sha256)
-> ở phase sau; schema hiện tại chấp nhận giới hạn này (tên call / path thực tế
-> hiếm khi vượt).
+> Ghi chú MySQL về giới hạn key: index key tối đa 3072 bytes (utf8mb4 → 4 byte/
+> ký tự). `repo_id BIGINT` (8 bytes) + `name/file/path VARCHAR(700)` (700 × 4 =
+> 2800 bytes) ≈ 2808 bytes — nằm dưới 3072, vừa đủ. Giá trị dài hơn 700 ký tự
+> cần hash key (md5/sha256) ở phase sau; schema hiện tại chấp nhận giới hạn này
+> (tên call / path thực tế hiếm khi vượt).
 >
 > `rt_shortcuts.elem` là bytes nhị phân (element id encode) có thể rất dài →
 > MySQL dùng prefix index `elem(255)`; Postgres giữ PK đầy đủ. Vì lookup luôn
