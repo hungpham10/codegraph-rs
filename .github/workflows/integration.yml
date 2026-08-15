@@ -1,5 +1,8 @@
 name: Integration (Postgres / MySQL / Redis)
 
+permissions:
+  contents: read
+
 # Chạy test tích hợp trên backend thật (Postgres/MySQL/Redis) qua service
 # container của GitHub Actions. Schema được apply thủ công (`sql/<engine>/*`)
 # trước khi chạy test — khớp thiết kế "migration thủ công" của repo.
