@@ -24,6 +24,12 @@ pub mod redis;
 
 #[cfg(feature = "lmdb")]
 pub mod lmdb;
+
+#[cfg(feature = "postgres")]
+pub mod postgres; // NEW Postgres storage
+
+#[cfg(feature = "mysql")]
+pub mod mysql; // NEW MySQL storage
 // ==================== Error Type ====================
 
 #[derive(Debug)]

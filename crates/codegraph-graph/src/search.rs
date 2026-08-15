@@ -542,7 +542,7 @@ impl<T: Element> Search<T> {
             let node_id = candidates[cand_idx];
             let (records, ckpt) = self
                 .trie
-                .search_dfs_resumable(node_id, pattern, matcher.clone(), dfs.take(), deadline)
+                .search_dfs(node_id, pattern, matcher.clone(), dfs.take(), deadline)
                 .await?;
             match ckpt {
                 // Timeout giữa candidate — lưu trạng thái DFS, tiếp tục lần sau.

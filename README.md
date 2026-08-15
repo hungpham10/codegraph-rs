@@ -18,7 +18,7 @@ Agents that consult the semantic graph instead of grepping the filesystem make *
 - **Fast.** Full re-index a 139-file project in ~190 ms (release, parallel rayon).
 - **Local.** Index lives in `.codegraph/db.sqlite` next to your code. Nothing leaves the machine.
 - **Full re-index always.** No incremental sync — watcher debounces and re-indexes completely (simpler, no stale state).
-- **Multi-agent.** One binary serves any MCP client (Claude Code, Cursor, Codex, opencode, Hermes, Antigravity) over stdio — the agent binds the workspace with `codegraph_init` and drives everything through tools.
+- **Multi-agent.** One binary serves any MCP client (Claude Code, Cursor, Codex, opencode, Hermes, Antigravity) over stdio or Streamable HTTP (`--http`) — the agent binds the workspace with `codegraph_init` and drives everything through tools.
 - **30 MCP tools** including `codegraph_flow` (call chain), `codegraph_search_flow` (pattern search), `codegraph_references` (library call consumers), `codegraph_diff` (MR impact draft), and a behavior sandbox (`codegraph_sandbox`).
 
 ## Install
@@ -94,8 +94,12 @@ cargo install --git https://github.com/Cleboost/codegraph-rs codegraph
 cd ~/code/my-project
 codegraph init
 
-# 2. Serve it to your agent (Claude Code, Cursor, ...) over MCP
+# 2. Serve it to your agent (Claude Code, Cursor, ...) over MCP (stdio)
 codegraph serve --mcp
+
+# ... or over Streamable HTTP (SSE), e.g. for a remote client / Docker container
+codegraph serve --mcp --http --addr 0.0.0.0:8123
+# point the client at: http://<host>:8123/mcp  →  {"type": "http", "url": "http://<host>:8123/mcp"}
 ```
 
 The agent then binds the workspace with `codegraph_init {"path": ...}` and gets
@@ -103,6 +107,13 @@ tools like `codegraph_search`, `codegraph_symbol`, `codegraph_callers`,
 `codegraph_flow`, `codegraph_search_flow`, `codegraph_impact`,
 `codegraph_context` — all querying is done **over MCP**, not via CLI commands.
 The file watcher debounces changes and triggers full re-indexes while you edit.
+
+Over HTTP each connection (`mcp-session-id`) gets its own fresh server session
+— the agent binds the workspace root with `codegraph_init` inside that
+connection; nothing is shared between connections but the process. rmcp's
+`allowed_hosts` check blocks foreign `Host` headers (DNS-rebinding protection):
+loopback hosts pass by default; for LAN access pass `--allow-host <host-or-ip>`
+(repeatable) or `--allow-any-host` on a trusted network.
 
 ## CLI reference
 
@@ -114,6 +125,7 @@ runs the MCP server. All reading/interacting goes through MCP tools.
 | `codegraph init [--no-index]` | Create `.codegraph/` and full re-index (skip with `--no-index`) |
 | `codegraph deinit` | Remove `.codegraph/` |
 | `codegraph serve --mcp` | Run as MCP server over stdio (used by agents) |
+| `codegraph serve --mcp --http` | Run as MCP server over Streamable HTTP (SSE); `--addr` (default `0.0.0.0:8123`), `--allow-host <host>` (repeatable, LAN), `--allow-any-host` |
 
 Global flag `--path <dir>` overrides the workspace root.
 
@@ -187,7 +199,7 @@ crates/
   codegraph-graph/      GraphIndex (semgraph): registry + 2 engines (chain Search<u64> + name Search<u8>) + sqlite storage
   codegraph-context/    Markdown/JSON context formatter (symbol + callers + callees + source)
   codegraph-api/        GraphApi wrapper on SharedGraphIndex (async query surface)
-  codegraph-mcp/        MCP server on the rmcp SDK (stdio) + 30-tool dispatch, session-driven
+  codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 30-tool dispatch, session-driven
   codegraph-installer/  Agent config targets (Claude/Cursor/Codex/opencode/Hermes)
   codegraph/            CLI lifecycle (init/deinit/serve --mcp) + watcher (notify + debounced full re-index)
 ```

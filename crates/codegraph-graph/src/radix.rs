@@ -120,7 +120,7 @@ pub type OnSplitCallback<T> = Arc<dyn Fn(usize, usize, &[T], usize) -> Result<()
 
 // ==================== Resumable DFS ====================
 
-/// Frame trên work-stack của `Radix::search_dfs_resumable`.
+/// Frame trên work-stack của `Radix::search_dfs`.
 ///
 /// Chỉ lưu 4 số — `prefix`/`continuations`/`children` được recompute từ
 /// `node_id` khi xử lý (matcher deterministic theo `(prefix, pattern,
@@ -133,7 +133,7 @@ pub struct DfsFrame {
     pub child_idx: usize,
 }
 
-/// Trạng thái duyệt hiện tại của `Radix::search_dfs_resumable` khi bị deadline
+/// Trạng thái duyệt hiện tại của `Radix::search_dfs` khi bị deadline
 /// ngắt giữa chừng.
 #[derive(Debug, Clone)]
 pub enum DfsState {
@@ -651,32 +651,15 @@ impl<T: Element> Radix<T> {
     /// hành vi `search_index::search_like`). Không kèm meta/key length — đó là
     /// concern của caller (`Search` lưu chúng trong Storage).
     ///
-    /// Wrapper không deadline cho tests; production path (`Search`) dùng
-    /// [`Self::search_dfs_resumable`] để cancel giữa chừng.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn search_dfs(
-        &self,
-        begin: usize,
-        pattern: &[T],
-        matcher: SearchMatcher<T>,
-    ) -> Result<Vec<usize>> {
-        let (records, _) = self
-            .search_dfs_resumable(begin, pattern, matcher, None, None)
-            .await?;
-        Ok(records)
-    }
-
-    /// Như [`search_dfs`](Self::search_dfs) nhưng **resumable + deadline-aware**:
-    /// duyệt bằng explicit work-stack (không async recursion) nên ngắt được giữa
-    /// chừng khi `deadline` hết hạn. Khi ngắt: trả `(records, Some(checkpoint))` —
-    /// caller gọi lại với `resume = Some(checkpoint)` để tiếp tục chính xác từ vị
-    /// trí dừng; hoàn tất không timeout: `None` ở vị trí checkpoint.
-    ///
-    /// Semantics giữ nguyên `search_dfs`: node đầu tiên (theo DFS) có pattern
+    /// **Resumable + deadline-aware**: duyệt bằng explicit work-stack (không
+    /// async recursion) nên ngắt được giữa chừng khi `deadline` hết hạn. Khi
+    /// ngắt: trả `(records, Some(checkpoint))` — caller gọi lại với `resume =
+    /// Some(checkpoint)` để tiếp tục chính xác từ vị trí dừng; hoàn tất không
+    /// timeout: `None` ở vị trí checkpoint. Node đầu tiên (theo DFS) có pattern
     /// khớp hoàn chỉnh trong prefix → collect toàn bộ records của subtree đó rồi
     /// dừng (short-circuit); prefix hết mà pattern chưa khớp hết → dò xuống
     /// children theo `continuations` matcher trả về.
-    pub async fn search_dfs_resumable(
+    pub async fn search_dfs(
         &self,
         begin: usize,
         pattern: &[T],
@@ -1270,15 +1253,15 @@ mod tests {
         // candidate node chứa element 'l' (production lấy qua shortcut index;
         // ở đây dùng follow_path để mô phỏng).
         let path = tree.follow_path(&k("hello")).await.unwrap();
-        let hits = tree
-            .search_dfs(path[1], &k("llo"), naive_matcher())
+        let (hits, _) = tree
+            .search_dfs(path[1], &k("llo"), naive_matcher(), None, None)
             .await
             .unwrap();
         assert_eq!(hits, vec![1]);
 
         // Prefix khớp từ root → collect toàn bộ records trong subtree.
-        let hits = tree
-            .search_dfs(EMPTY, &k("hel"), naive_matcher())
+        let (hits, _) = tree
+            .search_dfs(EMPTY, &k("hel"), naive_matcher(), None, None)
             .await
             .unwrap();
         assert_eq!(hits.len(), 3);
@@ -1297,8 +1280,8 @@ mod tests {
         // nối tiếp xuống child "lo".
         let path = tree.follow_path(&k("hello")).await.unwrap();
         let parent = path[1];
-        let hits = tree
-            .search_dfs(parent, &k("llo"), naive_matcher())
+        let (hits, _) = tree
+            .search_dfs(parent, &k("llo"), naive_matcher(), None, None)
             .await
             .unwrap();
         assert_eq!(hits, vec![1]);
@@ -1310,10 +1293,14 @@ mod tests {
         tree.insert(&k("hello"), 1, &no_meta(5)).await.unwrap();
 
         // Pattern rỗng → Err.
-        assert!(tree.search_dfs(EMPTY, &[], naive_matcher()).await.is_err());
+        assert!(
+            tree.search_dfs(EMPTY, &[], naive_matcher(), None, None)
+                .await
+                .is_err()
+        );
         // Pattern không tồn tại → Ok(vec![]).
-        let hits = tree
-            .search_dfs(EMPTY, &k("xyz"), naive_matcher())
+        let (hits, _) = tree
+            .search_dfs(EMPTY, &k("xyz"), naive_matcher(), None, None)
             .await
             .unwrap();
         assert!(hits.is_empty());

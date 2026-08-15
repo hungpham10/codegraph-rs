@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 codegraph-graph     = { path = "../codegraph-graph", features = ["sqlite", "lmdb", "bloom-search"] }
 codegraph-extract   = { path = "../codegraph-extract" }
-codegraph-mcp       = { path = "../codegraph-mcp" }
+codegraph-mcp       = { path = "../codegraph-mcp", features = ["http"] }
 clap = { workspace = true }
 tokio = { workspace = true }
 notify = { workspace = true }

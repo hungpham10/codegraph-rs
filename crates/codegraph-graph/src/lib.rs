@@ -354,44 +354,32 @@ impl GraphIndex {
     }
 
     /// Mở index từ redis dsn (feature `redis`) — rebuild từ entity store.
-    #[cfg(feature = "redis")]
-    pub async fn open_redis(dsn: &str) -> Result<Self> {
-        use url::Url;
-
-        let mut parsed_url = Url::parse(dsn).map_err(|error| Error::Search(error.to_string()))?;
-        let prefix = parsed_url
-            .query_pairs()
-            .find(|(key, _)| key == "prefix")
-            .map(|(_, value)| value.into_owned())
-            .unwrap_or_else(|| "default".to_string());
-        let pairs = parsed_url
-            .query_pairs()
-            .filter(|(k, _)| k != "prefix")
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect::<Vec<_>>();
-
-        if pairs.is_empty() {
-            parsed_url.set_query(None);
-        } else {
-            parsed_url.query_pairs_mut().clear();
-
-            for (k, v) in pairs {
-                parsed_url.query_pairs_mut().append_pair(&k, &v);
-            }
-        }
-
-        let storage = crate::storage::redis::RedisStorage::new(
-            redis::Client::open(parsed_url.to_string())
-                .map_err(|error| Error::Search(error.to_string()))?,
-            &prefix,
-        )
-        .await
-        .map_err(serr)?;
+    #[cfg(feature = "postgres")]
+    async fn open_postgres_dispatch(path: &str) -> Result<Self> {
+        Self::open_postgres(path).await
+    }
+    #[cfg(feature = "postgres")]
+    async fn open_postgres(path: &str) -> Result<Self> {
+        let storage = crate::storage::postgres::PostgresStorage::open(path).await?;
         let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
         let mut idx = Self::new_with_storage(storage);
         idx.rebuild().await?;
         Ok(idx)
     }
+
+    #[cfg(feature = "mysql")]
+    async fn open_mysql_dispatch(path: &str) -> Result<Self> {
+        Self::open_mysql(path).await
+    }
+    #[cfg(feature = "mysql")]
+    async fn open_mysql(path: &str) -> Result<Self> {
+        let storage = crate::storage::mysql::MySqlStorage::open(path).await?;
+        let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
+        let mut idx = Self::new_with_storage(storage);
+        idx.rebuild().await?;
+        Ok(idx)
+    }
+
 
     fn new_with_storage(storage: Arc<RwLock<dyn crate::storage::Storage>>) -> Self {
         // Name engine luôn in-memory (như semgraph SearchIndex) — storage riêng

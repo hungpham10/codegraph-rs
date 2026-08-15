@@ -6,8 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Luồng HTTP MCP riêng (session theo mcp-session-id) — chưa implement, xem src/http.rs.
-http = []
+# Luồng HTTP MCP riêng (session theo mcp-session-id): dùng rmcp
+# `transport-streamable-http-server` + axum để mount StreamableHttpService.
+http = ["rmcp/transport-streamable-http-server", "dep:axum"]
 
 [dependencies]
 codegraph-api    = { path = "../codegraph-api" }
@@ -23,6 +24,9 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
 rmcp = { version = "3.1.2", features = ["transport-io"] }
+axum = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Chỉ dùng trong smoke test luồng HTTP (tower::ServiceExt::oneshot).
+tower = { workspace = true, features = ["util"] }
