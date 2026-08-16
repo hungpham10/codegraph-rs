@@ -34,6 +34,7 @@
 //! same-file +3) → `build_edges_from_calls` (edge = chain[position], CallSite +
 //! var-type alias, gom SaveCallRecords) → files → rebuild engines → bump version.
 
+use crate::embeddings::{EmbeddingBackend, default_backend, embedding_enabled, make_backend};
 pub use crate::search::Search;
 use crate::search::SearchResume;
 #[cfg(feature = "lmdb")]
@@ -45,6 +46,7 @@ pub use crate::storage::postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use crate::storage::sqlite::SqliteStorage;
 pub use crate::storage::{InMemoryStorage, Storage, Tx};
+use crate::vector_index::VectorIndex;
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
     EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult,
@@ -60,10 +62,12 @@ use tokio::sync::RwLock;
 #[cfg(feature = "bloom-search")]
 mod bloom;
 pub mod diff;
+pub mod embeddings;
 mod radix;
 mod search;
 mod shared;
 mod storage;
+pub mod vector_index;
 
 pub use shared::SharedGraphIndex;
 
@@ -163,6 +167,17 @@ pub struct GraphIndex {
     next_id: u64,
     /// index version (bump mỗi lần ingest — SharedGraphIndex dò stale).
     version: u64,
+    /// Embedding backend cho semantic search (KNN/k-means). Chỉ được khởi tạo
+    /// thực sự khi `[embedding].backend = "fastembed"` (config opt-in); nếu
+    /// embedding tắt (`embedding_enabled = false`) đây là `HashingEmbeddings`
+    /// placeholder và KHÔNG bao giờ được gọi để sinh vector.
+    embedding_backend: Arc<dyn EmbeddingBackend>,
+    /// `true` khi semantic search được bật (config `[embedding].backend = "fastembed"`).
+    /// Khi `false`, vector index rỗng và semantic search báo lỗi rõ ràng.
+    embedding_enabled: bool,
+    /// Vector index: symbol id → embedding. Build từ embeddings **persist trong
+    /// storage** (load khi open; compute+save cho symbol thiếu khi ingest).
+    vector_index: VectorIndex,
 }
 
 // ── Search resumable (deadline-aware, checkpointable) ──
@@ -191,6 +206,14 @@ pub enum SearchCursorPhase {
     /// Search đã hoàn tất: `collected` + `total` giữ để phân trang tiếp mà
     /// không quét lại. Không chứa query — `SearchCursor.query` lo phần đó.
     Paged { collected: Vec<u64>, total: usize },
+    /// Mode `Semantic`/`Hybrid`: candidate ids đã sort theo relevance (giảm
+    /// dần) — Phase B lọc `kind` + gom vào `collected` giống `Expand` nhưng
+    /// duyệt trực tiếp list id (không qua name engine).
+    Candidates {
+        ids: Vec<u64>,
+        idx: usize,
+        collected: Vec<u64>,
+    },
 }
 
 /// Server-side cursor cho search resumable — validate theo (query, mode,
@@ -230,12 +253,47 @@ pub struct Pagination {
     pub offset: usize,
 }
 
+/// Text đầu vào cho embedding: gộp tên + signature + doc + annotations — capture
+/// cả ý nghĩa lẫn loại của symbol để semantic search hữu dụng.
+fn embedding_text(sym: &Symbol) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    parts.push(&sym.name);
+    if let Some(sig) = &sym.signature {
+        parts.push(sig);
+    }
+    if let Some(doc) = &sym.doc {
+        parts.push(doc);
+    }
+    if !sym.annotations.is_empty() {
+        parts.extend(sym.annotations.iter().map(|a| a.name.as_str()));
+    }
+    parts.join(" ")
+}
+
+/// Reciprocal Rank Fusion: gộp nhiều list (mỗi list đã sort theo relevance giảm
+/// dần) thành một list fused. Điểm mỗi id = Σ 1/(k + rank). `k = 60` chuẩn.
+/// Dùng cho `Hybrid` (lexical + vector).
+fn rrf_fuse(lists: &[Vec<u64>]) -> Vec<u64> {
+    const K: f32 = 60.0;
+    let mut scores: HashMap<u64, f32> = HashMap::new();
+    for list in lists {
+        for (rank, &id) in list.iter().enumerate() {
+            *scores.entry(id).or_default() += 1.0 / (K + (rank as f32) + 1.0);
+        }
+    }
+    let mut out: Vec<(u64, f32)> = scores.into_iter().collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out.into_iter().map(|(id, _)| id).collect()
+}
+
 impl GraphIndex {
-    /// Index in-memory (test/dev, không persist).
+    /// Index in-memory (test/dev, không persist). Embedding mặc định TẮT
+    /// (config chưa set → `[embedding].backend = "hashing"`), nên không load
+    /// model. Nếu process đã set config fastembed trước đó mà model lỗi → panic.
     pub fn in_memory() -> Self {
         let storage = Arc::new(RwLock::new(InMemoryStorage::default()))
             as Arc<RwLock<dyn crate::storage::Storage>>;
-        Self::new_with_storage(storage)
+        Self::new_with_storage(storage).expect("in_memory embedding backend init failed")
     }
 
     /// Mở index từ một backend persistent bằng DSN — rebuild từ entity store.
@@ -351,7 +409,7 @@ impl GraphIndex {
             .await
             .map_err(serr)?;
         let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
-        let mut idx = Self::new_with_storage(storage);
+        let mut idx = Self::new_with_storage(storage)?;
         idx.rebuild().await?;
         Ok(idx)
     }
@@ -362,7 +420,7 @@ impl GraphIndex {
             .await
             .map_err(serr)?;
         let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
-        let mut idx = Self::new_with_storage(storage);
+        let mut idx = Self::new_with_storage(storage)?;
         idx.rebuild().await?;
         Ok(idx)
     }
@@ -393,7 +451,7 @@ impl GraphIndex {
                 .await
                 .map_err(serr)?;
         let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
-        let mut idx = Self::new_with_storage(storage);
+        let mut idx = Self::new_with_storage(storage)?;
         idx.rebuild().await?;
         Ok(idx)
     }
@@ -437,7 +495,7 @@ impl GraphIndex {
                             .map_err(serr)?;
                         let storage = Arc::new(RwLock::new(storage))
                             as Arc<RwLock<dyn crate::storage::Storage>>;
-                        let mut idx = Self::new_with_storage(storage);
+                        let mut idx = Self::new_with_storage(storage)?;
                         idx.rebuild().await?;
                         Ok(idx)
                     }
@@ -457,7 +515,7 @@ impl GraphIndex {
                             .map_err(serr)?;
                         let storage = Arc::new(RwLock::new(storage))
                             as Arc<RwLock<dyn crate::storage::Storage>>;
-                        let mut idx = Self::new_with_storage(storage);
+                        let mut idx = Self::new_with_storage(storage)?;
                         idx.rebuild().await?;
                         Ok(idx)
                     }
@@ -473,12 +531,22 @@ impl GraphIndex {
         }
     }
 
-    fn new_with_storage(storage: Arc<RwLock<dyn crate::storage::Storage>>) -> Self {
+    fn new_with_storage(storage: Arc<RwLock<dyn crate::storage::Storage>>) -> Result<Self> {
         // Name engine luôn in-memory (như semgraph SearchIndex) — storage riêng
         // để record id (1..N) không đụng record của chain engine (func ids).
         let name_storage = Arc::new(RwLock::new(InMemoryStorage::default()))
             as Arc<RwLock<dyn crate::storage::Storage>>;
-        Self {
+        // Embedding chỉ bật khi config `[embedding].backend = "fastembed"` (opt-in).
+        // Nếu bật mà model tải thất bại → lỗi rõ ràng (KHÔNG fallback silent).
+        let (backend, enabled) = if embedding_enabled() {
+            let b = make_backend()
+                .map_err(|e| Error::Db(format!("embedding backend init failed: {e}")))?;
+            (Arc::from(b), true)
+        } else {
+            // Tắt → placeholder (không bao giờ gọi embed; vector index rỗng).
+            (Arc::from(default_backend()), false)
+        };
+        Ok(Self {
             chains: Search::new(CHAIN_SHARDING, storage.clone()),
             names: Search::new(CHAIN_SHARDING, name_storage),
             storage,
@@ -493,7 +561,10 @@ impl GraphIndex {
             files: Vec::new(),
             next_id: SYMBOL_BASE,
             version: 0,
-        }
+            embedding_backend: backend,
+            embedding_enabled: enabled,
+            vector_index: VectorIndex::new(crate::embeddings::VECTOR_DIM),
+        })
     }
 
     // ── Build / rebuild ──
@@ -578,6 +649,7 @@ impl GraphIndex {
         // Engines.
         self.rebuild_chain_engine(None).await?;
         self.rebuild_name_engine(None).await?;
+        self.rebuild_vector_index(None).await?;
         Ok(())
     }
 
@@ -695,6 +767,67 @@ impl GraphIndex {
                 p.advance(1);
             }
         }
+        Ok(())
+    }
+
+    /// Rebuild vector index (semantic search) từ symbols hiện tại.
+    ///
+    /// - Nếu embedding **TẮT** (`embedding_enabled = false`): vector index để
+    ///   rỗng, semantic search sẽ báo lỗi rõ ràng (không fallback silent).
+    /// - Nếu bật: ưu tiên load vector đã **persist trong storage** (tái dùng cho
+    ///   KNN/k-means, không re-embed). Chỉ những symbol thiếu vector mới được
+    ///   embed + `save_embedding` (incremental). Chạy sau khi registry + name
+    ///   engine đã sẵn sàng.
+    async fn rebuild_vector_index(&mut self, progress: Option<&dyn IngestProgress>) -> Result<()> {
+        if !self.embedding_enabled {
+            // Embedding tắt → không build vector index.
+            self.vector_index = VectorIndex::new(crate::embeddings::VECTOR_DIM);
+            return Ok(());
+        }
+        let dim = self.embedding_backend.dim();
+        let mut vi = VectorIndex::new(dim);
+        // Load các vector đã persist (tái dùng, không re-embed).
+        let stored = {
+            let st = self.storage.read().await;
+            st.load_all_embeddings().await.map_err(serr)?
+        };
+        // Symbol thiếu vector → compute + save.
+        let mut missing: Vec<(u64, String)> = Vec::new();
+        for sym in self.symbols.values() {
+            match stored.get(&sym.id) {
+                Some(v) if v.len() == dim => {
+                    vi.insert(sym.id, v.clone());
+                }
+                _ => missing.push((sym.id, embedding_text(sym))),
+            }
+        }
+        if !missing.is_empty() {
+            if let Some(p) = progress {
+                p.phase("embed vectors", missing.len());
+            }
+            eprintln!(
+                "codegraph: embedding {} symbols (batch) — this may take a while for large repos",
+                missing.len(),
+            );
+            // Batch-embed theo chunk để tận dụng tính toán hàng loạt (fastembed)
+            // và báo tiến độ từng bước — tránh quét tuần tự chậm + bar đứng im.
+            let mut st = self.storage.write().await;
+            let texts: Vec<String> = missing.iter().map(|(_, t)| t.clone()).collect();
+            const CHUNK: usize = 512;
+            let mut base = 0usize;
+            for chunk in texts.chunks(CHUNK) {
+                let vecs = self.embedding_backend.embed_batch(chunk);
+                for (v, (id, _)) in vecs.into_iter().zip(&missing[base..base + chunk.len()]) {
+                    vi.insert(*id, v.clone());
+                    st.save_embedding(*id, &v).await.map_err(serr)?;
+                }
+                base += chunk.len();
+                if let Some(p) = progress {
+                    p.advance(chunk.len());
+                }
+            }
+        }
+        self.vector_index = vi;
         Ok(())
     }
 
@@ -816,6 +949,7 @@ impl GraphIndex {
         // ── Phase 5: engines + version bump ──
         self.rebuild_chain_engine(p).await?;
         self.rebuild_name_engine(p).await?;
+        self.rebuild_vector_index(p).await?;
         self.version += 1;
         {
             let mut st = self.storage.write().await;
@@ -1193,77 +1327,9 @@ impl GraphIndex {
         out
     }
 
-    // ── Queries ──
-
-    /// Tìm symbol theo tên (substring, case-insensitive) qua name engine; lọc
-    /// theo kind nếu `Some`. `limit = 0` = không giới hạn (vẫn chặn bởi engine).
-    pub async fn search_symbol(
-        &self,
-        query: &str,
-        kind: Option<SymbolKind>,
-        limit: usize,
-    ) -> Result<Vec<Symbol>> {
-        self.search_symbol_filtered(query, limit, |s| kind.is_none() || s.kind == kind.unwrap())
-            .await
-    }
-
-    /// Như `search_symbol` nhưng chấp nhận NHIỀU kind — dùng cho sandbox (entry
-    /// có thể là `Function` free function (Rust/Go/...) hoặc `Method` (Java/...)).
-    pub async fn search_symbol_kinds(
-        &self,
-        query: &str,
-        kinds: &[SymbolKind],
-        limit: usize,
-    ) -> Result<Vec<Symbol>> {
-        self.search_symbol_filtered(query, limit, |s| kinds.contains(&s.kind))
-            .await
-    }
-
-    async fn search_symbol_filtered<F>(
-        &self,
-        query: &str,
-        limit: usize,
-        filter: F,
-    ) -> Result<Vec<Symbol>>
-    where
-        F: Fn(&Symbol) -> bool,
-    {
-        let q = query.to_lowercase();
-        let hits = match self.names.search(q.as_bytes(), None).await {
-            Ok(h) => h,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let limit = if limit == 0 { usize::MAX } else { limit };
-        let mut out = Vec::new();
-        let mut seen = HashSet::new();
-        for (record, _) in hits {
-            if record == 0 {
-                continue;
-            }
-            let Some(name) = self.name_records.get(record - 1) else {
-                continue;
-            };
-            let Some(ids) = self.name_index.get(name) else {
-                continue;
-            };
-            for &id in ids {
-                if !seen.insert(id) {
-                    continue;
-                }
-                let Some(s) = self.symbols.get(&id) else {
-                    continue;
-                };
-                if !filter(s) {
-                    continue;
-                }
-                out.push(s.clone());
-                if out.len() >= limit {
-                    return Ok(out);
-                }
-            }
-        }
-        Ok(out)
-    }
+    // ── Queries (mọi search đều qua `search_symbol_paged_resumable` — resumable,
+    // deadline-aware; các hàm tiện ích còn lại chỉ wrap nó, không có implementation
+    // song song) ──
 
     /// Symbol theo id.
     pub fn symbol_by_id(&self, id: u64) -> Option<Symbol> {
@@ -1909,30 +1975,8 @@ impl GraphIndex {
         }
     }
 
-    /// Search symbol nâng cao: lọc theo kind + match mode (contains/prefix/
-    /// suffix/exact) + phân trang. Trả về (page, total) — total là số khớp
-    /// trước phân trang, page sort theo (name, id) cho pagination ổn định.
-    pub async fn search_symbol_paged(
-        &self,
-        query: &str,
-        kind: Option<SymbolKind>,
-        mode: SymbolMatch,
-        limit: usize,
-        offset: usize,
-    ) -> Result<(Vec<Symbol>, usize)> {
-        let out = self
-            .search_symbol_paged_resumable(
-                query,
-                kind,
-                mode,
-                Pagination { limit, offset },
-                None,
-                None,
-            )
-            .await?;
-        Ok((out.page, out.total))
-    }
-    /// Phiên bản resumable + deadline-aware của [`search_symbol_paged`]: ngắt
+    /// Phiên bản resumable + deadline-aware của search symbol nâng cao (kind
+    /// filter + match mode contains/prefix/suffix/exact + phân trang): ngắt
     /// giữa chừng khi `deadline` hết hạn, trả `PagedSearchOutcome { timed_out:
     /// true, cursor: Some(phase dở) }` — caller gọi lại với `resume =
     /// Some(cursor)` để tiếp tục từ đúng vị trí (không lặp phần đã duyệt).
@@ -1946,6 +1990,18 @@ impl GraphIndex {
     /// - Hoàn tất + còn page sau → `cursor = Some(Paged)` để phân trang tiếp
     ///   không cần quét lại.
     ///
+    /// KNN: ưu tiên backend-native (SQLite + sqlite-vss `vss0` HNSW ANN) nếu
+    /// khả dụng, ngược lại brute-force in-memory `VectorIndex` (đúng cho mọi
+    /// backend). Trả `Vec<(symbol_id, sim)>` với `sim` cao = gần hơn.
+    async fn knn_hits(&self, qvec: &[f32], k: usize) -> Vec<(u64, f32)> {
+        if let Ok(guard) = self.storage.try_read()
+            && let Ok(Some(hits)) = guard.knn(qvec, k).await
+        {
+            return hits;
+        }
+        self.vector_index.knn(qvec, k)
+    }
+
     /// `resume` phải khớp (query, mode, kind) — sai → `InvalidArgument`.
     pub async fn search_symbol_paged_resumable(
         &self,
@@ -1968,86 +2024,163 @@ impl GraphIndex {
             ));
         }
 
+        // Semantic/Hybrid cần embedding bật (config `[embedding].backend = "fastembed"`).
+        // Nếu tắt → lỗi rõ ràng (KHÔNG fallback silent sang lexical/hashing).
+        if matches!(mode, SymbolMatch::Semantic | SymbolMatch::Hybrid) && !self.embedding_enabled {
+            return Err(Error::Invalid(
+                "semantic/hybrid search requires embedding; enable `[embedding] backend = \"fastembed\"` in config".into(),
+            ));
+        }
+
         // ── Khôi phục / khởi tạo phase ──
         let (mut phase, mut timed_out) = match resume.map(|c| c.phase) {
             Some(p) => (p, false),
             None => (
                 match mode {
                     SymbolMatch::Contains => SearchCursorPhase::Engine(SearchResume::default()),
+                    // Semantic/Hybrid dùng placeholder — Phase A ghi đè thành
+                    // `Candidates` (tính KNN/RRF).
+                    SymbolMatch::Semantic | SymbolMatch::Hybrid => {
+                        SearchCursorPhase::Engine(SearchResume::default())
+                    }
                     _ => SearchCursorPhase::ScanNames { name_pos: 0 },
                 },
                 false,
             ),
         };
 
-        // ── Phase A: sinh danh sách tên khớp (sort) ──
-        match &mut phase {
-            SearchCursorPhase::Engine(sr) => {
-                let page = self
-                    .names
-                    .search_resumable(q.as_bytes(), None, Some(sr.clone()), deadline)
-                    .await?;
-                if page.timed_out {
-                    phase = SearchCursorPhase::Engine(page.resume.unwrap_or_default());
-                    timed_out = true;
-                } else {
-                    // record → tên, sort → Expand.
-                    let mut names: Vec<String> = page
-                        .record_ids
-                        .iter()
-                        .filter_map(|&r| {
-                            if r == 0 {
-                                return None;
-                            }
-                            self.name_records.get(r - 1).cloned()
-                        })
-                        .collect();
-                    names.sort();
-                    phase = SearchCursorPhase::Expand {
-                        names,
-                        name_idx: 0,
-                        id_idx: 0,
-                        collected: Vec::new(),
-                    };
-                }
-            }
-            SearchCursorPhase::ScanNames { name_pos } => {
-                let mut matched: Vec<String> = Vec::new();
-                let mut pos = *name_pos;
-                loop {
-                    if let Some(dl) = deadline
-                        && Instant::now() >= dl
-                    {
-                        phase = SearchCursorPhase::ScanNames { name_pos: pos };
+        // ── Phase A: sinh danh sách candidate (sort) — dispatch theo mode ──
+        match mode {
+            SymbolMatch::Contains => {
+                if let SearchCursorPhase::Engine(sr) = &mut phase {
+                    let page = self
+                        .names
+                        .search_resumable(q.as_bytes(), None, Some(sr.clone()), deadline)
+                        .await?;
+                    if page.timed_out {
+                        phase = SearchCursorPhase::Engine(page.resume.unwrap_or_default());
                         timed_out = true;
-                        break;
+                    } else {
+                        // record → tên, sort → Expand.
+                        let mut names: Vec<String> = page
+                            .record_ids
+                            .iter()
+                            .filter_map(|&r| {
+                                if r == 0 {
+                                    return None;
+                                }
+                                self.name_records.get(r - 1).cloned()
+                            })
+                            .collect();
+                        names.sort();
+                        phase = SearchCursorPhase::Expand {
+                            names,
+                            name_idx: 0,
+                            id_idx: 0,
+                            collected: Vec::new(),
+                        };
                     }
-                    if pos >= self.sorted_name_keys.len() {
-                        break;
-                    }
-                    let name = &self.sorted_name_keys[pos];
-                    let ok = match mode {
-                        SymbolMatch::Prefix => name.starts_with(&q),
-                        SymbolMatch::Suffix => name.ends_with(&q),
-                        SymbolMatch::Exact => name == &q,
-                        _ => false,
-                    };
-                    if ok {
-                        matched.push(name.clone());
-                    }
-                    pos += 1;
                 }
-                if !timed_out {
-                    phase = SearchCursorPhase::Expand {
-                        names: matched,
-                        name_idx: 0,
-                        id_idx: 0,
+            }
+            SymbolMatch::Prefix | SymbolMatch::Suffix | SymbolMatch::Exact => {
+                if let SearchCursorPhase::ScanNames { name_pos } = &mut phase {
+                    let mut matched: Vec<String> = Vec::new();
+                    let mut pos = *name_pos;
+                    loop {
+                        if let Some(dl) = deadline
+                            && Instant::now() >= dl
+                        {
+                            phase = SearchCursorPhase::ScanNames { name_pos: pos };
+                            timed_out = true;
+                            break;
+                        }
+                        if pos >= self.sorted_name_keys.len() {
+                            break;
+                        }
+                        let name = &self.sorted_name_keys[pos];
+                        let ok = match mode {
+                            SymbolMatch::Prefix => name.starts_with(&q),
+                            SymbolMatch::Suffix => name.ends_with(&q),
+                            SymbolMatch::Exact => name == &q,
+                            _ => false,
+                        };
+                        if ok {
+                            matched.push(name.clone());
+                        }
+                        pos += 1;
+                    }
+                    if !timed_out {
+                        phase = SearchCursorPhase::Expand {
+                            names: matched,
+                            name_idx: 0,
+                            id_idx: 0,
+                            collected: Vec::new(),
+                        };
+                    }
+                }
+            }
+            SymbolMatch::Semantic => {
+                if !matches!(
+                    phase,
+                    SearchCursorPhase::Candidates { .. } | SearchCursorPhase::Paged { .. }
+                ) {
+                    let qvec = self.embedding_backend.embed(&q);
+                    let k = (pagination.limit * 4).max(32);
+                    let ids: Vec<u64> = self
+                        .knn_hits(&qvec, k)
+                        .await
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect();
+                    phase = SearchCursorPhase::Candidates {
+                        ids,
+                        idx: 0,
                         collected: Vec::new(),
                     };
                 }
             }
-            // Phase A xong rồi (timed out ở phase B trước) — không làm gì.
-            _ => {}
+            SymbolMatch::Hybrid => {
+                if !matches!(
+                    phase,
+                    SearchCursorPhase::Candidates { .. } | SearchCursorPhase::Paged { .. }
+                ) {
+                    // Lexical (Contains) trên name engine.
+                    let lex: Vec<u64> = self
+                        .names
+                        .search(q.as_bytes(), None)
+                        .await
+                        .map(|recs| {
+                            let mut out = Vec::new();
+                            for (r, _) in recs {
+                                if r == 0 {
+                                    continue;
+                                }
+                                if let Some(name) = self.name_records.get(r - 1)
+                                    && let Some(ids) = self.name_index.get(name)
+                                {
+                                    out.extend_from_slice(ids);
+                                }
+                            }
+                            out
+                        })
+                        .unwrap_or_default();
+                    // Vector (Semantic).
+                    let qvec = self.embedding_backend.embed(&q);
+                    let k = (pagination.limit * 4).max(32);
+                    let vec_ids: Vec<u64> = self
+                        .knn_hits(&qvec, k)
+                        .await
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect();
+                    let ids = rrf_fuse(&[lex, vec_ids]);
+                    phase = SearchCursorPhase::Candidates {
+                        ids,
+                        idx: 0,
+                        collected: Vec::new(),
+                    };
+                }
+            }
         }
 
         // ── Phase B: stream ids theo tên đã sort → collected ──
@@ -2092,12 +2225,43 @@ impl GraphIndex {
             }
         }
 
+        // ── Phase B (Candidates): stream id vector (Semantic/Hybrid) → collected ──
+        if !timed_out
+            && let SearchCursorPhase::Candidates {
+                ids,
+                idx,
+                collected,
+            } = &mut phase
+        {
+            loop {
+                if let Some(dl) = deadline
+                    && Instant::now() >= dl
+                {
+                    timed_out = true;
+                    break;
+                }
+                if *idx >= ids.len() {
+                    break;
+                }
+                let id = ids[*idx];
+                *idx += 1;
+                if let Some(k) = kind {
+                    if self.symbols.get(&id).is_some_and(|s| s.kind == k) {
+                        collected.push(id);
+                    }
+                } else {
+                    collected.push(id);
+                }
+            }
+        }
+
         // ── Trang kết quả + cursor ──
         if timed_out {
             let progress = match &phase {
                 SearchCursorPhase::Engine(sr) => sr.record_ids.len(),
                 SearchCursorPhase::ScanNames { name_pos } => *name_pos,
                 SearchCursorPhase::Expand { collected, .. } => collected.len(),
+                SearchCursorPhase::Candidates { collected, .. } => collected.len(),
                 SearchCursorPhase::Paged { .. } => 0,
             };
             return Ok(PagedSearchOutcome {
@@ -2114,9 +2278,13 @@ impl GraphIndex {
             });
         }
 
-        // Hoàn tất: lấy collected + total từ Expand, hoặc dùng thẳng từ Paged.
+        // Hoàn tất: lấy collected + total từ Expand/Candidates, hoặc dùng thẳng từ Paged.
         let (collected, total) = match &phase {
             SearchCursorPhase::Expand { collected, .. } => {
+                let total = collected.len();
+                (collected.clone(), total)
+            }
+            SearchCursorPhase::Candidates { collected, .. } => {
                 let total = collected.len();
                 (collected.clone(), total)
             }
@@ -2151,27 +2319,6 @@ impl GraphIndex {
                 phase: SearchCursorPhase::Paged { collected, total },
             }),
         })
-    }
-
-    /// Resumable + deadline-aware của `search_symbol_filtered` (mode Contains,
-    /// không lọc kind) — nền cho `codegraph_search`. `limit` chặn số symbol
-    /// trả về; kết quả sort theo (name, id).
-    pub async fn search_symbol_resumable(
-        &self,
-        query: &str,
-        limit: usize,
-        resume: Option<SearchCursor>,
-        deadline: Option<Instant>,
-    ) -> Result<PagedSearchOutcome> {
-        self.search_symbol_paged_resumable(
-            query,
-            None,
-            SymbolMatch::Contains,
-            Pagination { limit, offset: 0 },
-            resume,
-            deadline,
-        )
-        .await
     }
 
     /// Số liệu tổng hợp.
@@ -2264,11 +2411,41 @@ mod tests {
         );
         idx.ingest(&[r]).await.unwrap();
 
-        // search_symbol (substring, case-insensitive).
-        let hits = idx.search_symbol("b", None, 10).await.unwrap();
+        // search_symbol (substring, case-insensitive) — qua resumable.
+        let hits = idx
+            .search_symbol_paged_resumable(
+                "b",
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .page;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "b");
-        assert!(idx.search_symbol("zzz", None, 10).await.unwrap().is_empty());
+        assert!(
+            idx.search_symbol_paged_resumable(
+                "zzz",
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: 10,
+                    offset: 0
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .page
+            .is_empty()
+        );
 
         // callees của a = [b]; của b = [c].
         let cees = idx.callees(SYMBOL_BASE).await.unwrap();
@@ -2450,8 +2627,22 @@ mod tests {
         assert!(!res2.ambiguous);
         assert_eq!(res2.symbol.unwrap().id, SYMBOL_BASE);
 
-        // search_symbol mở rộng cả 2 symbol trùng tên.
-        let hits = idx.search_symbol("process", None, 10).await.unwrap();
+        // search_symbol mở rộng cả 2 symbol trùng tên — qua resumable.
+        let hits = idx
+            .search_symbol_paged_resumable(
+                "process",
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .page;
         assert_eq!(hits.len(), 2);
     }
 
@@ -2570,6 +2761,70 @@ mod tests {
         assert_eq!(idx.stats().edges, 1);
         assert_eq!(idx.callees(SYMBOL_BASE).await.unwrap()[0].name, "b");
         assert_eq!(idx.symbol_by_id(SYMBOL_BASE + 1).unwrap().file, "b.ts");
+    }
+
+    /// Embedding là OPT-IN + PERSIST: bật backend "hashing", ingest (lưu vector
+    /// vào sqlite), reopen → vector index được rebuild TỪ embeddings đã lưu
+    /// (không re-embed), semantic search vẫn chạy.
+    #[tokio::test]
+    async fn sqlite_embeddings_persist_and_reopen() {
+        crate::embeddings::set_embedding_config(crate::embeddings::EmbeddingConfig::from_raw(
+            Some("hashing"),
+            None,
+            None,
+            None,
+            None,
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("sqlite://{}/db.sqlite", dir.path().to_string_lossy());
+        let r = result(
+            "a.ts",
+            vec![
+                sym("auth.rs", "authenticate_user", SYMBOL_BASE),
+                sym("db.rs", "query_database", SYMBOL_BASE + 1),
+            ],
+            HashMap::new(),
+            vec![],
+        );
+        {
+            let mut idx = GraphIndex::open(&path).await.unwrap();
+            idx.ingest(&[r]).await.unwrap();
+            // Semantic chạy được (embedding enabled).
+            let sem = idx
+                .search_symbol_paged_resumable(
+                    "authenticte",
+                    None,
+                    SymbolMatch::Semantic,
+                    Pagination {
+                        limit: 10,
+                        offset: 0,
+                    },
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .page;
+            assert_eq!(sem[0].name, "authenticate_user");
+        }
+        // Reopen — vector index phải được load từ embeddings đã persist.
+        let idx = GraphIndex::open(&path).await.unwrap();
+        let sem = idx
+            .search_symbol_paged_resumable(
+                "authenticte",
+                None,
+                SymbolMatch::Semantic,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .page;
+        assert_eq!(sem[0].name, "authenticate_user");
     }
 
     /// Ingest 2 lần = full re-index — dữ liệu cũ biến mất, id gán lại từ đầu.
@@ -2695,41 +2950,83 @@ mod tests {
         let (_, total, _) = idx.search_by_annotation("controller", Some(SymbolKind::Class), 0, 1);
         assert_eq!(total, 1, "kind filter loại bỏ match không đúng kind");
 
-        // search_symbol_paged — prefix/suffix/exact + kind filter.
-        let (hits, total) = idx
-            .search_symbol_paged("order", Some(SymbolKind::Class), SymbolMatch::Prefix, 10, 0)
+        // search_symbol_paged — prefix/suffix/exact + kind filter (resumable).
+        let out = idx
+            .search_symbol_paged_resumable(
+                "order",
+                Some(SymbolKind::Class),
+                SymbolMatch::Prefix,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
             .await
             .unwrap();
+        let hits = out.page;
+        let total = out.total;
         assert_eq!(
             total, 2,
             "OrderService + OrderController khớp prefix 'order' + kind class"
         );
         assert_eq!(hits[0].name, "OrderController");
         assert_eq!(hits[1].name, "OrderService");
-        let (hits, total) = idx
-            .search_symbol_paged(
+        let out = idx
+            .search_symbol_paged_resumable(
                 "service",
                 Some(SymbolKind::Class),
                 SymbolMatch::Suffix,
-                10,
-                0,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
             )
             .await
             .unwrap();
+        let hits = out.page;
+        let total = out.total;
         assert_eq!(total, 1);
         assert_eq!(hits[0].name, "OrderService");
-        let (hits, total) = idx
-            .search_symbol_paged("validate", None, SymbolMatch::Exact, 10, 0)
+        let out = idx
+            .search_symbol_paged_resumable(
+                "validate",
+                None,
+                SymbolMatch::Exact,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
             .await
             .unwrap();
+        let hits = out.page;
+        let total = out.total;
         assert_eq!(total, 1);
         assert_eq!(hits[0].name, "validate");
         // contains + pagination. Sort theo tên lowercase (nhất quán với search
         // case-insensitive): "getorders" đứng trước "order*".
-        let (page0, total) = idx
-            .search_symbol_paged("order", None, SymbolMatch::Contains, 2, 0)
+        let out = idx
+            .search_symbol_paged_resumable(
+                "order",
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: 2,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
             .await
             .unwrap();
+        let page0 = out.page;
+        let total = out.total;
         assert_eq!(
             total, 4,
             "OrderService, OrderController, OrderRepository + getOrders"
@@ -2737,10 +3034,21 @@ mod tests {
         assert_eq!(page0.len(), 2);
         assert_eq!(page0[0].name, "getOrders");
         assert_eq!(page0[1].name, "OrderController");
-        let (page1, _) = idx
-            .search_symbol_paged("order", None, SymbolMatch::Contains, 2, 2)
+        let out = idx
+            .search_symbol_paged_resumable(
+                "order",
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: 2,
+                    offset: 2,
+                },
+                None,
+                None,
+            )
             .await
             .unwrap();
+        let page1 = out.page;
         assert_eq!(page1.len(), 2);
         assert_eq!(page1[0].name, "OrderRepository");
         assert_eq!(page1[1].name, "OrderService");
@@ -2853,10 +3161,19 @@ mod tests {
             ),
         ];
         for (q, kind, mode, limit, offset) in cases {
-            let (direct_page, direct_total) = idx
-                .search_symbol_paged(q, kind, mode, limit, offset)
+            let direct = idx
+                .search_symbol_paged_resumable(
+                    q,
+                    kind,
+                    mode,
+                    Pagination { limit, offset },
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
+            let direct_page = direct.page;
+            let direct_total = direct.total;
             let chained = chained(&idx, q, kind, mode, limit, offset).await;
             assert_eq!(
                 chained.total, direct_total,
@@ -2892,10 +3209,22 @@ mod tests {
         }
         idx.ingest(&results).await.unwrap();
 
-        let (direct_page, direct_total) = idx
-            .search_symbol_paged("order", None, SymbolMatch::Contains, 10, 0)
+        let direct = idx
+            .search_symbol_paged_resumable(
+                "order",
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
             .await
             .unwrap();
+        let direct_page = direct.page;
+        let direct_total = direct.total;
         assert_eq!(direct_total, 4000);
 
         // Call đầu deadline hết hạn → chắc chắn timed_out (tạo checkpoint).
@@ -3010,5 +3339,68 @@ mod tests {
         let external_names: Vec<&str> = report.external.iter().map(|d| d.name.as_str()).collect();
         assert!(external_names.contains(&"fmt"));
         assert!(external_names.contains(&"requests"));
+    }
+
+    #[tokio::test]
+    async fn semantic_and_hybrid_search() {
+        // Embedding là OPT-IN — test này bật tường minh backend "hashing"
+        // (dependency-free, không tải model) để semantic/hybrid search chạy.
+        crate::embeddings::set_embedding_config(crate::embeddings::EmbeddingConfig::from_raw(
+            Some("hashing"),
+            None,
+            None,
+            None,
+            None,
+        ));
+        let mut idx = GraphIndex::in_memory();
+        // Tên gần giống nhau → hashing embeddings sinh vector tương tự →
+        // KNN cosine tìm được dù query sai chính tả.
+        let syms = vec![
+            sym("auth.rs", "authenticate_user", SYMBOL_BASE),
+            sym("auth.rs", "authorize_request", SYMBOL_BASE + 1),
+            sym("db.rs", "query_database", SYMBOL_BASE + 2),
+            sym("db.rs", "parse_config", SYMBOL_BASE + 3),
+        ];
+        let r = result("f.rs", syms, HashMap::new(), vec![]);
+        idx.ingest(&[r]).await.unwrap();
+
+        // Semantic: query lệch chính tả "authenticte" vẫn phải rank
+        // authenticate_user lên đầu (KNN cosine trên embedding).
+        let sem = idx
+            .search_symbol_paged_resumable(
+                "authenticte",
+                None,
+                SymbolMatch::Semantic,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .page;
+        assert!(!sem.is_empty(), "semantic search must return candidates");
+        assert_eq!(sem[0].name, "authenticate_user");
+
+        // Hybrid: "auth" (lexical) + vector → vẫn phải có authenticate_user.
+        let hyb = idx
+            .search_symbol_paged_resumable(
+                "auth",
+                None,
+                SymbolMatch::Hybrid,
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .page;
+        assert!(!hyb.is_empty());
+        assert!(hyb.iter().any(|s| s.name == "authenticate_user"));
     }
 }

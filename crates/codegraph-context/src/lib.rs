@@ -4,8 +4,8 @@
 //! còn `Db`/`Traversal` cũ — query surface mới của `GraphIndex`:
 //! `search_symbol` → `callers`/`callees` (BFS trên chain engine).
 
-use codegraph_core::{Result, Symbol};
-use codegraph_graph::SharedGraphIndex;
+use codegraph_core::{Result, Symbol, SymbolMatch};
+use codegraph_graph::{Pagination, SharedGraphIndex};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -74,8 +74,19 @@ pub async fn build_response(
 ) -> Result<ContextResponse> {
     let idx = index.ensure_fresh().await;
     let candidates = idx
-        .search_symbol(&req.query, None, req.limit as usize)
-        .await?;
+        .search_symbol_paged_resumable(
+            &req.query,
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: req.limit as usize,
+                offset: 0,
+            },
+            None,
+            None,
+        )
+        .await?
+        .page;
 
     // Pre-load mỗi file một lần khi cần source.
     let file_cache: HashMap<String, Vec<String>> = if req.include_source {

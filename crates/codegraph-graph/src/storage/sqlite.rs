@@ -26,7 +26,15 @@
 //! atomic trong một SQLite transaction tại `commit` (giống InMemory/Redis).
 //! Mọi query là runtime SQL (không dùng macro `query!` — tránh phụ thuộc
 //! `DATABASE_URL` lúc build).
+//!
+//! Nếu extension sqlite-vss (`vector0`/`vss0`) có mặt (config
+//! `[embedding].vss_extension`), kết nối sẽ load extension và tạo thêm virtual
+//! table `sg_vss USING vss0(vec(384))` để KNN semantic chạy HNSW ANN ngay trong
+//! SQLite. Thiếu extension → `sg_vss` không được tạo, KNN fallback brute-force
+//! in-memory (như mọi backend khác).
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -34,7 +42,8 @@ use codegraph_core::{FileInfo, Symbol};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
-use super::{EMPTY, Result, Storage, StorageError, Tx, TxOp};
+use super::{EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_vector, encode_vector};
+use crate::embeddings::resolve_vss_extensions;
 
 fn db_err(e: sqlx::Error) -> StorageError {
     StorageError::Internal(e.to_string())
@@ -44,6 +53,10 @@ fn db_err(e: sqlx::Error) -> StorageError {
 
 pub struct SqliteStorage {
     pool: SqlitePool,
+    /// `true` nếu extension sqlite-vss (`vss0`) đã load thành công và bảng
+    /// `sg_vss` sẵn sàng — KNN semantic chạy qua `vss0` (HNSW ANN trong SQLite).
+    /// `false` → KNN fallback sang `VectorIndex` in-memory (brute-force).
+    vss_available: AtomicBool,
 }
 
 impl SqliteStorage {
@@ -57,17 +70,52 @@ impl SqliteStorage {
         {
             std::fs::create_dir_all(parent).map_err(|e| StorageError::Internal(e.to_string()))?;
         }
-        let options = SqliteConnectOptions::new()
+        // Nếu extension sqlite-vss (`vector0`/`vss0`) có mặt → load vào kết nối
+        // để KNN chạy HNSW ANN ngay trong SQLite. Thiếu file → không load, KNN
+        // fallback brute-force (open vẫn thành công).
+        let vss = resolve_vss_extensions();
+        let mut options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_secs(5));
+        let vss_requested = if let Some((v0, vss_ext)) = &vss {
+            options = options
+                .extension(v0.to_string_lossy().into_owned())
+                .extension(vss_ext.to_string_lossy().into_owned());
+            true
+        } else {
+            false
+        };
         let pool = SqlitePoolOptions::new()
             .connect_with(options)
             .await
             .map_err(db_err)?;
-        let s = Self { pool };
+        let s = Self {
+            pool,
+            vss_available: AtomicBool::new(false),
+        };
         s.init().await?;
+        // Bật `sg_vss` (vss0 virtual table) khi extension đã được load. Nếu tạo
+        // bảng lỗi → tắt vss, KNN fallback brute-force (vẫn hoạt động đúng).
+        let available = if vss_requested {
+            match sqlx::query("CREATE VIRTUAL TABLE IF NOT EXISTS sg_vss USING vss0(vec(384))")
+                .execute(&mut *s.pool.acquire().await.map_err(db_err)?)
+                .await
+            {
+                Ok(_) => true,
+                Err(e) => {
+                    eprintln!(
+                        "codegraph: sqlite-vss loaded but vss0 table create failed; \
+                         falling back to brute-force KNN: {e}"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        s.vss_available.store(available, Ordering::SeqCst);
         Ok(s)
     }
 
@@ -169,6 +217,11 @@ impl SqliteStorage {
             "CREATE TABLE IF NOT EXISTS sg_meta (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 version INTEGER NOT NULL
+            )",
+            // ── Embeddings (vector per symbol id) ──
+            "CREATE TABLE IF NOT EXISTS sg_embeddings (
+                symbol_id INTEGER PRIMARY KEY,
+                vector BLOB NOT NULL
             )",
             // Sentinel node id 0 + counter bắt đầu từ 1.
             "INSERT OR IGNORE INTO rt_nodes (id, prefix, record) VALUES (0, X'', 0)",
@@ -473,6 +526,91 @@ impl Storage for SqliteStorage {
         Ok(next as u64)
     }
 
+    async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO sg_embeddings (symbol_id, vector) VALUES (?1, ?2)
+             ON CONFLICT(symbol_id) DO UPDATE SET vector = excluded.vector",
+        )
+        .bind(symbol_id as i64)
+        .bind(encode_vector(vector))
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        // Mirror vào `vss0` (HNSW ANN) nếu extension khả dụng.
+        if self.vss_available.load(Ordering::SeqCst) {
+            sqlx::query("INSERT OR REPLACE INTO sg_vss(rowid, vec) VALUES (?1, ?2)")
+                .bind(symbol_id as i64)
+                .bind(encode_vector(vector))
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let data: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT vector FROM sg_embeddings WHERE symbol_id = ?1")
+                .bind(symbol_id as i64)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        Ok(data.and_then(|b| decode_vector(&b)))
+    }
+
+    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let rows: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT symbol_id, vector FROM sg_embeddings ORDER BY symbol_id")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, b)| decode_vector(&b).map(|v| (id as u64, v)))
+            .collect())
+    }
+
+    async fn clear_embeddings(&mut self) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query("DELETE FROM sg_embeddings")
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        if self.vss_available.load(Ordering::SeqCst) {
+            sqlx::query("DELETE FROM sg_vss")
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    async fn knn(&self, query_vec: &[f32], k: usize) -> Result<Option<Vec<(u64, f32)>>> {
+        if !self.vss_available.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        // `vss_search(vec, <query>)` trả các row gần nhất + `distance` (nhỏ = gần).
+        // Đảo dấu distance → `sim` (lớn = gần) đồng nhất với `VectorIndex::knn`.
+        let rows: Vec<(i64, f64)> = sqlx::query_as(
+            "SELECT rowid, distance FROM sg_vss
+             WHERE vss_search(vec, ?) ORDER BY distance LIMIT ?",
+        )
+        .bind(encode_vector(query_vec))
+        .bind(k as i64)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(Some(
+            rows.into_iter()
+                .map(|(id, dist)| (id as u64, -dist as f32))
+                .collect(),
+        ))
+    }
+
     async fn all_chains(&self) -> Result<Vec<(u64, Vec<u8>)>> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         let rows: Vec<(i64, Vec<u8>)> =
@@ -614,6 +752,7 @@ impl Storage for SqliteStorage {
             "DELETE FROM sg_call_records",
             "DELETE FROM sg_call_names",
             "DELETE FROM sg_files",
+            "DELETE FROM sg_embeddings",
             "UPDATE sg_next_id SET next = 100 WHERE id = 1",
             "UPDATE sg_meta SET version = 0 WHERE id = 1",
         ] {
@@ -1138,6 +1277,60 @@ mod tests {
         assert_eq!(s.get_chain(10).await.unwrap(), None);
         s.clear_chains().await.unwrap();
         assert_eq!(s.get_chain(9).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_embeddings_roundtrip() {
+        let (_d, path) = tmp_path();
+        // Save embeddings, then reload — verify BLOB persistence (dùng lại cho
+        // KNN/k-means mà không re-embed).
+        let mut s = SqliteStorage::open(&path).await.unwrap();
+        let v1 = vec![0.1f32, 0.2, 0.3, -0.4];
+        let v2 = vec![1.0f32, -1.0, 0.0, 0.5];
+        s.save_embedding(100, &v1).await.unwrap();
+        s.save_embedding(101, &v2).await.unwrap();
+        // upsert overwrite cho 100.
+        s.save_embedding(100, &v2).await.unwrap();
+
+        let all = s.load_all_embeddings().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.get(&100).unwrap(),
+            &v2,
+            "id 100 phải bị overwrite thành v2"
+        );
+        assert_eq!(all.get(&101).unwrap(), &v2, "id 101 giữ v2");
+        assert_eq!(s.load_embedding(100).await.unwrap().unwrap(), v2);
+        assert_eq!(s.load_embedding(101).await.unwrap().unwrap(), v2);
+
+        // clear → rỗng
+        s.clear_embeddings().await.unwrap();
+        assert!(s.load_all_embeddings().await.unwrap().is_empty());
+        assert_eq!(s.load_embedding(101).await.unwrap(), None);
+    }
+
+    /// KNN qua sqlite-vss (`vss0`) — chỉ chạy khi extension thực sự có mặt
+    /// (`vector0`/`vss0` trong `vss_extension` config hoặc `<cache_dir>/vss`).
+    /// Thiếu extension → skip (KNN lúc đó fallback brute-force in-memory).
+    #[tokio::test]
+    async fn test_vss_knn_when_extension_present() {
+        if crate::embeddings::resolve_vss_extensions().is_none() {
+            return;
+        }
+        let (_d, path) = tmp_path();
+        let mut s = SqliteStorage::open(&path).await.unwrap();
+        // Hai vector 384-dim: `a` cùng chiều với query, `b` ngược chiều.
+        let a: Vec<f32> = vec![1.0; 384];
+        let b: Vec<f32> = vec![-1.0; 384];
+        let q: Vec<f32> = vec![1.0; 384];
+        s.save_embedding(1, &a).await.unwrap();
+        s.save_embedding(2, &b).await.unwrap();
+        let hits = s.knn(&q, 2).await.unwrap();
+        let hits = hits.expect("vss phải khả dụng khi extension có mặt");
+        assert_eq!(hits.len(), 2);
+        // Gần nhất với query (1,1,...) phải là `a` (id 1), không phải `b`.
+        assert_eq!(hits[0].0, 1, "vss KNN phải trả symbol gần nhất trước");
+        assert!(hits[0].1 > hits[1].1, "similarity phải giảm dần");
     }
 
     #[tokio::test]

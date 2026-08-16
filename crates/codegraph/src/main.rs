@@ -5,6 +5,9 @@ use codegraph_extract::{ExtractStats, Orchestrator};
 use codegraph_graph::GraphIndex;
 use codegraph_mcp::CodegraphServer;
 
+#[cfg(feature = "fastembed")]
+use codegraph_graph::embeddings::warm_model_cache;
+
 mod watcher;
 
 /// CLI tối giản: chỉ còn lifecycle (`init`/`deinit`) + MCP server (`serve --mcp`).
@@ -46,6 +49,18 @@ enum Cmd {
     },
     /// Remove the .codegraph/ directory.
     Deinit,
+    /// Pre-download an embedding model into the global cache (so semantic search
+    /// works offline). Model is cached under `[embedding].cache_dir` (default
+    /// `~/.cache/codegraph/embeddings`). Requires the `fastembed` feature.
+    #[cfg(feature = "fastembed")]
+    Embed {
+        /// Model name/alias to download, e.g. "bge-small-en-v1.5" (default).
+        #[arg(long, default_value = "bge-small-en-v1.5")]
+        model: String,
+        /// Cache directory (global). Default: ~/.cache/codegraph/embeddings.
+        #[arg(long)]
+        cache_dir: Option<String>,
+    },
     /// Run as MCP server (stdio qua `--mcp`, hoặc Streamable HTTP qua `--http`).
     Serve {
         #[arg(long)]
@@ -126,6 +141,8 @@ async fn main() -> Result<()> {
     match cmd {
         Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
         Cmd::Deinit => cmd_deinit(&root),
+        #[cfg(feature = "fastembed")]
+        Cmd::Embed { model, cache_dir } => cmd_embed(&model, cache_dir.as_deref()).await,
         Cmd::Serve {
             mcp,
             http,
@@ -233,6 +250,15 @@ fn cmd_deinit(root: &Utf8Path) -> Result<()> {
         std::fs::remove_dir_all(&dir)?;
         eprintln!("removed {}", dir);
     }
+    Ok(())
+}
+
+/// `codegraph embed --model <x>`: pre-download model vào global cache để
+/// semantic search chạy offline.
+#[cfg(feature = "fastembed")]
+async fn cmd_embed(model: &str, cache_dir: Option<&str>) -> Result<()> {
+    let dir = cache_dir.map(std::path::Path::new);
+    warm_model_cache(model, dir).map_err(|e| anyhow!("failed to cache embedding model: {e}"))?;
     Ok(())
 }
 

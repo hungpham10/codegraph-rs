@@ -462,6 +462,12 @@ pub enum SymbolMatch {
     Suffix,
     /// Tên trùng chính xác (case-insensitive).
     Exact,
+    /// Semantic (vector): query → embedding → KNN over symbol embeddings —
+    /// tìm symbol **tên tương tự / cùng ý nghĩa** kể cả khi không khớp substring.
+    Semantic,
+    /// Hybrid: chạy cả `Contains` (lexical) lẫn `Semantic` (vector), gộp kết
+    /// quả bằng Reciprocal Rank Fusion (RRF).
+    Hybrid,
 }
 
 impl SymbolMatch {
@@ -472,6 +478,8 @@ impl SymbolMatch {
             "prefix" => Self::Prefix,
             "suffix" => Self::Suffix,
             "exact" => Self::Exact,
+            "semantic" => Self::Semantic,
+            "hybrid" => Self::Hybrid,
             _ => return None,
         })
     }

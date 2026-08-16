@@ -19,6 +19,29 @@ use codegraph_core::{FileInfo, Symbol};
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
+/// Mã hoá vector f32 thành BLOB little-endian (4 byte/phần tử) — chia sẻ cho
+/// mọi backend persist (sqlite/lmdb/rdbms/redis) để lưu embedding vào storage.
+pub(crate) fn encode_vector(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
+}
+
+/// Giải mã BLOB little-endian thành vector f32. Trả `None` nếu độ dài không
+/// chia hết cho 4 (corrupt).
+pub(crate) fn decode_vector(b: &[u8]) -> Option<Vec<f32>> {
+    if !b.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(b.len() / 4);
+    for chunk in b.chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Some(out)
+}
+
 #[cfg(feature = "redis")]
 pub mod redis;
 
@@ -326,6 +349,34 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    // ── Embeddings (vector per symbol id) ──
+    /// Lưu vector embedding cho một symbol (keyed theo symbol id). Vector đã
+    /// L2-normalize (cosine = dot product). Mặc định: no-op.
+    async fn save_embedding(&mut self, _symbol_id: u64, _vector: &[f32]) -> Result<()> {
+        Ok(())
+    }
+    /// Đọc vector embedding của symbol — `None` nếu chưa có. Mặc định: `None`.
+    async fn load_embedding(&self, _symbol_id: u64) -> Result<Option<Vec<f32>>> {
+        Ok(None)
+    }
+    /// Đọc toàn bộ embeddings (symbol_id → vector) — rebuild VectorIndex khi
+    /// open. Mặc định: rỗng.
+    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
+        Ok(HashMap::new())
+    }
+    /// Xoá toàn bộ embeddings — dùng khi full re-index. Mặc định: no-op.
+    async fn clear_embeddings(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// KNN backend-native (SQLite + sqlite-vss). Trả `Some(hits)` nếu backend
+    /// hỗ trợ ANN, `None` để caller fallback sang `VectorIndex` in-memory
+    /// (brute-force, đúng cho mọi backend). `hits` = `Vec<(symbol_id, sim)>`
+    /// với `sim` cao = gần hơn (đã đảo dấu distance để đồng nhất với
+    /// `VectorIndex::knn`). Mặc định: `None` (không backend-native).
+    async fn knn(&self, _query_vec: &[f32], _k: usize) -> Result<Option<Vec<(u64, f32)>>> {
+        Ok(None)
+    }
+
     // ── Transaction ──
     /// Bắt đầu một transaction (sync, không await — đúng theo cách radix gọi).
     /// Buffer ops; mọi thay đổi chỉ lộ ra khi `commit`.
@@ -370,6 +421,8 @@ struct MemoryData {
     files: HashMap<String, FileInfo>,
     /// index version.
     version: u64,
+    /// symbol id → embedding vector (L2-normalized f32).
+    embeddings: HashMap<u64, Vec<f32>>,
 }
 
 /// In-memory radix storage. Thread-safe: toàn bộ state nằm sau 1 RwLock;
@@ -401,6 +454,7 @@ impl InMemoryStorage {
                 call_names: HashMap::new(),
                 files: HashMap::new(),
                 version: 0,
+                embeddings: HashMap::new(),
             })),
             next_id: Arc::new(AtomicUsize::new(1)),
         }
@@ -847,6 +901,41 @@ impl Storage for InMemoryStorage {
         d.call_names.clear();
         d.files.clear();
         d.version = 0;
+        d.embeddings.clear();
+        Ok(())
+    }
+
+    async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.embeddings.insert(symbol_id, vector.to_vec());
+        Ok(())
+    }
+
+    async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.embeddings.get(&symbol_id).cloned())
+    }
+
+    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.embeddings.clone())
+    }
+
+    async fn clear_embeddings(&mut self) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.embeddings.clear();
         Ok(())
     }
 

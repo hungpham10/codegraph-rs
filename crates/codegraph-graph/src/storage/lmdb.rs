@@ -23,7 +23,10 @@ use codegraph_core::{FileInfo, Symbol};
 use lmdb::EnvironmentFlags;
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
 
-use super::{EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_chain, encode_chain};
+use super::{
+    EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_chain, decode_vector, encode_chain,
+    encode_vector,
+};
 
 /// Map lỗi LMDB → `StorageError`.
 fn e(err: impl std::fmt::Display) -> StorageError {
@@ -150,6 +153,7 @@ const D_CALL_RECORDS: &str = "sg_call_records";
 const D_CALL_NAMES: &str = "sg_call_names";
 const D_FILES: &str = "sg_files";
 const D_VERSION: &str = "sg_meta";
+const D_EMBEDDINGS: &str = "sg_embeddings";
 
 /// Key duy nhất cho các "row đơn" (counter / next_id / version) — mỗi DBI chỉ có 1 row.
 const KEY_ONE: [u8; 8] = [0u8; 8];
@@ -245,6 +249,7 @@ pub struct LmdbStorage {
     call_names: Database,
     files: Database,
     version: Database,
+    embeddings: Database,
 }
 
 impl LmdbStorage {
@@ -310,6 +315,9 @@ impl LmdbStorage {
         let version = env
             .create_db(Some(D_VERSION), DatabaseFlags::empty())
             .map_err(e)?;
+        let embeddings = env
+            .create_db(Some(D_EMBEDDINGS), DatabaseFlags::empty())
+            .map_err(e)?;
         Ok(Self {
             env,
             nodes,
@@ -330,6 +338,7 @@ impl LmdbStorage {
             call_names,
             files,
             version,
+            embeddings,
         })
     }
 
@@ -579,6 +588,49 @@ impl Storage for LmdbStorage {
         Ok(out)
     }
 
+    async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.put(
+            self.embeddings,
+            &ku64(symbol_id),
+            &encode_vector(vector),
+            WriteFlags::empty(),
+        )
+        .map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
+    async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        Ok(self
+            .get_opt(&tx, self.embeddings, &ku64(symbol_id))?
+            .and_then(decode_vector))
+    }
+
+    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        let mut cur = tx.open_ro_cursor(self.embeddings).map_err(e)?;
+        let mut out = HashMap::new();
+        for item in cur.iter() {
+            let (k, v) = item.map_err(e)?;
+            if k.len() == 8 {
+                let id = de_u64(k);
+                if let Some(vec) = decode_vector(v) {
+                    out.insert(id, vec);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn clear_embeddings(&mut self) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.clear_db(self.embeddings).map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
     async fn save_next_id(&mut self, next: u64) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         tx.put(self.next_id, &KEY_ONE, &ku64(next), WriteFlags::empty())
@@ -709,7 +761,13 @@ impl Storage for LmdbStorage {
 
     async fn clear_entities(&mut self) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
-        for db in [self.symbols, self.call_records, self.call_names, self.files] {
+        for db in [
+            self.symbols,
+            self.call_records,
+            self.call_names,
+            self.files,
+            self.embeddings,
+        ] {
             tx.clear_db(db).map_err(e)?;
         }
         tx.put(self.next_id, &KEY_ONE, &ku64(100), WriteFlags::empty())
@@ -979,6 +1037,29 @@ mod tests {
         let (prefix, record) = s.get_node(id).await.unwrap();
         assert_eq!(prefix, b"hello");
         assert_eq!(record, 42);
+    }
+
+    #[tokio::test]
+    async fn test_embeddings_roundtrip() {
+        let (_d, path) = tmp_path();
+        let mut s = LmdbStorage::open(&path).await.unwrap();
+        let v1 = vec![0.1f32, 0.2, 0.3, -0.4];
+        let v2 = vec![1.0f32, -1.0, 0.0, 0.5];
+        s.save_embedding(100, &v1).await.unwrap();
+        s.save_embedding(101, &v2).await.unwrap();
+        // upsert overwrite cho 100.
+        s.save_embedding(100, &v2).await.unwrap();
+
+        let all = s.load_all_embeddings().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get(&100).unwrap(), &v2);
+        assert_eq!(all.get(&101).unwrap(), &v2);
+        assert_eq!(s.load_embedding(100).await.unwrap().unwrap(), v2);
+        assert_eq!(s.load_embedding(101).await.unwrap().unwrap(), v2);
+
+        s.clear_embeddings().await.unwrap();
+        assert!(s.load_all_embeddings().await.unwrap().is_empty());
+        assert_eq!(s.load_embedding(101).await.unwrap(), None);
     }
 
     /// Node trong tx chưa lộ ra reader cho tới `commit`.

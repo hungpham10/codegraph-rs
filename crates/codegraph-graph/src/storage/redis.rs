@@ -14,6 +14,7 @@
 //! | `{prefix}:chains`        | Hash  | record → chain bytes      |
 //! | `{prefix}:shortcut:{shard}:{elem}` | Set | node ids chứa elem |
 //! | `{prefix}:symbols`       | Hash  | symbol id → Symbol JSON   |
+//! | `{prefix}:embeddings`    | Hash  | symbol id → embedding BLOB (f32 little-endian) |
 //! | `{prefix}:nextid`        | String| next symbol registry id  |
 //! | `{prefix}:callrecords`   | Hash  | func id → call records    |
 //! | `{prefix}:callnames`     | Hash  | call name → call sites    |
@@ -28,7 +29,9 @@ use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 
-use super::{FileInfo, Result, Storage, StorageError, Symbol, Tx, TxOp};
+use super::{
+    FileInfo, Result, Storage, StorageError, Symbol, Tx, TxOp, decode_vector, encode_vector,
+};
 
 // ==================== KeyBuilder ====================
 
@@ -553,6 +556,55 @@ impl Storage for RedisStorage {
         Ok(out)
     }
 
+    async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
+        let mut conn = self.lock().await;
+        cmd("HSET")
+            .arg(self.kb.key("embeddings"))
+            .arg(symbol_id as i64)
+            .arg(encode_vector(vector))
+            .query_async::<()>(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
+        let mut conn = self.lock().await;
+        let data: Option<Vec<u8>> = cmd("HGET")
+            .arg(self.kb.key("embeddings"))
+            .arg(symbol_id as i64)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(data.and_then(|b| decode_vector(&b)))
+    }
+
+    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
+        let mut conn = self.lock().await;
+        let map: HashMap<String, Vec<u8>> = cmd("HGETALL")
+            .arg(self.kb.key("embeddings"))
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        let mut out = HashMap::with_capacity(map.len());
+        for (k, v) in map {
+            if let (Ok(id), Some(vec)) = (k.parse::<u64>(), decode_vector(&v)) {
+                out.insert(id, vec);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn clear_embeddings(&mut self) -> Result<()> {
+        let mut conn = self.lock().await;
+        cmd("DEL")
+            .arg(self.kb.key("embeddings"))
+            .query_async::<()>(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
     async fn save_next_id(&mut self, next: u64) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("SET")
@@ -714,6 +766,7 @@ impl Storage for RedisStorage {
         let mut conn = self.lock().await;
         cmd("DEL")
             .arg(self.kb.key("symbols"))
+            .arg(self.kb.key("embeddings"))
             .arg(self.kb.key("nextid"))
             .arg(self.kb.key("callrecords"))
             .arg(self.kb.key("callnames"))
