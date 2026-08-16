@@ -83,7 +83,10 @@ async fn search_and_symbol_by_id() {
             "call",
             None,
             SymbolMatch::Contains,
-            Pagination { limit: 10, offset: 0 },
+            Pagination {
+                limit: 10,
+                offset: 0,
+            },
             None,
             0,
         )
@@ -291,7 +294,10 @@ async fn search_resumable_timeout_retry_roundtrip() {
             "order",
             None,
             SymbolMatch::Contains,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             None,
             codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
         )
@@ -306,7 +312,10 @@ async fn search_resumable_timeout_retry_roundtrip() {
             "order",
             None,
             SymbolMatch::Contains,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0,
+            },
             Some(resume_id.clone()),
             0,
         )
@@ -328,7 +337,10 @@ async fn search_resumable_timeout_retry_roundtrip() {
             "order",
             None,
             SymbolMatch::Contains,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
             Some("deadbeef00000000".into()),
             0,
         )
@@ -342,7 +354,10 @@ async fn search_resumable_timeout_retry_roundtrip() {
             "totally_different",
             None,
             SymbolMatch::Contains,
-            Pagination { limit: 20, offset: 0 },
+            Pagination {
+                limit: 20,
+                offset: 0
+            },
             Some(resume_id),
             0,
         )

@@ -319,9 +319,9 @@ impl EmbeddingBackend for HashingEmbeddings {
 #[cfg(feature = "fastembed")]
 mod fastembed_backend {
     use super::*;
-    use std::sync::Arc;
-    use parking_lot::Mutex;
     use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     /// Process-wide ONNX model, share bởi mọi `GraphIndex`. Lần đầu gọi sẽ tải
     /// và cache model; các lần sau reuse instance đã tải. Nếu init lỗi (thiếu

@@ -29,7 +29,9 @@ use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 
-use super::{decode_vector, encode_vector, FileInfo, Result, Storage, StorageError, Symbol, Tx, TxOp};
+use super::{
+    FileInfo, Result, Storage, StorageError, Symbol, Tx, TxOp, decode_vector, encode_vector,
+};
 
 // ==================== KeyBuilder ====================
 

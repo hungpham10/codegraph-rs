@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use super::{decode_vector, encode_vector, Result, Storage, StorageError, Tx, decode_chain, encode_chain};
+use super::{
+    Result, Storage, StorageError, Tx, decode_chain, decode_vector, encode_chain, encode_vector,
+};
 use async_trait::async_trait;
 use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 use sqlx::mysql::{MySqlPoolOptions, MySqlRow};

@@ -8,7 +8,7 @@
 #![cfg(feature = "sqlite")]
 
 use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind, SymbolMatch};
-use codegraph_graph::{GraphIndex, ParseResult, Pagination, SharedGraphIndex};
+use codegraph_graph::{GraphIndex, Pagination, ParseResult, SharedGraphIndex};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -238,7 +238,10 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
             "process",
             Some(SymbolKind::Function),
             SymbolMatch::Contains,
-            Pagination { limit: 10, offset: 0 },
+            Pagination {
+                limit: 10,
+                offset: 0,
+            },
             None,
             None,
         )
@@ -281,7 +284,10 @@ async fn sandbox_search_kinds_finds_java_method() {
             "getProfile",
             Some(SymbolKind::Function),
             SymbolMatch::Contains,
-            Pagination { limit: 1, offset: 0 },
+            Pagination {
+                limit: 1,
+                offset: 0,
+            },
             None,
             None,
         )
@@ -296,7 +302,10 @@ async fn sandbox_search_kinds_finds_java_method() {
             "getProfile",
             None,
             SymbolMatch::Contains,
-            Pagination { limit: 1, offset: 0 },
+            Pagination {
+                limit: 1,
+                offset: 0,
+            },
             None,
             None,
         )

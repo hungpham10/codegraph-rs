@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use super::{decode_vector, encode_vector, Result, Storage, StorageError, Tx, decode_chain, encode_chain};
+use super::{
+    Result, Storage, StorageError, Tx, decode_chain, decode_vector, encode_chain, encode_vector,
+};
 use async_trait::async_trait;
 use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 use sqlx::postgres::{PgPoolOptions, PgRow};
@@ -508,13 +510,14 @@ impl Storage for PostgresStorage {
     }
 
     async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
-        let row: Option<(Vec<u8>,)> =
-            sqlx::query_as("SELECT vector FROM sg_embeddings WHERE repo_id = $1 AND symbol_id = $2")
-                .bind(self.repo_id as i64)
-                .bind(symbol_id as i64)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db_err)?;
+        let row: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT vector FROM sg_embeddings WHERE repo_id = $1 AND symbol_id = $2",
+        )
+        .bind(self.repo_id as i64)
+        .bind(symbol_id as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
         Ok(row.and_then(|(b,)| decode_vector(&b)))
     }
 

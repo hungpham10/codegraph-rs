@@ -141,7 +141,10 @@ pub fn run_queries(
                     name,
                     None,
                     codegraph_core::SymbolMatch::Contains,
-                    codegraph_graph::Pagination { limit: 5, offset: 0 },
+                    codegraph_graph::Pagination {
+                        limit: 5,
+                        offset: 0,
+                    },
                     None,
                     None,
                 )

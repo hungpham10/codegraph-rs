@@ -42,7 +42,7 @@ use codegraph_core::{FileInfo, Symbol};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
-use super::{decode_vector, encode_vector, EMPTY, Result, Storage, StorageError, Tx, TxOp};
+use super::{EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_vector, encode_vector};
 use crate::embeddings::resolve_vss_extensions;
 
 fn db_err(e: sqlx::Error) -> StorageError {
@@ -1294,7 +1294,11 @@ mod tests {
 
         let all = s.load_all_embeddings().await.unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(all.get(&100).unwrap(), &v2, "id 100 phải bị overwrite thành v2");
+        assert_eq!(
+            all.get(&100).unwrap(),
+            &v2,
+            "id 100 phải bị overwrite thành v2"
+        );
         assert_eq!(all.get(&101).unwrap(), &v2, "id 101 giữ v2");
         assert_eq!(s.load_embedding(100).await.unwrap().unwrap(), v2);
         assert_eq!(s.load_embedding(101).await.unwrap().unwrap(), v2);

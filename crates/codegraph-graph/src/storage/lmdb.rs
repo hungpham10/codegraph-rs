@@ -23,7 +23,10 @@ use codegraph_core::{FileInfo, Symbol};
 use lmdb::EnvironmentFlags;
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
 
-use super::{decode_vector, encode_vector, EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_chain, encode_chain};
+use super::{
+    EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_chain, decode_vector, encode_chain,
+    encode_vector,
+};
 
 /// Map lỗi LMDB → `StorageError`.
 fn e(err: impl std::fmt::Display) -> StorageError {
@@ -607,9 +610,7 @@ impl Storage for LmdbStorage {
 
     async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        let mut cur = tx
-            .open_ro_cursor(self.embeddings)
-            .map_err(e)?;
+        let mut cur = tx.open_ro_cursor(self.embeddings).map_err(e)?;
         let mut out = HashMap::new();
         for item in cur.iter() {
             let (k, v) = item.map_err(e)?;

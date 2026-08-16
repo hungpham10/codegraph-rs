@@ -34,6 +34,7 @@
 //! same-file +3) → `build_edges_from_calls` (edge = chain[position], CallSite +
 //! var-type alias, gom SaveCallRecords) → files → rebuild engines → bump version.
 
+use crate::embeddings::{EmbeddingBackend, default_backend, embedding_enabled, make_backend};
 pub use crate::search::Search;
 use crate::search::SearchResume;
 #[cfg(feature = "lmdb")]
@@ -45,14 +46,13 @@ pub use crate::storage::postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use crate::storage::sqlite::SqliteStorage;
 pub use crate::storage::{InMemoryStorage, Storage, Tx};
+use crate::vector_index::VectorIndex;
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
     EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult,
     SYMBOL_BASE, SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch,
     is_marker, marker_name,
 };
-use crate::embeddings::{default_backend, embedding_enabled, make_backend, EmbeddingBackend};
-use crate::vector_index::VectorIndex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -63,11 +63,11 @@ use tokio::sync::RwLock;
 mod bloom;
 pub mod diff;
 pub mod embeddings;
-pub mod vector_index;
 mod radix;
 mod search;
 mod shared;
 mod storage;
+pub mod vector_index;
 
 pub use shared::SharedGraphIndex;
 
@@ -778,10 +778,7 @@ impl GraphIndex {
     ///   KNN/k-means, không re-embed). Chỉ những symbol thiếu vector mới được
     ///   embed + `save_embedding` (incremental). Chạy sau khi registry + name
     ///   engine đã sẵn sàng.
-    async fn rebuild_vector_index(
-        &mut self,
-        progress: Option<&dyn IngestProgress>,
-    ) -> Result<()> {
+    async fn rebuild_vector_index(&mut self, progress: Option<&dyn IngestProgress>) -> Result<()> {
         if !self.embedding_enabled {
             // Embedding tắt → không build vector index.
             self.vector_index = VectorIndex::new(crate::embeddings::VECTOR_DIM);
@@ -2230,7 +2227,11 @@ impl GraphIndex {
 
         // ── Phase B (Candidates): stream id vector (Semantic/Hybrid) → collected ──
         if !timed_out
-            && let SearchCursorPhase::Candidates { ids, idx, collected } = &mut phase
+            && let SearchCursorPhase::Candidates {
+                ids,
+                idx,
+                collected,
+            } = &mut phase
         {
             loop {
                 if let Some(dl) = deadline
@@ -2416,7 +2417,10 @@ mod tests {
                 "b",
                 None,
                 SymbolMatch::Contains,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -2425,19 +2429,23 @@ mod tests {
             .page;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "b");
-        assert!(idx
-            .search_symbol_paged_resumable(
+        assert!(
+            idx.search_symbol_paged_resumable(
                 "zzz",
                 None,
                 SymbolMatch::Contains,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0
+                },
                 None,
                 None,
             )
             .await
             .unwrap()
             .page
-            .is_empty());
+            .is_empty()
+        );
 
         // callees của a = [b]; của b = [c].
         let cees = idx.callees(SYMBOL_BASE).await.unwrap();
@@ -2625,7 +2633,10 @@ mod tests {
                 "process",
                 None,
                 SymbolMatch::Contains,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -2784,7 +2795,10 @@ mod tests {
                     "authenticte",
                     None,
                     SymbolMatch::Semantic,
-                    Pagination { limit: 10, offset: 0 },
+                    Pagination {
+                        limit: 10,
+                        offset: 0,
+                    },
                     None,
                     None,
                 )
@@ -2800,7 +2814,10 @@ mod tests {
                 "authenticte",
                 None,
                 SymbolMatch::Semantic,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -2939,7 +2956,10 @@ mod tests {
                 "order",
                 Some(SymbolKind::Class),
                 SymbolMatch::Prefix,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -2958,7 +2978,10 @@ mod tests {
                 "service",
                 Some(SymbolKind::Class),
                 SymbolMatch::Suffix,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -2973,7 +2996,10 @@ mod tests {
                 "validate",
                 None,
                 SymbolMatch::Exact,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -2990,7 +3016,10 @@ mod tests {
                 "order",
                 None,
                 SymbolMatch::Contains,
-                Pagination { limit: 2, offset: 0 },
+                Pagination {
+                    limit: 2,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -3010,7 +3039,10 @@ mod tests {
                 "order",
                 None,
                 SymbolMatch::Contains,
-                Pagination { limit: 2, offset: 2 },
+                Pagination {
+                    limit: 2,
+                    offset: 2,
+                },
                 None,
                 None,
             )
@@ -3182,7 +3214,10 @@ mod tests {
                 "order",
                 None,
                 SymbolMatch::Contains,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -3336,7 +3371,10 @@ mod tests {
                 "authenticte",
                 None,
                 SymbolMatch::Semantic,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -3352,7 +3390,10 @@ mod tests {
                 "auth",
                 None,
                 SymbolMatch::Hybrid,
-                Pagination { limit: 10, offset: 0 },
+                Pagination {
+                    limit: 10,
+                    offset: 0,
+                },
                 None,
                 None,
             )

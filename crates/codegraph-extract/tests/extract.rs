@@ -12,7 +12,10 @@ async fn search_symbol(idx: &GraphIndex, q: &str) -> Vec<Symbol> {
         q,
         None,
         codegraph_core::SymbolMatch::Contains,
-        Pagination { limit: 10, offset: 0 },
+        Pagination {
+            limit: 10,
+            offset: 0,
+        },
         None,
         None,
     )
@@ -49,50 +52,50 @@ async fn index_fixtures_dir() {
     assert!(stats.calls > 0, "expected calls");
 
     // Java
-    let hits = search_symbol(&index,"UserService").await;
+    let hits = search_symbol(&index, "UserService").await;
     assert!(
         hits.iter().any(|s| s.language == "java"),
         "expected java hit, got {hits:?}"
     );
 
     // Ruby
-    let hits = search_symbol(&index,"UserService").await;
+    let hits = search_symbol(&index, "UserService").await;
     assert!(
         hits.iter().any(|s| s.language == "ruby"),
         "expected ruby hit"
     );
 
     // Python
-    let hits = search_symbol(&index,"process_user").await;
+    let hits = search_symbol(&index, "process_user").await;
     assert!(
         hits.iter().any(|s| s.language == "python"),
         "expected python hit"
     );
 
     // Go
-    let hits = search_symbol(&index,"ProcessUser").await;
+    let hits = search_symbol(&index, "ProcessUser").await;
     assert!(hits.iter().any(|s| s.language == "go"), "expected go hit");
 
     // JS
-    let hits = search_symbol(&index,"processUser").await;
+    let hits = search_symbol(&index, "processUser").await;
     assert!(
         hits.iter().any(|s| s.language == "javascript"),
         "expected js hit"
     );
 
     // TS
-    let hits = search_symbol(&index,"processUser").await;
+    let hits = search_symbol(&index, "processUser").await;
     assert!(
         hits.iter().any(|s| s.name == "processUser"),
         "missing processUser, got {hits:?}"
     );
 
     // Rust
-    let hits = search_symbol(&index,"process_user").await;
+    let hits = search_symbol(&index, "process_user").await;
     assert!(hits.iter().any(|s| s.name == "process_user"));
 
     // UserService from TS class + Rust struct
-    let hits = search_symbol(&index,"UserService").await;
+    let hits = search_symbol(&index, "UserService").await;
     assert!(
         hits.len() >= 2,
         "expected UserService from both TS and Rust, got {}",
@@ -107,7 +110,7 @@ async fn chains_are_built_for_each_function() {
     assert!(stats.chains > 0, "expected chains in index");
 
     // Flow của một function trả về chain có marker hoặc ít nhất là chính nó.
-    let hits = search_symbol(&index,"process_user").await;
+    let hits = search_symbol(&index, "process_user").await;
     let py = hits
         .iter()
         .find(|s| s.language == "python")

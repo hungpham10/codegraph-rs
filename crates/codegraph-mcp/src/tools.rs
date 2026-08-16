@@ -1207,7 +1207,10 @@ pub async fn dispatch_sandbox(
                 q,
                 None,
                 SymbolMatch::Contains,
-                codegraph_graph::Pagination { limit: 20, offset: 0 },
+                codegraph_graph::Pagination {
+                    limit: 20,
+                    offset: 0,
+                },
                 None,
                 None,
             )
@@ -1291,7 +1294,10 @@ async fn run_sim(
             entry_name,
             None,
             SymbolMatch::Contains,
-            codegraph_graph::Pagination { limit: 20, offset: 0 },
+            codegraph_graph::Pagination {
+                limit: 20,
+                offset: 0,
+            },
             None,
             None,
         )

@@ -7,9 +7,9 @@
 #![cfg(feature = "lmdb")]
 
 use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind, SymbolMatch};
-use codegraph_graph::{GraphIndex, Pagination};
 use codegraph_graph::ParseResult;
 use codegraph_graph::SharedGraphIndex;
+use codegraph_graph::{GraphIndex, Pagination};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -218,7 +218,10 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
             "process",
             Some(SymbolKind::Function),
             SymbolMatch::Contains,
-            Pagination { limit: 10, offset: 0 },
+            Pagination {
+                limit: 10,
+                offset: 0,
+            },
             None,
             None,
         )

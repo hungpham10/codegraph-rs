@@ -87,9 +87,7 @@ impl VectorIndex {
             .iter()
             .map(|(&id, v)| (id, Self::cosine(query_vec, v)))
             .collect();
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         if k > 0 && scored.len() > k {
             scored.truncate(k);
         }
@@ -206,9 +204,7 @@ struct XorShift {
 
 impl XorShift {
     fn new(seed: u64) -> Self {
-        Self {
-            state: seed | 1,
-        }
+        Self { state: seed | 1 }
     }
     fn next(&mut self) -> u64 {
         let mut x = self.state;
