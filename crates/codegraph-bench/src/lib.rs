@@ -136,7 +136,18 @@ pub fn run_queries(
         let start = Instant::now();
         let mut ops = 0usize;
         for name in names {
-            if let Ok(hits) = idx.search_symbol(name, None, 5).await {
+            if let Ok(out) = idx
+                .search_symbol_paged_resumable(
+                    name,
+                    None,
+                    codegraph_core::SymbolMatch::Contains,
+                    codegraph_graph::Pagination { limit: 5, offset: 0 },
+                    None,
+                    None,
+                )
+                .await
+            {
+                let hits = out.page;
                 ops += 1;
                 let Some(h) = hits.first() else { continue };
                 // callees + flow = 2 phép đọc chain engine + flow.

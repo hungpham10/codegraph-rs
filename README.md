@@ -1,12 +1,13 @@
 # CodeGraph
 
-[![CI](https://github.com/cleboost/codegraph/actions/workflows/ci.yml/badge.svg)](https://github.com/cleboost/codegraph/actions/workflows/ci.yml)
+[![CI](https://github.com/Cleboost/codegraph-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Cleboost/codegraph-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > Local-first code intelligence for AI agents. Built in Rust. Single static
-> binary, ~5 MB. Tree-sitter **semantic graph** (semgraph) in SQLite, served over MCP.
+> binary. Tree-sitter **semantic graph** (semgraph) in SQLite (or LMDB /
+> Postgres / MySQL / Redis), served over MCP.
 
-CodeGraph parses your codebase with tree-sitter, builds a **semantic graph** where every symbol gets a global ID and every function has a **call chain** (markers + callee IDs), stores everything in a single `.codegraph/db.sqlite`, and exposes the graph to AI agents — Claude Code, Cursor, Codex CLI, opencode, Hermes — over the Model Context Protocol (MCP).
+CodeGraph parses your codebase with tree-sitter, builds a **semantic graph** where every symbol gets a global ID and every function has a **call chain** (markers + callee IDs), stores everything under `.codegraph/` (SQLite by default), and exposes the graph to AI agents — Claude Code, Cursor, Codex CLI, opencode, Hermes — over the Model Context Protocol (MCP).
 
 Agents that consult the semantic graph instead of grepping the filesystem make **fewer tool calls**, **explore faster**, and **stay within context**.
 
@@ -14,12 +15,13 @@ Agents that consult the semantic graph instead of grepping the filesystem make *
 
 - **Semgraph model**: Symbols have global IDs (≥100); call chains mix markers (`LOOP`, `IF_TRUE`, `RETURN`, …) and callee IDs. Edges derived from chains. No more `NodeKind`/`EdgeKind` — wire breaking to `SymbolKind`.
 - **One binary.** Rust + statically-linked SQLite + native tree-sitter grammars. No Node runtime, no `.wasm`, no `node_modules`.
-- **Small.** ~5 MB stripped (vs ~140 MB for the previous TypeScript build).
+- **Compact.** ~58 MB release build with every storage backend (SQLite, LMDB, Redis, Postgres/MySQL) and the embedding runtime bundled in one file (vs ~140 MB for the previous TypeScript build).
 - **Fast.** Full re-index a 139-file project in ~190 ms (release, parallel rayon).
-- **Local.** Index lives in `.codegraph/db.sqlite` next to your code. Nothing leaves the machine.
+- **Local.** Index lives in `.codegraph/` next to your code (SQLite by default; LMDB / Postgres / MySQL / Redis optional). Nothing leaves the machine.
 - **Full re-index always.** No incremental sync — watcher debounces and re-indexes completely (simpler, no stale state).
 - **Multi-agent.** One binary serves any MCP client (Claude Code, Cursor, Codex, opencode, Hermes, Antigravity) over stdio or Streamable HTTP (`--http`) — the agent binds the workspace with `codegraph_init` and drives everything through tools.
-- **30 MCP tools** including `codegraph_flow` (call chain), `codegraph_search_flow` (pattern search), `codegraph_references` (library call consumers), `codegraph_diff` (MR impact draft), and a behavior sandbox (`codegraph_sandbox`).
+- **Optional semantic search.** Enable `[embedding] backend = "fastembed"` in config to get vector KNN / hybrid symbol search — BGE-small embeddings running locally, backend already bundled in the release binary.
+- **27 MCP tools** including `codegraph_flow` (call chain), `codegraph_search_flow` (pattern search), `codegraph_references` (library call consumers), `codegraph_diff` (MR impact draft), and a behavior sandbox (`codegraph_sandbox`).
 
 ## Install
 
@@ -70,7 +72,7 @@ yay -S codegraph-rs-bin
 <details>
 <summary><strong>From source</strong></summary>
 
-Requires Rust stable (≥ 1.80).
+Requires Rust stable (≥ 1.85 — `codegraph-graph` uses edition 2024).
 
 ```sh
 git clone https://github.com/Cleboost/codegraph-rs
@@ -103,7 +105,7 @@ codegraph serve --mcp --http --addr 0.0.0.0:8123
 ```
 
 The agent then binds the workspace with `codegraph_init {"path": ...}` and gets
-tools like `codegraph_search`, `codegraph_symbol`, `codegraph_callers`,
+tools like `codegraph_search_symbol`, `codegraph_symbol`, `codegraph_callers`,
 `codegraph_flow`, `codegraph_search_flow`, `codegraph_impact`,
 `codegraph_context` — all querying is done **over MCP**, not via CLI commands.
 The file watcher debounces changes and triggers full re-indexes while you edit.
@@ -122,10 +124,11 @@ runs the MCP server. All reading/interacting goes through MCP tools.
 
 | Command | What it does |
 |---|---|
-| `codegraph init [--no-index]` | Create `.codegraph/` and full re-index (skip with `--no-index`) |
+| `codegraph init [--no-index]` | Create `.codegraph/` and full re-index (skip with `--no-index`); live progress bar on by default (`--no-progress` to disable) |
 | `codegraph deinit` | Remove `.codegraph/` |
+| `codegraph embed [--model <m>] [--cache-dir <dir>]` | Pre-download an embedding model into the global cache so semantic search works offline (requires the `fastembed` feature; default model `bge-small-en-v1.5`) |
 | `codegraph serve --mcp` | Run as MCP server over stdio (used by agents) |
-| `codegraph serve --mcp --http` | Run as MCP server over Streamable HTTP (SSE); `--addr` (default `0.0.0.0:8123`), `--allow-host <host>` (repeatable, LAN), `--allow-any-host` |
+| `codegraph serve --mcp --http` | Run as MCP server over Streamable HTTP (SSE); `--addr` (default `0.0.0.0:8123`), `--allow-host <host>` (repeatable, LAN), `--allow-any-host`, `--format minimize\|medium` (response encoding for LLM token tuning, default `minimize`) |
 
 Global flag `--path <dir>` overrides the workspace root.
 
@@ -143,14 +146,15 @@ Each language emits:
 
 ## MCP tools
 
-Agents see **30 tools** through the MCP server (search, callers/callees/impact/
-flow, class queries, annotations, dependencies, diff draft/simulation, behavior
-sandbox, usage report, plus the session tools `codegraph_init` /
-`codegraph_deinit` / `codegraph_index`). Key ones:
+Agents see **27 tools** through the MCP server (search with match modes
+including opt-in semantic/hybrid, callers/callees/impact/flow, class queries,
+annotations, dependencies, diff draft/simulation, behavior sandbox, usage
+report, plus the session tools `codegraph_init` / `codegraph_deinit` /
+`codegraph_index`). Key ones:
 
 | Tool | Use case |
 |---|---|
-| `codegraph_search` | Find symbols by name (substring, case-insensitive) |
+| `codegraph_search_symbol` | Find symbols by name with match modes: `contains` (default), `prefix`, `suffix`, `exact`, plus opt-in `semantic` (vector KNN over embeddings) and `hybrid` (contains + semantic merged via Reciprocal Rank Fusion) |
 | `codegraph_symbol` | Look up a symbol by id or exact name; duplicate names → `ambiguous=true` with full match list; retry with `id` |
 | `codegraph_callers` | What (transitively) calls this function? (BFS on chain engine) |
 | `codegraph_callees` | What does this function call directly? (read chain, skip markers) |
@@ -181,7 +185,7 @@ Tokens can be: marker names (`LOOP`, `IF_TRUE`, `IF_FALSE`, `BRANCH_END`, `RETUR
 
 ### Disambiguation
 
-When `codegraph_symbol` or `codegraph_search` returns duplicate names:
+When `codegraph_symbol` or `codegraph_search_symbol` returns duplicate names:
 ```json
 {
   "ambiguous": true,
@@ -196,12 +200,13 @@ When `codegraph_symbol` or `codegraph_search` returns duplicate names:
 crates/
   codegraph-core/       Error + semgraph model (Symbol, SymbolKind, Chain, CallRecord, EffectType, ScopeLevel, markers)
   codegraph-extract/    tree-sitter native + 14 LangSpec declarative extractors + 5 hand-written
-  codegraph-graph/      GraphIndex (semgraph): registry + 2 engines (chain Search<u64> + name Search<u8>) + sqlite storage
+  codegraph-graph/      GraphIndex (semgraph): registry + 2 engines (chain Search<u64> + name Search<u8>) + pluggable storage (SQLite / LMDB / Redis / Postgres / MySQL) + optional embedding vector index
   codegraph-context/    Markdown/JSON context formatter (symbol + callers + callees + source)
   codegraph-api/        GraphApi wrapper on SharedGraphIndex (async query surface)
-  codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 30-tool dispatch, session-driven
-  codegraph-installer/  Agent config targets (Claude/Cursor/Codex/opencode/Hermes)
-  codegraph/            CLI lifecycle (init/deinit/serve --mcp) + watcher (notify + debounced full re-index)
+  codegraph-sboxes/     Behavior sandbox: Cranelift JIT compile of function groups + Rhai mock runtime
+  codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 27-tool dispatch, session-driven
+  codegraph-bench/      Benchmarks (criterion search benches, storage benches, codspeed)
+  codegraph/            CLI lifecycle (init/deinit/embed/serve --mcp) + watcher (notify + debounced full re-index)
 ```
 
 Pipeline:
@@ -229,8 +234,8 @@ A `.codegraph/` directory is created next to your project:
 
 ```
 .codegraph/
-  db.sqlite        SQLite v1 (WAL mode, single file — entities + radix streams)
-  config.toml      Language enable/disable, walker include/exclude
+  db.sqlite        SQLite (WAL mode, single file — entities + radix streams); db.lmdb/ directory when the LMDB backend is selected
+  config.toml      Language toggles, walker filters, storage backend, embedding settings
   .gitignore       Pre-filled so the index is never committed
   version          Codegraph version that created the directory
 ```
@@ -266,7 +271,35 @@ exclude = [
   "*.min.js",
   "*.lock"
 ]
+
+# Storage backend — "sqlite" (default) | "lmdb" | "redis" | "memory" | "postgres" | "mysql"
+[storage]
+type = "sqlite"
+# DSN override. Defaults: sqlite → sqlite://<root>/.codegraph/db.sqlite,
+# lmdb → lmdb://<root>/.codegraph/db.lmdb (directory). Redis REQUIRES a dsn.
+# dsn = "redis://localhost:6379"
+# Postgres/MySQL use `dsns` (shard list) + `repo_id` — see below.
+
+# Semantic search (vector KNN) — OFF by default. See "Semantic search" below.
+[embedding]
+# backend = "fastembed"
+# model = "bge-small-en-v1.5"
+# cache_dir = "~/.cache/codegraph/embeddings"
 ```
+
+### Storage backends
+
+The `[storage]` section selects where the index lives:
+
+| `type` | Notes |
+|---|---|
+| `sqlite` | Default. Single-file `db.sqlite` (WAL) inside `.codegraph/`. |
+| `lmdb` | Memory-mapped KV (`db.lmdb/` directory inside `.codegraph/`). Same local-first workflow, mmap-friendly for large indexes. Enabled by default in the `codegraph` binary. |
+| `redis` | Requires an explicit `dsn` (e.g. `redis://localhost:6379`) — there is no sensible local default. |
+| `memory` | Ephemeral in-process index; nothing is persisted. |
+| `postgres` / `mysql` | Multi-tenant, sharded — see below. |
+
+`dsn` (when set) overrides the derived default for any backend.
 
 ### Postgres / MySQL (multi-tenant, sharded)
 
@@ -316,6 +349,47 @@ Then `codegraph init` (CLI) or `codegraph_init` (MCP tool) generates the
 `repo_id` and stores the index on the right shard automatically. See
 `sql/README.md` for the full multi-tenant + sharding design.
 
+### Semantic search (optional, opt-in)
+
+Vector similarity search over symbol embeddings is **off by default** — no
+embedding model runs unless you enable it in config. The release binary
+already bundles the fastembed (ONNX sentence-transformer) backend, so
+enabling it is config-only — no rebuild required:
+
+1. Enable it in `.codegraph/config.toml`:
+
+   ```toml
+   [embedding]
+   backend = "fastembed"                       # "hashing"/unset = off
+   model = "bge-small-en-v1.5"                  # 384-dim, default
+   cache_dir = "~/.cache/codegraph/embeddings"  # global model cache (default)
+   # SQLite-only: point at a sqlite-vss (vector0/vss0) extension directory to
+   # run KNN through HNSW ANN inside the database:
+   # vss_extension = "~/.cache/codegraph/embeddings/vss"
+   # execution_provider = "coreml"              # macOS hardware acceleration
+   ```
+
+2. Optionally pre-download the model so indexing works offline:
+
+   ```sh
+   codegraph embed --model bge-small-en-v1.5
+   ```
+
+   The `codegraph embed` subcommand is compiled in when the binary is built
+   with `--features fastembed`.
+
+With embeddings enabled, `codegraph_search_symbol` gains the `match` modes
+`"semantic"` (vector KNN — find symbols by similar/approximate names) and
+`"hybrid"` (substring + semantic merged via Reciprocal Rank Fusion). Vectors
+are persisted with the index, so restarts reuse them without re-embedding.
+
+Notes:
+- If the model fails to load (no network, missing ONNX runtime), opening the
+  index **errors out** — there is no silent fallback to a lexical baseline.
+- On macOS you can build with `--features fastembed,apple-accel` to run
+  embeddings on the Apple Neural Engine / GPU via the CoreML execution
+  provider. That feature is macOS-only and fails to build elsewhere.
+
 ### C vs C++ headers (`.h`)
 
 By default, `.h` files are resolved automatically:
@@ -342,7 +416,9 @@ The Rust port:
 - Parses in parallel via `rayon`
 - Builds with `lto="fat"`, `codegen-units=1`, `strip`, `panic=abort`
 
-Result: **~5 MB** stripped, **sub-second** startup, **~5× faster** indexing on the same workspace.
+Result: a single **~58 MB** stripped binary with every backend bundled
+(SQLite, LMDB, Redis, Postgres/MySQL drivers, ONNX embedding runtime),
+**sub-second** startup, and **~5× faster** indexing on the same workspace.
 
 ## Semgraph model (wire-breaking)
 
@@ -376,7 +452,8 @@ cargo test -p codegraph-extract    # 30 tests: 10 lib + 16 chains + 2 cpp + 2 ex
 cargo test -p codegraph-graph      # 60+ tests: search, storage, ingest, flow, reopen
 cargo test -p codegraph-api
 cargo test -p codegraph-mcp
-cargo test -p codegraph-viz
+cargo test -p codegraph-sboxes     # sandbox JIT: control flow + end-to-end traces
+cargo test -p codegraph-bench      # pipeline integration
 cargo test -p codegraph-installer
 ```
 
@@ -390,20 +467,34 @@ cargo test -p codegraph-extract --features lang-python
 ```
 
 Feature flags on `codegraph-graph`:
-- `sqlite` — sqlite storage backend (enabled on `codegraph`, `codegraph-mcp`, `codegraph-viz`)
+- `sqlite` — sqlite storage backend (enabled on `codegraph`, `codegraph-mcp`)
+- `lmdb` — LMDB storage backend, memory-mapped KV bundled C library (enabled on `codegraph`)
 - `redis` — redis storage backend (compile-only verify, runtime needs server)
 - `postgres` — PostgreSQL storage backend (multi-tenant, sharded)
 - `mysql` — MySQL storage backend (multi-tenant, sharded)
+- `bloom-search` — bloom-filter acceleration for chain searches (enabled on `codegraph`)
+- `fastembed` — ONNX embedding backend for semantic search (currently also pulled in unconditionally by `codegraph-api`, so it is present in release builds)
+- `apple-accel` — macOS-only CoreML execution provider for ONNX Runtime (pair with `fastembed`; build fails on non-macOS)
 
-The `codegraph` and `codegraph-mcp` binaries expose a convenience `rdbms`
-feature that turns on both `postgres` and `mysql` (it is **on by default**
-for `codegraph`):
+Feature flags on the `codegraph` binary:
+- `rdbms` (default) — turns on `postgres` + `mysql` for the CLI and MCP server
+- `fastembed` — compiles in the `codegraph embed` CLI command (the embedding backend itself is already bundled via `codegraph-api`)
+- `apple-accel` — macOS-only hardware acceleration for embeddings
+
+The `codegraph-mcp` crate exposes the same `rdbms` convenience feature (not
+enabled by default there).
+
+Note: `codegraph-api` currently enables every `codegraph-graph` feature, so
+`cargo build -p codegraph --no-default-features` verifies the CLI compiles
+without `rdbms` wiring but does **not** produce a slimmer binary — all
+storage drivers and the embedding backend are still compiled in.
 
 ```sh
 # Full feature verification
 cargo check --workspace --features sqlite
 cargo check -p codegraph-graph --features redis
 cargo check -p codegraph --features rdbms
+cargo check -p codegraph --features fastembed
 ```
 
 ## License

@@ -6,8 +6,8 @@
 
 #![cfg(feature = "lmdb")]
 
-use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind};
-use codegraph_graph::GraphIndex;
+use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind, SymbolMatch};
+use codegraph_graph::{GraphIndex, Pagination};
 use codegraph_graph::ParseResult;
 use codegraph_graph::SharedGraphIndex;
 use std::collections::HashMap;
@@ -214,9 +214,17 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
     );
 
     let hits = idx
-        .search_symbol("process", Some(SymbolKind::Function), 10)
+        .search_symbol_paged_resumable(
+            "process",
+            Some(SymbolKind::Function),
+            SymbolMatch::Contains,
+            Pagination { limit: 10, offset: 0 },
+            None,
+            None,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .page;
     assert_eq!(hits.len(), 2);
     let mut files: Vec<&str> = hits.iter().map(|s| s.file.as_str()).collect();
     files.sort_unstable();

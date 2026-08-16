@@ -27,6 +27,16 @@ indicatif = "0.18.6"
 
 [features]
 # Mặc định bật RDBMS (Postgres/MySQL) để CLI + MCP server có thể serve backend
-# multi-tenant. Tắt để build nhẹ: `cargo build --no-default-features`.
+# multi-tenant. Embedding fastembed LÀ OPT-IN — chỉ bật khi cần semantic search:
+# `cargo build --features fastembed` (hoặc set `[embedding] backend = "fastembed"`
+# trong config khi chạy với bản đã compile sẵn fastembed). Tắt để build
+# nhẹ: `cargo build --no-default-features`.
 default = ["rdbms"]
 rdbms = ["codegraph-graph/postgres", "codegraph-graph/mysql", "codegraph-mcp/rdbms"]
+# Embedding backend fastembed (semantic search) — OPT-IN, không bật mặc định.
+fastembed = ["codegraph-graph/fastembed"]
+# macOS-only: bật CoreML EP cho ONNX Runtime (embed trên Apple GPU/ANE). Chỉ có
+# nghĩa khi build trên macOS + `--features fastembed,apple-accel`. Non-macOS bật
+# feature này sẽ lỗi (ort coreml chỉ compile trên macOS). Metal EP chưa được
+# expose bởi bản ort hiện tại → "metal" config cũng map sang CoreML.
+apple-accel = ["codegraph-graph/apple-accel"]

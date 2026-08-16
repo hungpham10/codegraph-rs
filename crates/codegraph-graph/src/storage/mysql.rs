@@ -1,4 +1,6 @@
-use super::{Result, Storage, StorageError, Tx, decode_chain, encode_chain};
+use std::collections::HashMap;
+
+use super::{decode_vector, encode_vector, Result, Storage, StorageError, Tx, decode_chain, encode_chain};
 use async_trait::async_trait;
 use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 use sqlx::mysql::{MySqlPoolOptions, MySqlRow};
@@ -59,6 +61,19 @@ impl MySqlStorage {
             .execute(&self.pool)
             .await
             .map_err(db_err)?;
+        // Embeddings: (repo_id, symbol_id) → vector BLOB. Tạo bảng nếu chưa có
+        // (idempotent) để không bắt buộc chạy migration thủ công cho tính năng này.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sg_embeddings (
+                repo_id BIGINT NOT NULL,
+                symbol_id BIGINT NOT NULL,
+                vector LONGBLOB NOT NULL,
+                PRIMARY KEY (repo_id, symbol_id)
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 
@@ -467,6 +482,53 @@ impl Storage for MySqlStorage {
         rows.iter().map(row_to_symbol).collect()
     }
 
+    async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sg_embeddings (repo_id, symbol_id, vector) VALUES (?, ?, ?) \
+             ON DUPLICATE KEY UPDATE vector = VALUES(vector)",
+        )
+        .bind(self.repo_id as i64)
+        .bind(symbol_id as i64)
+        .bind(encode_vector(vector))
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
+        let row: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT vector FROM sg_embeddings WHERE repo_id = ? AND symbol_id = ?")
+                .bind(self.repo_id as i64)
+                .bind(symbol_id as i64)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_err)?;
+        Ok(row.and_then(|(b,)| decode_vector(&b)))
+    }
+
+    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
+        let rows: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT symbol_id, vector FROM sg_embeddings WHERE repo_id = ?")
+                .bind(self.repo_id as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, b)| decode_vector(&b).map(|v| (id as u64, v)))
+            .collect())
+    }
+
+    async fn clear_embeddings(&mut self) -> Result<()> {
+        sqlx::query("DELETE FROM sg_embeddings WHERE repo_id = ?")
+            .bind(self.repo_id as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     async fn save_next_id(&mut self, next: u64) -> Result<()> {
         sqlx::query(
             "INSERT INTO sg_next_id (repo_id, next) VALUES (?, ?) \
@@ -649,6 +711,7 @@ impl Storage for MySqlStorage {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         for t in [
             "sg_symbols",
+            "sg_embeddings",
             "sg_files",
             "sg_call_records",
             "sg_call_names",

@@ -219,54 +219,7 @@ impl GraphApi {
         self.shared_index.ensure_fresh().await
     }
 
-    /// Search symbol theo tên (substring, case-insensitive).
-    pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<Symbol>> {
-        self.index()
-            .await
-            .search_symbol(query, None, limit as usize)
-            .await
-    }
-
-    /// Resumable + deadline-aware của [`Self::search`] — nền cho
-    /// `codegraph_search`. `timeout_ms = 0` = không giới hạn thời gian.
-    /// `timeout_ms = u64::MAX` ([`TIMEOUT_EXPIRE_IMMEDIATELY`]) = deadline đã
-    /// hết hạn ngay → chắc chắn `timed_out` (dùng cho test xác định).
-    /// `resume` = id trả về từ lần timeout trước (phải cùng query).
-    pub async fn search_resumable(
-        &self,
-        query: &str,
-        limit: u32,
-        resume: Option<String>,
-        timeout_ms: u64,
-    ) -> Result<ResumeSearchOutcome> {
-        self.search_symbol_paged_resumable(
-            query,
-            None,
-            SymbolMatch::Contains,
-            Pagination { limit, offset: 0 },
-            resume,
-            timeout_ms,
-        )
-        .await
-    }
-
-    /// Search symbol nâng cao — kind filter + match mode + phân trang.
-    /// Trả về (page, total).
-    pub async fn search_symbol_paged(
-        &self,
-        query: &str,
-        kind: Option<SymbolKind>,
-        mode: SymbolMatch,
-        limit: u32,
-        offset: u32,
-    ) -> Result<(Vec<Symbol>, usize)> {
-        self.index()
-            .await
-            .search_symbol_paged(query, kind, mode, limit as usize, offset as usize)
-            .await
-    }
-
-    /// Resumable + deadline-aware của [`Self::search_symbol_paged`] — nền cho
+    /// Search symbol nâng cao (resumable + deadline-aware) — nền cho
     /// `codegraph_search_symbol`. `timeout_ms = 0` = không giới hạn;
     /// `timeout_ms = u64::MAX` ([`TIMEOUT_EXPIRE_IMMEDIATELY`]) = chắc chắn
     /// `timed_out` (dùng cho test xác định).

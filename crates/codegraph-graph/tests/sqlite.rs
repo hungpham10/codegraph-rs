@@ -7,8 +7,8 @@
 
 #![cfg(feature = "sqlite")]
 
-use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind};
-use codegraph_graph::{GraphIndex, ParseResult, SharedGraphIndex};
+use codegraph_core::{CallRecord, EffectType, SYMBOL_BASE, Symbol, SymbolKind, SymbolMatch};
+use codegraph_graph::{GraphIndex, ParseResult, Pagination, SharedGraphIndex};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -234,9 +234,17 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
 
     // Search tên trả đủ 2 kết quả (không hoà trộn thành 1).
     let hits = idx
-        .search_symbol("process", Some(SymbolKind::Function), 10)
+        .search_symbol_paged_resumable(
+            "process",
+            Some(SymbolKind::Function),
+            SymbolMatch::Contains,
+            Pagination { limit: 10, offset: 0 },
+            None,
+            None,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .page;
     assert_eq!(hits.len(), 2);
     let mut files: Vec<&str> = hits.iter().map(|s| s.file.as_str()).collect();
     files.sort_unstable();
@@ -269,16 +277,36 @@ async fn sandbox_search_kinds_finds_java_method() {
 
     // Trước fix: lọc Function-only → bỏ Method → empty (sandbox fail).
     let only_func = idx
-        .search_symbol("getProfile", Some(SymbolKind::Function), 1)
+        .search_symbol_paged_resumable(
+            "getProfile",
+            Some(SymbolKind::Function),
+            SymbolMatch::Contains,
+            Pagination { limit: 1, offset: 0 },
+            None,
+            None,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .page;
     assert!(only_func.is_empty());
 
     // Fix: sandbox chấp nhận Function | Method.
     let hits = idx
-        .search_symbol_kinds("getProfile", &[SymbolKind::Function, SymbolKind::Method], 1)
+        .search_symbol_paged_resumable(
+            "getProfile",
+            None,
+            SymbolMatch::Contains,
+            Pagination { limit: 1, offset: 0 },
+            None,
+            None,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .page
+        .into_iter()
+        .find(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
+        .into_iter()
+        .collect::<Vec<_>>();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].name, "getProfile");
     assert_eq!(hits[0].kind, SymbolKind::Method);

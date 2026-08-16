@@ -61,6 +61,9 @@ struct ConfigFile {
     /// Backend storage (mặc định sqlite).
     #[serde(default)]
     storage: StorageSection,
+    /// Embedding backend cho semantic search (fastembed / hashing) + cache model.
+    #[serde(default)]
+    embedding: EmbeddingSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -87,6 +90,30 @@ struct LanguagesSection {
     headers: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct EmbeddingSection {
+    /// `"fastembed"` | `"hashing"`.
+    #[serde(default)]
+    backend: Option<String>,
+    /// Tên model fastembed (alias hoặc variant name).
+    #[serde(default)]
+    model: Option<String>,
+    /// Thư mục cache model (global). Mặc định `~/.cache/codegraph/embeddings`.
+    #[serde(default)]
+    cache_dir: Option<String>,
+    /// Thư mục chứa extension sqlite-vss (`vector0`/`vss0`) — CHỈ backend SQLite.
+    /// Khi set (và file tồn tại), KNN semantic chạy qua `vss0` (HNSW ANN trong
+    /// SQLite). Thiếu file → fallback brute-force. `None` → tự dò `<cache_dir>/vss`.
+    #[serde(default)]
+    vss_extension: Option<String>,
+    /// Execution provider cho ONNX Runtime — `"cpu"` (mặc định) | `"coreml"`
+    /// (Apple Neural Engine / GPU, macOS) | `"metal"` (GPU, macOS). Chỉ có hiệu
+    /// lực khi build `--features fastembed,apple-accel` trên macOS; ngược lại bỏ
+    /// qua (chạy CPU). Platform khác macOS luôn CPU.
+    #[serde(default)]
+    execution_provider: Option<String>,
+}
+
 /// Raw rule — `effect` để string để rule lỗi (unknown) bị skip + warn, không
 /// làm hỏng toàn bộ config; parse lại bằng `EffectType::parse`.
 #[derive(Debug, Deserialize)]
@@ -104,6 +131,8 @@ pub struct ExtractConfig {
     pub effect_classifier: EffectClassifier,
     /// Backend storage được chọn trong config (mặc định sqlite).
     pub storage: StorageConfig,
+    /// Cấu hình embedding backend (semantic search) — đọc từ `[embedding]`.
+    pub embedding: codegraph_graph::embeddings::EmbeddingConfig,
 }
 
 /// Storage backend đã parse từ `[storage]` trong config.
@@ -135,6 +164,13 @@ impl ExtractConfig {
         Self {
             header_language: parse_header_language(file.languages.headers.as_deref()),
             effect_classifier: build_classifier(file.effect_rules),
+            embedding: codegraph_graph::embeddings::EmbeddingConfig::from_raw(
+                file.embedding.backend.as_deref(),
+                file.embedding.model.as_deref(),
+                file.embedding.cache_dir.as_deref(),
+                file.embedding.vss_extension.as_deref(),
+                file.embedding.execution_provider.as_deref(),
+            ),
             storage: StorageConfig {
                 kind: file
                     .storage
@@ -178,6 +214,10 @@ impl ExtractConfig {
     /// - `postgres` / `mysql` → `Sharded { dsns, repo_id, root }`
     ///   (`repo_id` phải đã được sinh bởi `ensure_repo_id`; nếu thiếu → `None`)
     pub fn storage_route(&self, root: &Utf8Path) -> Option<StorageRoute> {
+        // Áp dụng config embedding (backend/model/cache) cho process trước khi
+        // mở index — `GraphIndex::new_with_storage` đọc global này để quyết định
+        // có bật vector index hay không (opt-in: chỉ khi backend = "fastembed").
+        codegraph_graph::embeddings::set_embedding_config(self.embedding.clone());
         match self.storage.kind {
             StorageKind::Memory => Some(StorageRoute::Memory),
             StorageKind::Postgres | StorageKind::MySql => {
@@ -289,6 +329,30 @@ type = "sqlite"
 #     dsns = ["postgres://user:pass@db1:5432/codegraph", "postgres://user:pass@db2:5432/codegraph"]
 #     repo_id = 14028493579208694412   # sinh bởi `codegraph init` (partition key)
 # dsn = "sqlite:///tmp/codegraph.db"
+
+[embedding]
+# Semantic search (vector KNN/k-means) là OPT-IN — MẶC ĐỊNH TẮT.
+# Bỏ comment + set "fastembed" để bật vector search (cần compile `--features fastembed`
+# và tải model ONNX lúc chạy). Nếu tắt, semantic/hybrid search sẽ báo lỗi rõ ràng
+# (KHÔNG fallback silent sang lexical).
+# backend = "fastembed"
+# Model fastembed — alias thân thiện hoặc variant name, VD:
+#   bge-small-en-v1.5 (mặc định, 384-dim), bge-base-en-v1.5, bge-large-en-v1.5,
+#   all-minilm-l6-v2, all-mpnet-base-v2, nomic-embed-text-v1.5, multilingual-e5-small.
+# model = "bge-small-en-v1.5"
+# Thư mục cache model (global, chia sẻ mọi project) — pre-download bằng
+# `codegraph embed --model <x>` để chạy offline. Mặc định ~/.cache/codegraph/embeddings.
+# cache_dir = "~/.cache/codegraph/embeddings"
+# SQLite-only: dùng sqlite-vss (vector0/vss0) để KNN chạy HNSW ANN ngay trong
+# SQLite thay vì brute-force in-memory. Cần 2 file extension trong thư mục này
+# (tự build hoặc tải prebuilt). Có mặt → bật; thiếu → fallback brute-force.
+# vss_extension = "~/.cache/codegraph/embeddings/vss"
+# Execution provider cho ONNX Runtime (chỉ macOS, build `--features fastembed,apple-accel`):
+#   "cpu"     (mặc định)  → CPU + Accelerate/vecLib SIMD, mọi core
+#   "coreml"  → Core ML EP (Apple Neural Engine / GPU trên Apple Silicon)
+#   "metal"   → Metal EP (GPU)
+# Build thiếu `apple-accel`, hoặc platform khác macOS → bỏ qua, chạy CPU.
+# execution_provider = "cpu"
 "#;
 
 /// Quick project scan: returns a hint when the tree is clearly C-only or C++-only.

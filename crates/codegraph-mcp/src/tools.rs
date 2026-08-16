@@ -39,18 +39,6 @@ pub fn is_known_tool(name: &str) -> bool {
 fn tool_defs() -> Vec<ToolDef> {
     vec![
         tool(
-            "codegraph_search",
-            "Search symbols by name (substring, case-insensitive). On large indexes this can take a while — pass timeout_ms (default 20000) and, if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue the search from where it stopped.",
-            json!({ "type": "object", "properties": {
-                "query": { "type": "string" },
-                "limit": { "type": "integer", "default": 10 },
-                "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." },
-                "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
-                "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
-            }, "required": ["query"] }),
-        ),
-        tool(
             "codegraph_symbol",
             "Look up a symbol by id or exact name. Duplicate names → ambiguous with the full match list; retry with symbol_id.",
             json!({ "type": "object", "properties": {
@@ -163,11 +151,11 @@ fn tool_defs() -> Vec<ToolDef> {
         // ── Enhanced symbol search (semgraph_search_symbol) ──
         tool(
             "codegraph_search_symbol",
-            "Search symbols by name with optional kind filter, match mode, and pagination. match: 'contains' (substring anywhere, default), 'prefix' (name starts with), 'suffix' (name ENDS with — e.g. query=\"Service\" finds every *Service class), 'exact' (exact name, case-insensitive). Use 'total' with 'offset' to fetch further pages until offset >= total. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue. When more results remain, the response includes a resume id you can pass to page further without re-scanning.",
+            "Search symbols by name with optional kind filter, match mode, and pagination. match: 'contains' (substring anywhere, default), 'prefix' (name starts with), 'suffix' (name ENDS with — e.g. query=\"Service\" finds every *Service class), 'exact' (exact name, case-insensitive), 'semantic' (vector KNN over symbol embeddings — find symbols by similar/approximate names when you don't remember the exact spelling), 'hybrid' (merge 'contains' + 'semantic' via Reciprocal Rank Fusion). Use 'total' with 'offset' to fetch further pages until offset >= total. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue. When more results remain, the response includes a resume id you can pass to page further without re-scanning.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string" },
                 "kind": { "type": "string", "enum": ["function", "method", "class", "interface", "enum", "variable", "constant", "parameter", "field", "module", "file"] },
-                "match": { "type": "string", "enum": ["contains", "prefix", "suffix", "exact"], "default": "contains" },
+                "match": { "type": "string", "enum": ["contains", "prefix", "suffix", "exact", "semantic", "hybrid"], "default": "contains" },
                 "limit": { "type": "integer", "default": 20 },
                 "offset": { "type": "integer", "default": 0 },
                 "resume": { "type": "string", "description": "Resume id from a previous timeout (or from a previous response with more pages) — retry the same call with this to continue where it stopped." },
@@ -326,39 +314,6 @@ pub async fn dispatch_with_api(
     args: Value,
 ) -> Result<String> {
     match name {
-        "codegraph_search" => {
-            let q = arg_str(&args, "query")?;
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
-            let resume = args
-                .get("resume")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let timeout_ms = args
-                .get("timeout_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(20000);
-            let out = api.search_resumable(q, limit, resume, timeout_ms).await?;
-            if out.timed_out {
-                // Không trả kết quả nửa chừng — báo lỗi kèm resume id để LLM retry
-                // cùng args + resume → search tiếp tục đúng vị trí dừng.
-                return Err(Error::Other(format!(
-                    "codegraph_search timed out after {}ms (collected {} symbols so far). \
-                     Retry the same call with the same arguments plus \"resume\": \"{}\" \
-                     to continue the search from where it stopped.",
-                    timeout_ms,
-                    out.progress,
-                    out.resume.as_deref().unwrap_or("")
-                )));
-            }
-            let detail = detail_from_args(&args, session_detail);
-            let format = format_from_args(&args, session_format);
-            let out: Vec<Value> = out
-                .page
-                .iter()
-                .map(|s| symbol_json(root.as_str(), s, detail, format))
-                .collect();
-            emit_value(root.as_str(), Value::Array(out))
-        }
         "codegraph_symbol" => {
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
@@ -1248,9 +1203,18 @@ pub async fn dispatch_sandbox(
     } else {
         let q = arg_str(&args, "name")?;
         let hits = idx
-            .search_symbol_kinds(q, &[SymbolKind::Function, SymbolKind::Method], 1)
-            .await?;
-        hits.first()
+            .search_symbol_paged_resumable(
+                q,
+                None,
+                SymbolMatch::Contains,
+                codegraph_graph::Pagination { limit: 20, offset: 0 },
+                None,
+                None,
+            )
+            .await?
+            .page;
+        hits.into_iter()
+            .find(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
             .map(|s| s.id)
             .ok_or_else(|| Error::Invalid(format!("no function matching `{q}`")))?
     };
@@ -1323,10 +1287,18 @@ async fn run_sim(
     mocks: &[(String, String)],
 ) -> Result<Value> {
     let Some(sym) = idx
-        .search_symbol_kinds(entry_name, &[SymbolKind::Function, SymbolKind::Method], 1)
+        .search_symbol_paged_resumable(
+            entry_name,
+            None,
+            SymbolMatch::Contains,
+            codegraph_graph::Pagination { limit: 20, offset: 0 },
+            None,
+            None,
+        )
         .await?
+        .page
         .into_iter()
-        .next()
+        .find(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
     else {
         return Ok(json!({ "present": false }));
     };

@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 codegraph-core    = { path = "../codegraph-core" }
-codegraph-graph   = { path = "../codegraph-graph", features = ["sqlite"] }
+codegraph-graph   = { path = "../codegraph-graph", features = ["sqlite", "lmdb","redis","postgres","mysql", "bloom-search","fastembed"] }
 codegraph-context = { path = "../codegraph-context" }
 serde = { workspace = true }
 serde_json = { workspace = true }

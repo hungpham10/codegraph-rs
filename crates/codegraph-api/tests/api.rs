@@ -77,8 +77,19 @@ async fn search_and_symbol_by_id() {
     let (caller, _, _) = seed_index(&db_str).await;
     let api = api(&db_str).await;
 
-    // Substring search.
-    let hits = api.search("call", 10).await.unwrap();
+    // Substring search (resumable path, no deadline).
+    let hits = api
+        .search_symbol_paged_resumable(
+            "call",
+            None,
+            SymbolMatch::Contains,
+            Pagination { limit: 10, offset: 0 },
+            None,
+            0,
+        )
+        .await
+        .unwrap()
+        .page;
     assert!(hits.iter().any(|s| s.id == caller));
     // Symbol by id.
     assert_eq!(api.symbol_by_id(caller).await.unwrap().name, "caller");
@@ -276,7 +287,14 @@ async fn search_resumable_timeout_retry_roundtrip() {
     // total = 5000 vì name engine chặn cứng MAX_RESULTS tên distinct.
     let capped = 5000;
     let first = api
-        .search_resumable("order", 20, None, codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY)
+        .search_symbol_paged_resumable(
+            "order",
+            None,
+            SymbolMatch::Contains,
+            Pagination { limit: 20, offset: 0 },
+            None,
+            codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY,
+        )
         .await
         .unwrap();
     assert!(first.timed_out, "expired deadline must time out");
@@ -284,7 +302,14 @@ async fn search_resumable_timeout_retry_roundtrip() {
 
     // Retry: cùng args + resume, không giới hạn thời gian → hoàn tất.
     let out = api
-        .search_resumable("order", 20, Some(resume_id.clone()), 0)
+        .search_symbol_paged_resumable(
+            "order",
+            None,
+            SymbolMatch::Contains,
+            Pagination { limit: 20, offset: 0 },
+            Some(resume_id.clone()),
+            0,
+        )
         .await
         .unwrap();
     assert!(!out.timed_out);
@@ -299,16 +324,30 @@ async fn search_resumable_timeout_retry_roundtrip() {
 
     // Resume id không tồn tại → lỗi (LLM nên retry không resume).
     assert!(
-        api.search_resumable("order", 20, Some("deadbeef00000000".into()), 0)
-            .await
-            .is_err(),
+        api.search_symbol_paged_resumable(
+            "order",
+            None,
+            SymbolMatch::Contains,
+            Pagination { limit: 20, offset: 0 },
+            Some("deadbeef00000000".into()),
+            0,
+        )
+        .await
+        .is_err(),
         "unknown resume id must be rejected"
     );
     // Resume id không khớp query → lỗi.
     assert!(
-        api.search_resumable("totally_different", 20, Some(resume_id), 0)
-            .await
-            .is_err(),
+        api.search_symbol_paged_resumable(
+            "totally_different",
+            None,
+            SymbolMatch::Contains,
+            Pagination { limit: 20, offset: 0 },
+            Some(resume_id),
+            0,
+        )
+        .await
+        .is_err(),
         "resume id for a different query must be rejected"
     );
 }
