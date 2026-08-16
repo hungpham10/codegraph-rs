@@ -1,6 +1,8 @@
 # CodeGraph
 
-[![CI](https://github.com/Cleboost/codegraph-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Cleboost/codegraph-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/hungpham10/codegraph-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Cleboost/codegraph-rs/actions/workflows/ci.yml)
+[![CodSpeed Badge](https://img.shields.io/endpoint?url=https://app.codspeed.io//badge.json)](https://app.codspeed.io//hungpham10/codegraph-rs?utm_source=badge)
+[![codecov](https://codecov.io/gh/hungpham10/codegraph-rs/graph/badge.svg?token=PUSMFF0CM8)](https://codecov.io/gh/hungpham10/codegraph-rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > Local-first code intelligence for AI agents. Built in Rust. Single static
@@ -31,7 +33,7 @@ Agents that consult the semantic graph instead of grepping the filesystem make *
 **Linux / macOS**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Cleboost/codegraph-rs/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hungpham10/codegraph-rs/main/scripts/install.sh | sh
 ```
 
 Drops `codegraph` into `~/.local/bin`. Override with `CODEGRAPH_INSTALL_DIR`.
@@ -39,7 +41,7 @@ Drops `codegraph` into `~/.local/bin`. Override with `CODEGRAPH_INSTALL_DIR`.
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/Cleboost/codegraph-rs/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/hungpham10/codegraph-rs/main/scripts/install.ps1 | iex
 ```
 
 Installs to `%LOCALAPPDATA%\codegraph\bin` and adds it to the user PATH.
@@ -55,7 +57,7 @@ yay -S codegraph-rs-bin
 <details>
 <summary><strong>Manual</strong></summary>
 
-1. Download the archive for your platform from the [latest release](https://github.com/Cleboost/codegraph-rs/releases/latest):
+1. Download the archive for your platform from the [latest release](https://github.com/hungpham10/codegraph-rs/releases/latest):
 
    | Platform | File |
    |---|---|
@@ -75,7 +77,7 @@ yay -S codegraph-rs-bin
 Requires Rust stable (≥ 1.85 — `codegraph-graph` uses edition 2024).
 
 ```sh
-git clone https://github.com/Cleboost/codegraph-rs
+git clone https://github.com/hungpham10/codegraph-rs
 cd codegraph-rs
 cargo build --release -p codegraph
 # binary at target/release/codegraph
@@ -84,7 +86,7 @@ cargo build --release -p codegraph
 Or via Cargo directly:
 
 ```sh
-cargo install --git https://github.com/Cleboost/codegraph-rs codegraph
+cargo install --git https://github.com/hungpham10/codegraph-rs codegraph
 ```
 
 </details>
