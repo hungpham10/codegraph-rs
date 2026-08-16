@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,10 +21,36 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Các test target gated (tests/rdbms.rs, tests/redis.rs) không nằm trong
+      # default features — clippy riêng để vẫn sạch warning.
+      - run: cargo clippy -p codegraph-graph --features postgres,mysql,redis --tests -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    services:
+      # Unit test storage/redis.rs (dùng DB 15) chạy trong `cargo test --workspace`
+      # vì codegraph-api bật feature `redis` của codegraph-graph. Integration
+      # test redis/rdbms (tests/redis.rs, tests/rdbms.rs) cũng dùng các service này.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 3
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: codegraph
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 3
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: postgres
+          MYSQL_DATABASE: codegraph
+        ports: ["3306:3306"]
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -ppostgres" --health-interval 10s --health-timeout 5s --health-retries 3
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +59,17 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install DB clients
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client mysql-client
+      # Migration thủ công theo thiết kế repo — apply schema trước khi test.
+      - name: Apply schema (postgres)
+        run: |
+          psql "postgres://postgres:postgres@127.0.0.1:5432/codegraph" -f sql/postgres/001-initial-schema.sql
+          psql "postgres://postgres:postgres@127.0.0.1:5432/codegraph" -f sql/postgres/002-add-repos-registry.sql
+      - name: Apply schema (mysql)
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/001-initial-schema.sql
+          mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/002-add-repos-registry.sql
       - name: Install grcov
         run: cargo install grcov
       - name: Run tests with coverage instrumentation
@@ -39,6 +77,30 @@ jobs:
           RUSTFLAGS: "-Cinstrument-coverage"
           LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
         run: cargo test --workspace --no-fail-fast
+      # Storage integration tests (#[ignore] + DSN) — cũng instrument để đóng
+      # góp coverage vào cùng báo cáo lcov.
+      - name: Storage integration tests (postgres)
+        env:
+          RUSTFLAGS: "-Cinstrument-coverage"
+          LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
+          TEST_RDBMS_DSN: "postgres://postgres:postgres@127.0.0.1:5432/codegraph"
+          TEST_RDBMS_REPO_ID: "1"
+        # --test-threads=1: 2 test open_route song song race khi CREATE TYPE
+        # (pg_type duplicate key) — bug chưa fix ở tầng storage, serialize tạm.
+        run: cargo test -p codegraph-graph --features postgres --test rdbms -- --ignored --nocapture --test-threads=1
+      - name: Storage integration tests (mysql)
+        env:
+          RUSTFLAGS: "-Cinstrument-coverage"
+          LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
+          TEST_RDBMS_DSN: "mysql://root:postgres@127.0.0.1:3306/codegraph"
+          TEST_RDBMS_REPO_ID: "1"
+        run: cargo test -p codegraph-graph --features mysql --test rdbms -- --ignored --nocapture --test-threads=1
+      - name: Storage integration tests (redis)
+        env:
+          RUSTFLAGS: "-Cinstrument-coverage"
+          LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
+          TEST_REDIS_DSN: "redis://127.0.0.1:6379"
+        run: cargo test -p codegraph-graph --features redis --test redis -- --ignored --nocapture
       - name: Generate coverage report (lcov)
         run: |
           mkdir -p ./target/coverage
