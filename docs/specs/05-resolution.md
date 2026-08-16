@@ -1,91 +1,56 @@
-# Spec 05 — Reference resolution + frameworks
+# Spec 05 — Call resolution
 
-**État**: pending
+**Status**: ✅ done — implemented as the resolve phase of
+`GraphIndex::ingest` (`crates/codegraph-graph/src/lib.rs`). The originally
+planned `codegraph-resolve` crate (import resolver + 17 framework resolvers)
+was not ported; resolution today is name-based over the global registry.
 
-## Objectif
+## Goal
 
-Transformer imports textuels et patterns de framework en edges précis (`imports`, `references`, `route → handler`).
+Turn each chain's placeholder-`0` positions (unresolved `CallRecord`s) into
+real callee symbol ids, so that chains, edges, and the call-name index are
+consistent after ingest.
 
-## Pipeline
+## Resolution order
 
-```
-Db (post-extraction)
-   ↓
-ImportResolver
-   ↓
-NameMatcher
-   ↓
-FrameworkResolvers (express, laravel, rails, fastapi, django, flask,
-                    spring, gin, axum, aspnet, vapor, react-router,
-                    sveltekit, vue-nuxt, cargo-workspace, nestjs, drupal)
-   ↓
-new edges + new route nodes inserted
-```
+For every `CallRecord`, ingest tries in order:
 
-## ImportResolver
+1. **Structural hint** — `target_class` / `target_method` (e.g. a Java class
+   literal or receiver type captured at parse time) narrows the candidate set.
+2. **Exact name match** — the full call name (`fmt.Println`,
+   `orderRepository.saveOrder`) against the global name index.
+3. **Short name** — the last segment of the call name (`Println`,
+   `saveOrder`).
+4. **Best candidate scoring** — when several symbols share the name:
+   `override +5` · `has-chain +5` (the candidate itself has a chain, i.e. is a
+   function) · `same-file +3`. Highest score wins.
 
-Input: `RawImport { from_file, module_spec, imported_names }`.
+Unresolved calls keep their placeholder `0` but **remain queryable** through
+the inverted call-name index (`callers_by_call_name` — the window to the
+"outside world" of libraries), and `codegraph_references` /
+`codegraph_search_by_call` surface them like resolved ones.
 
-Étapes:
-1. **Relative** (`./foo`, `../bar`): join + résolution extension (`.ts → .tsx → /index.ts`...).
-2. **Alias** (tsconfig `paths`, jsconfig, vite alias, cargo workspace members, pyproject src layout): lus une fois via `path-aliases.rs` à l'init du resolver.
-3. **Bare module** (`react`, `lodash`): pas résolu — emis comme edge `imports → external` (target = node fictif `external:react` ou skip selon flag).
+## Derived state
 
-Output: edges `imports(file_node → file_node or symbol_node)`.
+After resolution, ingest builds:
 
-## NameMatcher
+- `chains_map` — func id → chain (remapped local → global ids)
+- `edges: HashMap<(caller, callee), EdgeMeta>` — position, guard condition,
+  effect, `is_loop_body`, `is_recursive`
+- `call_names` — lowercase call name (+ type-qualified aliases) → call sites
 
-Pour les appels `calls` où la cible n'a été identifiée que par nom à l'extraction, résolution post-pass:
-- Cherche `nodes` de kind `function|method|class` avec `name = target_name`.
-- Si 1 candidat dans le même fichier ou un fichier importé: lien direct.
-- Sinon: skip (évite faux positifs).
+All of it is rebuilt from chains + records on every ingest and on reopen.
 
-## Frameworks
+## What is explicitly *not* done
 
-Un module par framework. Trait commun:
+- No import-graph resolution (relative/alias/bare-module), no tsconfig path
+  aliases, no cargo-workspace member mapping.
+- No framework route resolvers (express/laravel/rails/spring/gin/… → route
+  nodes). Route/handler knowledge is left to the LLM reading `codegraph_flow`
+  / `codegraph_search_by_annotation` output.
 
-```rust
-pub trait FrameworkResolver: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn detect(&self, root: &Utf8Path) -> bool;        // package.json scan, Gemfile, etc.
-    fn resolve(&self, db: &Db) -> Result<FrameworkArtifacts>;
-}
-
-pub struct FrameworkArtifacts {
-    pub route_nodes: Vec<NodeDraft>,
-    pub edges: Vec<EdgeDraft>,
-}
-```
-
-### Patterns critiques (référence archive)
-
-| Framework | Détection | Pattern |
-|---|---|---|
-| Express | `express` dans package.json | `app.get('/x', handler)` → route node + ref edge |
-| Laravel | `composer.json/laravel` | `Route::get(...)`, controller@method |
-| Rails | `Gemfile/rails` | `routes.rb` DSL |
-| FastAPI | `pyproject/fastapi` | `@app.get('/x')` décorateur |
-| Django | `manage.py` | `urls.py` `path()` |
-| Flask | `flask` dep | `@app.route('/x')` |
-| Spring | `pom.xml` / gradle | `@GetMapping` etc |
-| Gin | go.mod gin-gonic | `r.GET("/x", handler)` |
-| Axum | Cargo.toml axum | `Router::new().route("/x", get(h))` |
-| ASP.NET | `.csproj` | `[HttpGet("/x")]` |
-| Vapor | `Package.swift` vapor | `app.get("x", use: h)` |
-| React Router | `react-router` | `<Route path="/x" element={<C/>} />` |
-| SvelteKit | `svelte.config.js` | `src/routes/**/+page.svelte` |
-| Vue/Nuxt | `nuxt.config` | `pages/**/*.vue` |
-| Cargo workspace | `[workspace]` | members glob → cross-crate imports |
-| NestJS | `@nestjs/core` | `@Controller('x')` + `@Get('y')` |
-| Drupal | `*.info.yml` | hooks + services.yml |
-
-Chaque framework émet `route` node avec `qualified_name = METHOD path` (ex `"GET /users/:id"`), edge `references → handler symbol`.
-
-## Tests
-
-`tests/frameworks-integration.rs` (équivalent archive). Fixture par framework avec 2-3 routes attendues.
-
-## Pièges
-
-- Détection multi-framework: un projet peut avoir Vue + Express; tous les resolvers qui détectent run, pas de mutex exclusion.
-- Réentrant: appel `sync` ne doit pas dupliquer routes — purge edges de kind `references` issues des resolvers avant ré-exécution. Marqueur `meta.source='framework:express'` sur l'edge.
+Rationale: the semgraph call chains already answer the questions agents ask
+("who calls this", "what does this flow do"); a framework-specific resolver
+layer added maintenance cost without changing agent behavior. If route nodes
+become a requirement, they should be added as a post-ingest pass over
+annotations + call patterns rather than a separate crate.
