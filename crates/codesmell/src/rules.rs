@@ -204,7 +204,7 @@ pub async fn run_style(
                     continue;
                 }
             }
-            let ok = GlobSet::new(&[nr.pattern.clone()]).matches(&s.name);
+            let ok = crate::glob::glob_matches(&nr.pattern, &s.name);
             if !ok {
                 out.push(Violation {
                     rule: RULE_NAMING.into(),

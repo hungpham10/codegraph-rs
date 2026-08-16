@@ -162,33 +162,48 @@ paths:
 
 # CodeGraph System Instructions
 
-This project is backed by a custom **CodeGraph MCP server**. CodeGraph maintains a local Tree-sitter knowledge graph encompassing every symbol, edge, boundary, and file within this workspace. Reads operate at sub-millisecond speeds and deliver accurate structural insights that traditional text-based tools (like grep) cannot match.
+This project is backed by a **CodeGraph MCP server** — a local tree-sitter
+semantic graph of every symbol and call chain in the workspace. Reads are
+sub-millisecond and return structural information grep cannot match.
 
 ---
 
 ## 🚨 CRITICAL CONSTRAINTS (Read First)
 
-- **NEVER use generic text-search, grep, or file-reading tools** if a symbol, reference, or definition can be located using CodeGraph.
-- **DO NOT double-check or re-verify** CodeGraph results with native file reads. Treat the knowledge graph as the absolute, single source of truth for codebase architecture.
-- **Handle uninitialized states immediately:** If any CodeGraph tool returns a `"not initialized"` or missing index error, **STOP execution immediately** and instruct the user to run `codegraph init -i` in their terminal. Do not attempt to parse or scan the codebase manually to compensate.
-- **Minimize token overhead:** Prefer targeted structural queries over dumping entire file contents into the context window.
+- **NEVER use generic text-search, grep, or file-reading tools** when a
+  symbol, reference, or definition can be located with CodeGraph.
+- **Do NOT re-verify** CodeGraph results with file reads — the graph is the
+  single source of truth for codebase structure.
+- **Handle unbound sessions:** query tools refuse until the session is bound.
+  Call `codegraph_init {"path": ...}` (non-blocking, does NOT index), then
+  `codegraph_index {}` to build/refresh the index.
+- **Minimize token overhead:** prefer targeted structural queries and
+  `id`-based lookups over dumping file contents into context.
 
 ---
 
 ## 🛠️ Tool Selection Guide
 
-Always prefer `codegraph` tools for **structural** questions — tracing call hierarchies, mapping dependencies, determining definitions, and verifying signatures. Use standard filesystem tools *only* for literal text queries or applying actual code edits.
+Prefer codegraph for **structural** questions. Use filesystem tools only for
+literal text queries or applying edits.
 
 | Intent / Question | Recommended MCP Tool |
 | :--- | :--- |
-| *"Where is symbol X defined?"* | `codegraph_search` |
+| *"Where is symbol X defined?"* | `codegraph_search_symbol` (contains/prefix/suffix/exact) |
+| *"Show me this symbol by id / exact name"* | `codegraph_symbol` |
 | *"What callers invoke function Y?"* | `codegraph_callers` |
 | *"What methods or functions does Y call?"* | `codegraph_callees` |
 | *"What components or files will break if I modify Z?"* | `codegraph_impact` |
-| *"Show me Y's exact signature and internal block"* | `codegraph_node` |
+| *"Show me Y's call chain"* | `codegraph_flow` |
+| *"Find flows containing a pattern (loop + call)"* | `codegraph_search_flow` |
 | *"Give me focused, aggregated context for this task"* | `codegraph_context` |
+| *"Who calls the library function foo?"* | `codegraph_references` |
+| *"What fields/methods does class C have?"* | `codegraph_class` |
+| *"Which symbols are annotated @X?"* | `codegraph_search_by_annotation` |
 | *"What files exist under a specific path/ directory?"* | `codegraph_files` |
 | *"Is the local knowledge graph healthy and active?"* | `codegraph_status` |
+| *"What does this MR change in the graph?"* | `codegraph_diff` |
+| *"Simulate a flow's behavior with mocks"* | `codegraph_sandbox` / `codegraph_diff_simulate` |
 
 ---
 
@@ -202,4 +217,8 @@ Before updating an API route, a UI component, or a system utility, query `codegr
 
 ### 3. Strict AST Reliance
 Because CodeGraph parses the Abstract Syntax Tree (AST), its structural insights are guaranteed. If a symbol look-up yields no results, assume the symbol does not exist in the current active workspace index.
+
+### 4. Duplicate names
+The tool returns `ambiguous: true` with the full match list — retry with the
+numeric `id` alone.
 "#;

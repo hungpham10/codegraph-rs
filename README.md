@@ -134,6 +134,26 @@ runs the MCP server. All reading/interacting goes through MCP tools.
 
 Global flag `--path <dir>` overrides the workspace root.
 
+## CodeSmell — convention linter for LLM agents
+
+The workspace also ships [`codesmell`](docs/codesmell.md), a team-convention
+linter built on CodeGraph facts. LLM agents read the conventions pack before
+writing code and fix every reported violation afterwards — each violation
+carries a `fix_hint`, so the agent repairs code instead of guessing:
+
+```bash
+codesmell init                        # write .codesmell/policy.toml
+codesmell guide                       # conventions pack for the LLM / team
+codesmell check                       # lint the repo (style, architecture, testing)
+git diff | codesmell check --diff -   # change-aware validation
+```
+
+Policies cover function size/parameter/nesting limits, naming conventions
+(`*Service`, `Async` suffix), layer boundaries (`controller !-> repository`,
+severity `blocking`), and required unit tests for changed business logic
+(severity `required`), with per-area `[[override]]` scopes. See
+[docs/codesmell.md](docs/codesmell.md) for the full policy schema.
+
 ## Supported languages
 
 14 languages with full tree-sitter extraction + marker/chain walkers:
@@ -172,7 +192,7 @@ report, plus the session tools `codegraph_init` / `codegraph_deinit` /
 | `codegraph_sandbox` | Compile a function group to machine code and run it against Rhai mocks |
 | `codegraph_diff` | Draft report of what an MR/patch would change in the graph |
 
-Read the [server instructions](crates/codegraph-mcp/src/server-instructions.md) that ship with the binary — they tell your agent when to reach for which tool.
+Read the [server instructions](docs/codegraph.md) that ship with the binary — they tell your agent when to reach for which tool.
 
 ### `codegraph_search_flow` pattern examples
 
@@ -209,6 +229,7 @@ crates/
   codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 27-tool dispatch, session-driven
   codegraph-bench/      Benchmarks (criterion search benches, storage benches, codspeed)
   codegraph/            CLI lifecycle (init/deinit/embed/serve --mcp) + watcher (notify + debounced full re-index)
+  codesmell/            Team-convention linter over in-memory CodeGraph facts (codesmell check / guide)
 ```
 
 Pipeline:
@@ -237,175 +258,31 @@ A `.codegraph/` directory is created next to your project:
 ```
 .codegraph/
   db.sqlite        SQLite (WAL mode, single file — entities + radix streams); db.lmdb/ directory when the LMDB backend is selected
-  config.toml      Language toggles, walker filters, storage backend, embedding settings
+  config.toml      Languages, effect rules, storage backend, sandbox, embedding settings
   .gitignore       Pre-filled so the index is never committed
   version          Codegraph version that created the directory
 ```
 
-### config.toml example
+`config.toml` controls everything runtime-adjustable — highlights:
 
-```toml
-# Language toggles (all 14 enabled by default)
-[languages]
-rust = true
-go = true
-python = true
-typescript = true
-javascript = true
-java = true
-c = true
-cpp = true
-csharp = true
-ruby = true
-php = true
-scala = true
-swift = true
-lua = true
-
-# Walker filters (same syntax as .gitignore)
-[walker]
-include = ["**/*"]
-exclude = [
-  ".git/**",
-  ".codegraph/**",
-  "target/**",
-  "node_modules/**",
-  "*.min.js",
-  "*.lock"
-]
-
-# Storage backend — "sqlite" (default) | "lmdb" | "redis" | "memory" | "postgres" | "mysql"
-[storage]
-type = "sqlite"
-# DSN override. Defaults: sqlite → sqlite://<root>/.codegraph/db.sqlite,
-# lmdb → lmdb://<root>/.codegraph/db.lmdb (directory). Redis REQUIRES a dsn.
-# dsn = "redis://localhost:6379"
-# Postgres/MySQL use `dsns` (shard list) + `repo_id` — see below.
-
-# Semantic search (vector KNN) — OFF by default. See "Semantic search" below.
-[embedding]
-# backend = "fastembed"
-# model = "bge-small-en-v1.5"
-# cache_dir = "~/.cache/codegraph/embeddings"
-```
-
-### Storage backends
-
-The `[storage]` section selects where the index lives:
-
-| `type` | Notes |
+| Section | What it selects |
 |---|---|
-| `sqlite` | Default. Single-file `db.sqlite` (WAL) inside `.codegraph/`. |
-| `lmdb` | Memory-mapped KV (`db.lmdb/` directory inside `.codegraph/`). Same local-first workflow, mmap-friendly for large indexes. Enabled by default in the `codegraph` binary. |
-| `redis` | Requires an explicit `dsn` (e.g. `redis://localhost:6379`) — there is no sensible local default. |
-| `memory` | Ephemeral in-process index; nothing is persisted. |
-| `postgres` / `mysql` | Multi-tenant, sharded — see below. |
+| `[languages]` | `headers = "auto" \| "c" \| "cpp"` — how `.h` files route between the C/C++ grammars |
+| `[[effect_rules]]` | Call-name → `EffectType` classification, evaluated before the built-in defaults (first match wins) |
+| `[storage]` | Backend: `sqlite` (default), `lmdb`, `redis`, `memory`, `postgres`/`mysql` (multi-tenant, sharded by `repo_id`) |
+| `[sandbox]` | Behavior-sandbox defaults: `mock_dirs`, `loop_cap`, `branch_policy` |
+| `[embedding]` | Opt-in semantic search (`fastembed`/`hashing`, model, cache dir, sqlite-vss, execution provider) |
 
-`dsn` (when set) overrides the derived default for any backend.
+Ignore handling: `.gitignore` + `.codegraphignore` are honored by the walker;
+files ≥ 4 MiB or non-UTF-8 are skipped.
 
-### Postgres / MySQL (multi-tenant, sharded)
+The full reference — every field, DSN derivation, sharding, the built-in
+effect-rule table, embedding setup, and the file watcher — lives in
+[docs/configuration.md](docs/configuration.md). Sandbox & mocking:
+[docs/sandbox.md](docs/sandbox.md). MCP server & clients:
+[docs/mcp.md](docs/mcp.md). All documentation is consolidated under
+[docs/](docs/PLAN.md).
 
-CodeGraph can store the index in PostgreSQL or MySQL instead of the local
-SQLite file. Every table is partitioned by a leading `repo_id` (a `u64`
-partition key), so each project root (`.codegraph/`) maps to its own
-partition — re-indexing or deleting one repo never touches another. Sharding
-is `repo_id % N` across the configured DSN list.
-
-Build with the `rdbms` feature (it is **on by default** for the `codegraph`
-binary):
-
-```bash
-cargo build --features rdbms          # default for `codegraph`
-cargo build -p codegraph-mcp --features rdbms
-```
-
-`.codegraph/config.toml`:
-
-```toml
-[storage]
-type = "postgres"
-# type = "mysql"
-# Shard DSNs — shard = repo_id % len(dsns). One entry = single shard.
-dsns = [
-  "postgres://user:pass@db1:5432/codegraph",
-  "postgres://user:pass@db2:5432/codegraph",
-]
-# repo_id is generated automatically by `codegraph init` (self-heal) and
-# written here. Do not edit it by hand.
-# repo_id = 14028493579208694412
-```
-
-**Schema is applied manually** — the binary does not run migrations. Run the
-SQL files from `sql/<engine>/` in order (currently `001-initial-schema.sql`
-and `002-add-repos-registry.sql`) against every shard server before indexing:
-
-```bash
-psql "$DSN" -f sql/postgres/001-initial-schema.sql
-psql "$DSN" -f sql/postgres/002-add-repos-registry.sql
-# mysql:
-#   mysql "$DB" < sql/mysql/001-initial-schema.sql
-#   mysql "$DB" < sql/mysql/002-add-repos-registry.sql
-```
-
-Then `codegraph init` (CLI) or `codegraph_init` (MCP tool) generates the
-`repo_id` and stores the index on the right shard automatically. See
-`sql/README.md` for the full multi-tenant + sharding design.
-
-### Semantic search (optional, opt-in)
-
-Vector similarity search over symbol embeddings is **off by default** — no
-embedding model runs unless you enable it in config. The release binary
-already bundles the fastembed (ONNX sentence-transformer) backend, so
-enabling it is config-only — no rebuild required:
-
-1. Enable it in `.codegraph/config.toml`:
-
-   ```toml
-   [embedding]
-   backend = "fastembed"                       # "hashing"/unset = off
-   model = "bge-small-en-v1.5"                  # 384-dim, default
-   cache_dir = "~/.cache/codegraph/embeddings"  # global model cache (default)
-   # SQLite-only: point at a sqlite-vss (vector0/vss0) extension directory to
-   # run KNN through HNSW ANN inside the database:
-   # vss_extension = "~/.cache/codegraph/embeddings/vss"
-   # execution_provider = "coreml"              # macOS hardware acceleration
-   ```
-
-2. Optionally pre-download the model so indexing works offline:
-
-   ```sh
-   codegraph embed --model bge-small-en-v1.5
-   ```
-
-   The `codegraph embed` subcommand is compiled in when the binary is built
-   with `--features fastembed`.
-
-With embeddings enabled, `codegraph_search_symbol` gains the `match` modes
-`"semantic"` (vector KNN — find symbols by similar/approximate names) and
-`"hybrid"` (substring + semantic merged via Reciprocal Rank Fusion). Vectors
-are persisted with the index, so restarts reuse them without re-embedding.
-
-Notes:
-- If the model fails to load (no network, missing ONNX runtime), opening the
-  index **errors out** — there is no silent fallback to a lexical baseline.
-- On macOS you can build with `--features fastembed,apple-accel` to run
-  embeddings on the Apple Neural Engine / GPU via the CoreML execution
-  provider. That feature is macOS-only and fails to build elsewhere.
-
-### C vs C++ headers (`.h`)
-
-By default, `.h` files are resolved automatically:
-- **C++ project** (`.cpp`/`.hpp` present, no `.c`) → parsed as C++
-- **C project** (`.c` present, no C++ sources) → parsed as C
-- **Mixed C/C++** → each `.h` inspected for C++ syntax (`namespace`, `class`, `template`, …)
-
-Override in `.codegraph/config.toml`:
-```toml
-[languages]
-headers = "auto"   # "auto" (default), "c", or "cpp"
-```
-
-After changing this setting, run `codegraph init` (or call `codegraph_index` over MCP) to re-index headers.
 
 ## Why Rust?
 
@@ -457,6 +334,7 @@ cargo test -p codegraph-mcp
 cargo test -p codegraph-sboxes     # sandbox JIT: control flow + end-to-end traces
 cargo test -p codegraph-bench      # pipeline integration
 cargo test -p codegraph-installer
+cargo test -p codesmell        # convention linter: policy, rules, fixtures
 ```
 
 Feature flags on `codegraph-extract`:

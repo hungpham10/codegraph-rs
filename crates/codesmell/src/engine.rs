@@ -118,7 +118,7 @@ pub async fn evaluate(
     violations.extend(rules::run_testing(index, &candidates, policy, root).await?);
 
     // Most serious first.
-    violations.sort_by(|a, b| b.severity.cmp(&a.severity));
+    violations.sort_by_key(|v| std::cmp::Reverse(v.severity));
 
     let mut summary: HashMap<String, usize> = HashMap::new();
     for v in &violations {

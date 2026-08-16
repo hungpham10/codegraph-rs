@@ -981,7 +981,7 @@ fn format_from_args(args: &Value, session: OutputStyle) -> OutputStyle {
 }
 
 /// Symbol JSON theo `detail` + `style`. `Minimize` (mặc định) → mảng vị trí cố
-/// định (order được document trong server-instructions.md; file đã relativize
+/// định (order được document trong docs/codegraph.md; file đã relativize
 /// theo root — relativize_paths chỉ chạm object key, không chạm phần tử mảng);
 /// `Medium` → object giữ key (field default bị lược sau trong `omit_defaults`).
 fn symbol_json(root: &str, s: &Symbol, detail: DetailLevel, style: OutputStyle) -> Value {

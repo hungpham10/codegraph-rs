@@ -1,71 +1,53 @@
-# CodeGraph — Rust Rewrite Plan
+# CodeGraph — documentation index & roadmap
 
-Port intégral du projet TS (`archive/`) vers Rust natif. Objectif: binaire `<15MB` stripped (vs 140MB Node bundle), parse 2-5× plus rapide, zero runtime dep.
+All documentation lives in `docs/`. The README is the landing page; everything
+detailed is here. Each spec records the *what/why* of a shipped component —
+when behavior changes, update the spec with it.
 
-## Non-objectifs
+## Documentation map
 
-- Pas de compatibilité DB avec `archive/.codegraph/`. Schema repart neuf.
-- Pas de wrapper npm. Distribution = `cargo install` + binaires GitHub Releases.
-- Pas de port 1:1 du code TS. On reproduit le comportement observable (NodeKind, EdgeKind, surface MCP, CLI), pas la structure interne.
+| Document | Audience | Covers |
+|---|---|---|
+| [codegraph.md](codegraph.md) | Agents | Usage guide **embedded into the binary** as MCP server instructions: session binding, tool selection by intent, timeout/resume, response formats, sandbox/diff contracts |
+| [configuration.md](configuration.md) | Users / ops | `.codegraph/config.toml` reference: languages, `[[effect_rules]]` + defaults, storage backends & sharding, `[sandbox]`, `[embedding]`, ignore files, CLI flags, watcher |
+| [mcp.md](mcp.md) | Users / ops | Running the MCP server (stdio + Streamable HTTP), client configuration per agent, the 27-tool catalog, common arguments, token conventions |
+| [sandbox.md](sandbox.md) | Users / agents | Behavior sandbox: `[sandbox]` config, the Rhai mock contract with examples, run semantics, `codegraph_sandbox` / `codegraph_diff_simulate` / `codegraph_origin_simulate` |
+| [codesmell.md](codesmell.md) | Users / agents | The CodeSmell team-convention linter: `.codesmell/policy.toml` schema, rules, CLI, agent workflow |
+| [benchmarks/storage-perf.md](benchmarks/storage-perf.md) | Devs | Storage benchmark snapshot (in-memory vs sqlite vs lmdb) |
+| [specs/](specs/) | Devs | Per-component design specs, kept in sync with the code |
 
-## Architecture cible
+## Specs
 
-```
-crates/
-  codegraph-core/       types + erreurs (NodeKind, EdgeKind, Node, Edge)
-  codegraph-db/         rusqlite + schema + prepared stmts + FTS5
-  codegraph-extract/    tree-sitter natif + extractors par langage
-  codegraph-resolve/    imports, name-match, frameworks
-  codegraph-graph/      traversal (callers/callees/impact)
-  codegraph-context/    builder markdown/json
-  codegraph-mcp/        stdio JSON-RPC 2.0 hand-rolled
-  codegraph-installer/  5 cibles agents (claude/cursor/codex/opencode/hermes)
-  codegraph/            binaire CLI (clap) + watcher (notify)
-```
+| # | Spec | Status |
+|---|---|---|
+| 01 | [Workspace bootstrap](specs/01-bootstrap.md) — 11-crate layout, conventions | done |
+| 02 | [Core types](specs/02-core-types.md) — semgraph model (Symbol, chains, markers, effects) | done |
+| 03 | [Storage layer](specs/03-db-layer.md) — `Storage` trait, sqlite/lmdb/redis/postgres/mysql, sharding | done |
+| 04 | [Extraction](specs/04-extraction.md) — tree-sitter, declarative `LangSpec`, walker, effects | done |
+| 05 | [Call resolution](specs/05-resolution.md) — ingest resolve phases, scoring, call-name index | done |
+| 06 | [GraphIndex & context](specs/06-graph-context.md) — engines, queries, GraphApi, diff engine | done |
+| 07 | [MCP server](specs/07-mcp-server.md) — rmcp, stdio + HTTP, 27 tools, token conventions | done |
+| 08 | [Installer](specs/08-installer.md) — multi-agent client setup, idempotence | done |
+| 09 | [CLI & watcher](specs/09-cli-watcher.md) — init/deinit/embed/serve, debounced full re-index | done |
+| 10 | [Release & CI](specs/10-release.md) — CI jobs, distribution, features, publish order | done |
+| 11 | [CodeSmell](specs/11-codesmell.md) — convention linter over in-memory CodeGraph facts | done (MVP) |
 
-Pipeline runtime:
-```
-files → ignore-walker → parse-workers (rayon, tree-sitter) → batch DB tx
-                                                                   ↓
-                                              ReferenceResolver (imports + frameworks)
-                                                                   ↓
-                                              GraphTraverser  ←  ContextBuilder
-                                                                   ↓
-                                                MCP server / CLI commands
-```
+## Roadmap / fast-follow
 
-## Ordre d'implémentation
+- **CodeSmell**: convention discovery (statistics → candidate policies with
+  confidence), coverage threshold enforcement, policy history/evolution,
+  runtime/engineering policies (timeouts/retries via effect classification).
+- **MCP HTTP hardening**: enforce `--api-key` bearer auth, mount `/health` /
+  `/metrics` observability endpoints (flags currently accepted but inert).
+- **Watcher**: honor `.codegraphignore` (today only `.gitignore` is
+  consulted for event filtering).
+- **Embeddings**: make `codegraph-api`'s unconditional feature pull-in
+  optional so slim builds can drop the ONNX runtime.
 
-| # | Étape | Spec | Dépend de |
-|---|---|---|---|
-| 1 | Bootstrap workspace | [01-bootstrap.md](specs/01-bootstrap.md) | — |
-| 2 | Core types | [02-core-types.md](specs/02-core-types.md) | 1 |
-| 3 | DB layer | [03-db-layer.md](specs/03-db-layer.md) | 2 |
-| 4 | Extraction + langages | [04-extraction.md](specs/04-extraction.md) | 3 |
-| 5 | Résolution + frameworks | [05-resolution.md](specs/05-resolution.md) | 4 |
-| 6 | Graph + context | [06-graph-context.md](specs/06-graph-context.md) | 3 |
-| 7 | MCP server | [07-mcp-server.md](specs/07-mcp-server.md) | 6 |
-| 8 | Installer | [08-installer.md](specs/08-installer.md) | 1 |
-| 9 | CLI + watcher | [09-cli-watcher.md](specs/09-cli-watcher.md) | 4,5,6,7,8 |
-| 10 | Release pipeline | [10-release.md](specs/10-release.md) | 9 |
+## History
 
-Étapes 1-2 done. Étape 6 peut paralléliser avec 4-5 (utilise seulement DB read).
-Étape 8 indépendante du reste (pure file ops).
-
-## Cibles binaire
-
-- `cargo build --release`: profil `release` (LTO fat, codegen-units=1, strip, panic=abort)
-- Estimation: ~12MB Linux x86_64 stripped avec 15 grammaires tree-sitter statiques + SQLite bundled
-- Si dépasse 20MB: profil `release-small` (`opt-level=z`) + features off pour langages exotiques
-
-## Tests
-
-- Unit tests in-crate avec `#[cfg(test)]`
-- Integration tests dans `crates/*/tests/`
-- Fixtures synthétiques par langage dans `tests/fixtures/`
-- Pas de DB mock — tempdir + rusqlite réel (cf archive/__tests__)
-- Eval harness reporté post-MVP (équivalent `__tests__/evaluation/`)
-
-## Suivi
-
-État des tâches dans TaskList runtime. Cette doc + specs sont source de vérité pour le quoi/pourquoi.
+The Rust rewrite plan that originally lived here (Node/Edge model,
+`codegraph-db`, `codegraph-resolve`, hand-rolled JSON-RPC, <15 MB target) is
+superseded — each deviation is recorded in the "Deviations" section of the
+relevant spec. The rewrite itself completed: single ~58 MB binary with every
+backend bundled, semgraph model, 27-tool MCP server on the rmcp SDK.
