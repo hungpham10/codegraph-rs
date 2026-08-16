@@ -21,17 +21,12 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # Các test target gated (tests/rdbms.rs, tests/redis.rs) không nằm trong
-      # default features — clippy riêng để vẫn sạch warning.
       - run: cargo clippy -p codegraph-graph --features postgres,mysql,redis --tests -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     services:
-      # Unit test storage/redis.rs (dùng DB 15) chạy trong `cargo test --workspace`
-      # vì codegraph-api bật feature `redis` của codegraph-graph. Integration
-      # test redis/rdbms (tests/redis.rs, tests/rdbms.rs) cũng dùng các service này.
       redis:
         image: redis:7-alpine
         ports: ["6379:6379"]
@@ -56,12 +51,13 @@ jobs:
       matrix:
         os: [ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install DB clients
         run: sudo apt-get update && sudo apt-get install -y postgresql-client mysql-client
-      # Migration thủ công theo thiết kế repo — apply schema trước khi test.
       - name: Apply schema (postgres)
         run: |
           psql "postgres://postgres:postgres@127.0.0.1:5432/codegraph" -f sql/postgres/001-initial-schema.sql
@@ -71,22 +67,18 @@ jobs:
           mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/001-initial-schema.sql
           mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/002-add-repos-registry.sql
       - name: Install grcov
-        run: cargo install grcov
+        uses: taiki-e/install-action@grcov
       - name: Run tests with coverage instrumentation
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
           LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
         run: cargo test --workspace --no-fail-fast
-      # Storage integration tests (#[ignore] + DSN) — cũng instrument để đóng
-      # góp coverage vào cùng báo cáo lcov.
       - name: Storage integration tests (postgres)
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
           LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
           TEST_RDBMS_DSN: "postgres://postgres:postgres@127.0.0.1:5432/codegraph"
           TEST_RDBMS_REPO_ID: "1"
-        # --test-threads=1: 2 test open_route song song race khi CREATE TYPE
-        # (pg_type duplicate key) — bug chưa fix ở tầng storage, serialize tạm.
         run: cargo test -p codegraph-graph --features postgres --test rdbms -- --ignored --nocapture --test-threads=1
       - name: Storage integration tests (mysql)
         env:
@@ -124,12 +116,11 @@ jobs:
           verbose: true
           fail_ci_if_error: false
 
-
   slim:
     name: slim build (no visualize)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
