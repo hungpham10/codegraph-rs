@@ -1,0 +1,27 @@
+version = 1
+
+[style.function]
+max_lines = 30
+max_parameters = 4
+max_nesting = 4
+
+[[style.naming.rule]]
+kind = "method"
+pattern = "*Async"
+signature_contains = "async"
+
+[[architecture.layer]]
+name = "controller"
+paths = ["src/controllers/**"]
+
+[[architecture.layer]]
+name = "repository"
+paths = ["src/repositories/**"]
+
+[[architecture.boundary]]
+deny = ["controller -> repository"]
+
+[testing]
+require_tests_for_changed_logic = true
+test_paths = ["tests/**", "**/test_*.rs", "**/*_test.rs"]
+logic_selectors = [{ layers = ["service"] }, { min_lines = 20 }]

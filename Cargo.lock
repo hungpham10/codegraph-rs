@@ -767,6 +767,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "codesmell"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "clap",
+ "codegraph-core",
+ "codegraph-extract",
+ "codegraph-graph",
+ "globset",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "codspeed"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
