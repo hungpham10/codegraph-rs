@@ -997,6 +997,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "codegraph-source"
 version = "2.2.11"
 dependencies = [
@@ -1018,6 +1019,23 @@ dependencies = [
  "rust-embed",
  "tokio",
  "tower",
+=======
+name = "codesmell"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "clap",
+ "codegraph-core",
+ "codegraph-extract",
+ "codegraph-graph",
+ "globset",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+>>>>>>> 4725dfb (Implement codesmell as a new linter)
 ]
 
 [[package]]
