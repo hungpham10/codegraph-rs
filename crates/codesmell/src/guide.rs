@@ -19,7 +19,9 @@ pub fn render_guide(policy: &Policy) -> String {
         n += 1;
     }
     if let Some(m) = s.function.max_parameters {
-        lines.push(format!("{n}. Functions normally take at most {m} parameters."));
+        lines.push(format!(
+            "{n}. Functions normally take at most {m} parameters."
+        ));
         n += 1;
     }
     if let Some(m) = s.function.max_nesting {
@@ -48,7 +50,9 @@ pub fn render_guide(policy: &Policy) -> String {
         }
     }
     if policy.testing.require_tests_for_changed_logic {
-        lines.push(format!("{n}. New or changed business logic requires a unit test."));
+        lines.push(format!(
+            "{n}. New or changed business logic requires a unit test."
+        ));
         n += 1;
     }
     if !policy.testing.test_paths.is_empty() {

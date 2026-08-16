@@ -1,11 +1,11 @@
 //! CodeSmell CLI — a team convention linter (like eslint/clippy).
 
 use clap::{Parser, Subcommand, ValueEnum};
-use codesmell::engine::{CheckScope, evaluate};
+use codegraph_graph::diff::parse_unified_diff;
+use codesmell::engine::{evaluate, CheckScope};
 use codesmell::guide;
 use codesmell::index::build_index;
 use codesmell::policy;
-use codegraph_graph::diff::parse_unified_diff;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -81,7 +81,8 @@ async fn main() -> anyhow::Result<()> {
             let (p, _) = policy::load_policy(&root);
             println!(
                 "{}",
-                toml::to_string_pretty(&p).unwrap_or_else(|_| "# (policy could not be serialized)".into())
+                toml::to_string_pretty(&p)
+                    .unwrap_or_else(|_| "# (policy could not be serialized)".into())
             );
             Ok(())
         }
@@ -111,12 +112,18 @@ async fn check(
         } else {
             std::fs::read_to_string(&dp)?
         };
-        let parsed = parse_unified_diff(&text).map_err(|e| anyhow::anyhow!("failed to parse diff: {e}"))?;
+        let parsed =
+            parse_unified_diff(&text).map_err(|e| anyhow::anyhow!("failed to parse diff: {e}"))?;
         CheckScope::Diff(parsed)
     } else if paths.is_empty() {
         CheckScope::All
     } else {
-        CheckScope::Paths(paths.iter().map(|p| p.to_string_lossy().into_owned()).collect())
+        CheckScope::Paths(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+        )
     };
 
     let root_utf8 = camino::Utf8PathBuf::from_path_buf(root.to_path_buf())
@@ -161,7 +168,10 @@ fn init(root: &std::path::Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("policy.toml");
     if path.exists() {
-        eprintln!("codesmell: {} already exists; not overwriting.", path.display());
+        eprintln!(
+            "codesmell: {} already exists; not overwriting.",
+            path.display()
+        );
     } else {
         std::fs::write(&path, guide::STARTER_POLICY)?;
         println!("codesmell: wrote {}", path.display());

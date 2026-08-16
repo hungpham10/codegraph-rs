@@ -215,8 +215,12 @@ impl Policy {
                 eff.style.function.max_nesting = Some(v);
             }
             eff.style.naming.rules.extend(ov.style.naming.rules.clone());
-            eff.architecture.layers.extend(ov.architecture.layers.clone());
-            eff.architecture.boundary.extend(ov.architecture.boundary.clone());
+            eff.architecture
+                .layers
+                .extend(ov.architecture.layers.clone());
+            eff.architecture
+                .boundary
+                .extend(ov.architecture.boundary.clone());
             if ov.testing.require_tests_for_changed_logic {
                 eff.testing.require_tests_for_changed_logic = true;
             }
