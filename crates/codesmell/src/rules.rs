@@ -1,8 +1,9 @@
 //! Policy rule implementations: style, architecture, testing.
 
 use codegraph_core::{
-    is_marker, Symbol, SymbolKind, MARKER_BRANCH_END, MARKER_BREAK, MARKER_CONTINUE, MARKER_IF_FALSE,
-    MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_SWITCH_CASE, MARKER_SWITCH_END,
+    is_marker, Symbol, SymbolKind, MARKER_BRANCH_END, MARKER_BREAK, MARKER_CONTINUE,
+    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_SWITCH_CASE,
+    MARKER_SWITCH_END,
 };
 use codegraph_graph::GraphIndex;
 use std::path::Path;
@@ -30,7 +31,8 @@ fn max_nesting(chain: &[u64]) -> u32 {
                 depth += 1;
                 max = max.max(depth);
             }
-            MARKER_BRANCH_END | MARKER_LOOP_BACK | MARKER_SWITCH_END | MARKER_BREAK | MARKER_CONTINUE => {
+            MARKER_BRANCH_END | MARKER_LOOP_BACK | MARKER_SWITCH_END | MARKER_BREAK
+            | MARKER_CONTINUE => {
                 depth = depth.saturating_sub(1);
             }
             _ => {}
@@ -136,7 +138,10 @@ pub async fn run_style(
                     line: s.line,
                     symbol: s.name.clone(),
                     message: format!("function `{}` is {loc} lines (max {max})", s.name),
-                    fix_hint: format!("split `{}` into smaller functions to stay under {max} lines", s.name),
+                    fix_hint: format!(
+                        "split `{}` into smaller functions to stay under {max} lines",
+                        s.name
+                    ),
                 });
             }
         }
@@ -166,7 +171,10 @@ pub async fn run_style(
                         file: s.file.clone(),
                         line: s.line,
                         symbol: s.name.clone(),
-                        message: format!("function `{}` nesting depth is {depth} (max {max})", s.name),
+                        message: format!(
+                            "function `{}` nesting depth is {depth} (max {max})",
+                            s.name
+                        ),
                         fix_hint: "flatten early returns and extract nested blocks".into(),
                     });
                 }
@@ -188,7 +196,11 @@ pub async fn run_style(
             }
             if !nr.paths.is_empty() {
                 let rel = rel_path(&s.file, root);
-                if !nr.paths.iter().any(|pp| crate::glob::glob_matches(pp, &rel)) {
+                if !nr
+                    .paths
+                    .iter()
+                    .any(|pp| crate::glob::glob_matches(pp, &rel))
+                {
                     continue;
                 }
             }
@@ -351,7 +363,9 @@ mod tests {
         assert_eq!(count_params("fn f(&self)"), 0);
         assert_eq!(count_params("fn f(&self, id: i32)"), 1);
         assert_eq!(
-            count_params("pub async fn place_order(&self, repo: &OrderRepo, a: i32, b: i32) -> i32"),
+            count_params(
+                "pub async fn place_order(&self, repo: &OrderRepo, a: i32, b: i32) -> i32"
+            ),
             3
         );
         // nested parentheses inside a default value must not break matching

@@ -12,11 +12,7 @@ impl GlobSet {
     pub fn new(patterns: &[String]) -> Self {
         let matchers = patterns
             .iter()
-            .filter_map(|p| {
-                Glob::new(p)
-                    .ok()
-                    .map(|g| (p.clone(), g.compile_matcher()))
-            })
+            .filter_map(|p| Glob::new(p).ok().map(|g| (p.clone(), g.compile_matcher())))
             .collect();
         GlobSet { matchers }
     }

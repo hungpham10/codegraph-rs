@@ -64,7 +64,9 @@ pub fn collect_candidates(index: &GraphIndex, scope: &CheckScope, root: &Path) -
         CheckScope::Paths(paths) => {
             all.retain(|s| {
                 let target = Path::new(root).join(&s.file);
-                paths.iter().any(|p| Path::new(&target).starts_with(Path::new(root).join(p)))
+                paths
+                    .iter()
+                    .any(|p| Path::new(&target).starts_with(Path::new(root).join(p)))
             });
             all
         }
@@ -120,7 +122,12 @@ pub async fn evaluate(
 
     let mut summary: HashMap<String, usize> = HashMap::new();
     for v in &violations {
-        *summary.entry(v.severity.as_label().to_string()).or_insert(0) += 1;
+        *summary
+            .entry(v.severity.as_label().to_string())
+            .or_insert(0) += 1;
     }
-    Ok(CheckReport { violations, summary })
+    Ok(CheckReport {
+        violations,
+        summary,
+    })
 }

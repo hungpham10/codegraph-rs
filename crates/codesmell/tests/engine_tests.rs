@@ -1,10 +1,10 @@
 //! End-to-end tests: build an in-memory CodeGraph from a fixture and evaluate
 //! the policy. Fixtures live under `tests/fixtures/`.
 
-use codesmell::engine::{CheckScope, evaluate};
+use codegraph_graph::diff::parse_unified_diff;
+use codesmell::engine::{evaluate, CheckScope};
 use codesmell::index::build_index;
 use codesmell::policy;
-use codegraph_graph::diff::parse_unified_diff;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
