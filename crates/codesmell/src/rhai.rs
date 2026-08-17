@@ -273,6 +273,7 @@ fn compile_rule(engine: &Engine, _id: &str, src: &str) -> anyhow::Result<RhaiRul
         .unwrap_or_default();
     let mut hooks = HookSet::default();
     for f in ast.iter_functions() {
+        #[allow(clippy::borrow_deref_ref)]
         match &*f.name {
             CHECK => hooks.check = true,
             CHECK_CALLS => hooks.check_calls = true,
@@ -638,6 +639,10 @@ mod tests {
         m
     }
 
+    fn arr(items: &[&str]) -> Array {
+        items.iter().map(|s| Dynamic::from(s.to_string())).collect()
+    }
+
     #[test]
     fn builtin_scripts_compile_and_are_unique() {
         let lib = RhaiRuleLib::load(Path::new("."), &[]).unwrap();
@@ -689,7 +694,7 @@ mod tests {
     #[test]
     fn deny_call_flags_dangerous_sink() {
         let mut params = Map::new();
-        params.insert("deny".into(), Dynamic::from(vec!["eval".to_string()]));
+        params.insert("deny".into(), Dynamic::from(arr(&["eval"])));
         let inst = test_instance(RULE_DENY_CALL, params);
         let lib = RhaiRuleLib::load(Path::new("."), &[]).unwrap();
         let s = fake_sym("run", SymbolKind::Function, 1, 2, "fn run() {}");
@@ -710,7 +715,7 @@ mod tests {
         params.insert("kind".into(), Dynamic::from("constant".to_string()));
         params.insert(
             "name_re".into(),
-            Dynamic::from(vec!["(?i)^(PASSWORD|SECRET)$".to_string()]),
+            Dynamic::from(arr(&["(?i)^(PASSWORD|SECRET)$"])),
         );
         let inst = test_instance(RULE_DENY_SYMBOL, params);
         let lib = RhaiRuleLib::load(Path::new("."), &[]).unwrap();
@@ -726,8 +731,8 @@ mod tests {
         // script uses `glob()` to match the caller name; "do_eval" matches *Async? no,
         // but it proves the glob helper is reachable inside a script.
         let mut params = Map::new();
-        params.insert("deny".into(), Dynamic::from(vec!["eval".to_string()]));
-        params.insert("symbols".into(), Dynamic::from(vec!["do_*".to_string()])); // glob filter
+        params.insert("deny".into(), Dynamic::from(arr(&["eval"])));
+        params.insert("symbols".into(), Dynamic::from(arr(&["do_*"]))); // glob filter
         let inst = test_instance(RULE_DENY_CALL, params);
         let lib = RhaiRuleLib::load(Path::new("."), &[]).unwrap();
         // caller "do_eval" matches symbols glob → flagged

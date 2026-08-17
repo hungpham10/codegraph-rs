@@ -5,7 +5,7 @@ fn check_calls(sym, callees, callers) {
     let sinks = ["pickle.loads", "pickle.load", "yaml.load", "marshal.load", "unserialize", "read_object", "objectinputstream"];
     let hit = callees.filter(|c| {
         let l = c.name.to_lower();
-        let mut found = false;
+        let found = false;
         for k in sinks {
             if l.contains(k) { found = true; break; }
         }

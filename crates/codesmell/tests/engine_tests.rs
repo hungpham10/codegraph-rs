@@ -4,7 +4,9 @@
 use codegraph_graph::diff::parse_unified_diff;
 use codesmell::engine::{evaluate, CheckScope};
 use codesmell::index::build_index;
+use codesmell::packs::{self, SECURITY_PACK};
 use codesmell::policy;
+use codesmell::rhai::RhaiRuleLib;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -83,5 +85,77 @@ async fn cleanshop_has_no_violations() {
         report.violations.is_empty(),
         "expected zero violations, got {:?}",
         report.violations
+    );
+}
+
+#[tokio::test]
+async fn secshop_flags_declarative_and_custom_rules() {
+    let (root, idx) = index_for("secshop").await;
+    let (p, _) = policy::load_policy(&root);
+    let report = evaluate(&idx, &CheckScope::All, &p, &root).await.unwrap();
+
+    // declarative deny_symbol (constant name pattern)
+    assert!(
+        rules_for(&report, "API_KEY").contains("security.deny_symbol"),
+        "expected security.deny_symbol on API_KEY, got {:?}",
+        rules_for(&report, "API_KEY")
+    );
+    // declarative deny_call (denied callee)
+    assert!(
+        rules_for(&report, "run_script").contains("security.deny_call"),
+        "expected security.deny_call on run_script, got {:?}",
+        rules_for(&report, "run_script")
+    );
+    // team-authored rhai rule template (custom rule)
+    assert!(
+        rules_for(&report, "may_panic").contains("team.no_panic"),
+        "expected team.no_panic on may_panic, got {:?}",
+        rules_for(&report, "may_panic")
+    );
+}
+
+#[test]
+fn pack_install_copies_files_and_is_idempotent_and_merges() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // No policy yet, just install the pack.
+    packs::add_pack(root, &SECURITY_PACK).unwrap();
+    let rule = root.join(".codesmell/rules/security.dangerous_exec.rhai");
+    let frag = root.join(".codesmell/packs/security.policy.toml");
+    assert!(rule.exists(), "pack script not installed");
+    assert!(frag.exists(), "pack fragment not installed");
+
+    // Idempotent: second install must not overwrite (and must not error).
+    let before = std::fs::read(&rule).unwrap();
+    packs::add_pack(root, &SECURITY_PACK).unwrap();
+    assert_eq!(
+        std::fs::read(&rule).unwrap(),
+        before,
+        "pack install overwrote a file"
+    );
+
+    // With a minimal main policy, the fragment is merged and the pack scripts compile.
+    std::fs::write(
+        root.join(".codesmell/policy.toml"),
+        "[rhai]\nrule_dirs = [\".codesmell/rules\"]\n",
+    )
+    .unwrap();
+    let (p, found) = policy::load_policy(root);
+    assert!(found.is_some(), "policy not found after pack install");
+    let uses_security: Vec<&str> = p.rhai.rules.iter().map(|r| r.use_script.as_str()).collect();
+    assert!(
+        uses_security
+            .iter()
+            .any(|u| *u == "security.dangerous_exec"),
+        "pack fragment rules not merged: {uses_security:?}"
+    );
+
+    // The pack's rhai scripts must compile as a rule library.
+    let lib = RhaiRuleLib::load(root, &p.rhai.rule_dirs);
+    assert!(
+        lib.is_ok(),
+        "pack scripts failed to compile: {:?}",
+        lib.err()
     );
 }

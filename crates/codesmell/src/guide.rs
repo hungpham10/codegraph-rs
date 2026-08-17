@@ -85,31 +85,17 @@ params = { max = 10 }
 
 [[rhai.rule]]
 use = "style.naming"
-params = { rules = [
-  { kind = "method", pattern = "*Async", signature_contains = "async" },
-  { kind = "class",  pattern = "*Service" },
-] }
+params = { rules = [{ kind = "method", pattern = "*Async", signature_contains = "async" }, { kind = "class", pattern = "*Service" }] }
 
 # --- architecture ---
 [[rhai.rule]]
 use = "architecture.boundary"
-params = {
-  layers = [
-    { name = "controller", paths = ["src/controllers/**", "**/*Controller.java"] },
-    { name = "service",    paths = ["src/services/**",    "**/*Service.java"] },
-    { name = "repository", paths = ["src/repositories/**", "**/*Repository.java"] },
-  ],
-  deny = ["controller -> repository"],
-}
+params = { layers = [{ name = "controller", paths = ["src/controllers/**", "**/*Controller.java"] }, { name = "service", paths = ["src/services/**", "**/*Service.java"] }, { name = "repository", paths = ["src/repositories/**", "**/*Repository.java"] }], deny = ["controller -> repository"] }
 
 # --- testing ---
 [[rhai.rule]]
 use = "testing.missing_test"
-params = {
-  require = true,
-  test_paths = ["tests/**", "**/*_test.rs", "**/*_test.go", "**/test_*.py"],
-  selectors = [{ layers = ["service"] }, { min_lines = 20 }],
-}
+params = { require = true, test_paths = ["tests/**", "**/*_test.rs", "**/*_test.go", "**/test_*.py"], selectors = [{ layers = ["service"] }, { min_lines = 20 }] }
 
 # --- security (see `codesmell pack add security`) ---
 # [[rhai.rule]]

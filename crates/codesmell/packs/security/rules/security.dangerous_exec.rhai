@@ -10,7 +10,7 @@ fn check_calls(sym, callees, callers) {
     let sinks = ["exec", "system", "popen", "spawn", "shell_exec", "run_command"];
     let hit = callees.filter(|c| {
         let l = c.name.to_lower();
-        let mut found = false;
+        let found = false;
         for k in sinks {
             if l.contains(k) { found = true; break; }
         }

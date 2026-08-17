@@ -9,14 +9,14 @@ fn describe(_params) { "Naming conventions are enforced." }
 
 fn check(sym) {
     let rules = params.rules ?? [];
-    for r in rules.values() {
+    for r in rules {
         let k = r.kind ?? "";
         if k != "" && sym.kind != k { continue; }
         let sigc = r.signature_contains ?? "";
         if sigc != "" && !sym.signature.contains(sigc) { continue; }
         let paths = r.paths ?? [];
         if paths.len() > 0 {
-            let mut hit = false;
+            let hit = false;
             for p in paths {
                 if glob(p, sym.file) { hit = true; break; }
             }

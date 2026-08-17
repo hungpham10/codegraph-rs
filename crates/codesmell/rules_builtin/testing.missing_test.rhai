@@ -39,7 +39,7 @@ fn check_calls(sym, callees, callers) {
     let test_paths = params.test_paths ?? [];
     if test_paths.len() == 0 { return false; }
     if !is_logic(sym, params.layers ?? [], params.selectors ?? []) { return false; }
-    let mut tested = false;
+    let tested = false;
     for caller in callers {
         for p in test_paths {
             if glob(p, caller.file) { tested = true; break; }
