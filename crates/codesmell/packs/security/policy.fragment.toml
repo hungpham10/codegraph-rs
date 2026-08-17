@@ -1,0 +1,26 @@
+# CodeSmell security pack — installed by `codesmell pack add security`.
+# Edit freely; delete `.codesmell/packs/security.policy.toml` and the scripts in
+# `.codesmell/rules/` to remove the pack. Merge order: entries are appended to
+# your policy; `severity` entries here win over the same id elsewhere.
+
+[severity]
+"security.deny_call" = "required"
+"security.deny_symbol" = "blocking"
+
+[[rhai.rule]]
+use = "security.deny_call"
+params = { deny = ["eval"], deny_re = ['(?i)^(os\.)?system$', '(?i)^child_process$'], message = "dynamic code execution", fix_hint = "parse the input explicitly instead of executing strings" }
+
+[[rhai.rule]]
+use = "security.deny_symbol"
+params = { kind = "constant", name_re = ['(?i)^(PASSWORD|API_KEY|SECRET|AWS_ACCESS_KEY|TOKEN|PRIVATE_KEY)$'], message = "hard-coded secret-like name", fix_hint = "load from env vars / a secret manager" }
+
+[[rhai.rule]]
+use = "security.dangerous_exec"
+params = { skip_files_containing = ["tests/", "spec/", "_test", "test_"] }
+
+[[rhai.rule]]
+use = "security.crypto_weak_hash"
+
+[[rhai.rule]]
+use = "security.dangerous_deserialize"

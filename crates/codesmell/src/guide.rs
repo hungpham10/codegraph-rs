@@ -2,9 +2,14 @@
 //! starter `policy.toml` template emitted by `codesmell init`.
 
 use crate::policy::Policy;
+use crate::rhai::RhaiRuleLib;
 
 /// Human/LLM-readable conventions pack (doc §9).
-pub fn render_guide(policy: &Policy) -> String {
+///
+/// One line per enabled rule: `describe(params)` if the script defines it,
+/// else the script's `ADVICE` constant, else a generic pointer to the entry.
+/// This is the PREVENT side of the secure-vibe model (rules for the agent).
+pub fn render_guide(policy: &Policy, lib: Option<&RhaiRuleLib>) -> String {
     let mut lines = vec![
         "# Repository conventions (CodeSmell)".to_string(),
         String::new(),
@@ -12,56 +17,37 @@ pub fn render_guide(policy: &Policy) -> String {
         String::new(),
     ];
     let mut n: u32 = 1;
-    let s = &policy.style;
 
-    if let Some(m) = s.function.max_lines {
-        lines.push(format!("{n}. Functions normally stay below {m} lines."));
-        n += 1;
-    }
-    if let Some(m) = s.function.max_parameters {
-        lines.push(format!(
-            "{n}. Functions normally take at most {m} parameters."
-        ));
-        n += 1;
-    }
-    if let Some(m) = s.function.max_nesting {
-        lines.push(format!("{n}. Avoid nesting deeper than {m} levels."));
-        n += 1;
-    }
-    for nr in &s.naming.rules {
-        if let Some(sig) = &nr.signature_contains {
-            lines.push(format!(
-                "{n}. `{sig}` symbols must match the naming pattern `{pattern}`.",
-                pattern = nr.pattern
-            ));
-        } else {
-            lines.push(format!(
-                "{n}. `{kind}` symbols should match the naming pattern `{pattern}`.",
-                kind = nr.kind,
-                pattern = nr.pattern
-            ));
+    match lib {
+        Some(lib) => {
+            for inst in lib.instances(policy) {
+                let line = lib
+                    .describe(&inst)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        if inst.advice.is_empty() {
+                            format!(
+                                "Rule `{}` is enabled (see [[rhai.rule]] use = \"{}\").",
+                                inst.rule_id, inst.use_script
+                            )
+                        } else {
+                            inst.advice.clone()
+                        }
+                    });
+                lines.push(format!("{n}. {line}"));
+                n += 1;
+            }
         }
-        n += 1;
-    }
-    for b in &policy.architecture.boundary {
-        for d in &b.deny {
-            lines.push(format!("{n}. Layer boundary denied: `{d}`."));
-            n += 1;
+        None => {
+            for e in &policy.rhai.rules {
+                if !e.use_script.is_empty() {
+                    lines.push(format!("{n}. Rule `{}` is enabled.", e.use_script));
+                    n += 1;
+                }
+            }
         }
     }
-    if policy.testing.require_tests_for_changed_logic {
-        lines.push(format!(
-            "{n}. New or changed business logic requires a unit test."
-        ));
-        n += 1;
-    }
-    if !policy.testing.test_paths.is_empty() {
-        lines.push(format!(
-            "{n}. Tests live in: {}.",
-            policy.testing.test_paths.join(", ")
-        ));
-        n += 1;
-    }
+
     if n == 1 {
         lines.push("No team conventions are configured yet. Run `codesmell init` to start.".into());
     }
@@ -70,52 +56,70 @@ pub fn render_guide(policy: &Policy) -> String {
 
 /// Starter `.codesmell/policy.toml` written by `codesmell init`.
 pub const STARTER_POLICY: &str = r#"# CodeSmell policy — team engineering conventions.
-# Run `codesmell guide` to print the conventions pack for an LLM.
+# Run `codesmell guide` to print the conventions pack for the LLM.
+#
+# Every rule is a rhai script (builtin, or your own under .codesmell/rules/).
+# `[[rhai.rule]]` enables + configures one; `params` is the script's input.
+
 version = 1
 
-[style.function]
-# max_lines = 60
-# max_parameters = 4
-# max_nesting = 4
+[rhai]
+rule_dirs = [".codesmell/rules"]
 
-# [[style.naming.rule]]
-# kind = "class"
-# pattern = "*Service"
-#
-# [[style.naming.rule]]
-# kind = "method"
-# pattern = "*Async"
-# signature_contains = "async"
+# --- style ---
+[[rhai.rule]]
+use = "style.function.max_lines"
+params = { max = 60 }
 
-# [[architecture.layer]]
-# name = "controller"
-# paths = ["src/controllers/**", "**/*Controller.java"]
-#
-# [[architecture.layer]]
-# name = "service"
-# paths = ["src/services/**", "**/*Service.java"]
-#
-# [[architecture.layer]]
-# name = "repository"
-# paths = ["src/repositories/**", "**/*Repository.java"]
-#
-# [[architecture.boundary]]
-# deny = ["controller -> repository"]
-# allow = ["controller -> service", "service -> repository"]
+[[rhai.rule]]
+use = "style.function.max_parameters"
+params = { max = 4 }
 
-[testing]
-# require_tests_for_changed_logic = true
-# test_paths = ["tests/**", "**/*_test.go", "**/*_test.rs", "**/test_*.py", "**/*Test.java"]
-# logic_selectors = [{ layers = ["service"] }, { min_lines = 20 }]
+[[rhai.rule]]
+use = "style.function.max_nesting"
+params = { max = 4 }
 
-# [testing.coverage]   # reserved; not enforced in MVP
-# line = 80
+[[rhai.rule]]
+use = "style.function.max_complexity"
+params = { max = 10 }
 
-# Per-area overrides (doc §3): file → directory → module → repository.
-# [[override]]
-# paths = ["legacy/**"]
-# [override.style.function]
-# max_lines = 120
+[[rhai.rule]]
+use = "style.naming"
+params = { rules = [
+  { kind = "method", pattern = "*Async", signature_contains = "async" },
+  { kind = "class",  pattern = "*Service" },
+] }
+
+# --- architecture ---
+[[rhai.rule]]
+use = "architecture.boundary"
+params = {
+  layers = [
+    { name = "controller", paths = ["src/controllers/**", "**/*Controller.java"] },
+    { name = "service",    paths = ["src/services/**",    "**/*Service.java"] },
+    { name = "repository", paths = ["src/repositories/**", "**/*Repository.java"] },
+  ],
+  deny = ["controller -> repository"],
+}
+
+# --- testing ---
+[[rhai.rule]]
+use = "testing.missing_test"
+params = {
+  require = true,
+  test_paths = ["tests/**", "**/*_test.rs", "**/*_test.go", "**/test_*.py"],
+  selectors = [{ layers = ["service"] }, { min_lines = 20 }],
+}
+
+# --- security (see `codesmell pack add security`) ---
+# [[rhai.rule]]
+# use = "security.deny_call"
+# params = { deny = ["eval", "exec", "system"], message = "dynamic code execution" }
+
+[severity]                     # per-rule-id severity overrides
+"style.function.max_lines" = "warning"
+"architecture.boundary" = "blocking"
+"testing.missing_test" = "required"
 "#;
 
 /// Suggested AGENTS.md / CLAUDE.md snippet.

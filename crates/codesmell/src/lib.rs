@@ -10,5 +10,6 @@ pub mod engine;
 pub mod glob;
 pub mod guide;
 pub mod index;
+pub mod packs;
 pub mod policy;
-pub mod rules;
+pub mod rhai;

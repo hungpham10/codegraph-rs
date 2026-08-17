@@ -1030,6 +1030,8 @@ dependencies = [
  "codegraph-extract",
  "codegraph-graph",
  "globset",
+ "regex",
+ "rhai",
  "serde",
  "serde_json",
  "tempfile",
