@@ -16,6 +16,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use codegraph_core::{FileInfo, Symbol};
 
+/// Decorator `Storage` bọc LRU cache (giảm gọi xuống backend).
+pub mod cached;
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
