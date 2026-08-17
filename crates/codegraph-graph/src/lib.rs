@@ -37,6 +37,7 @@
 use crate::embeddings::{EmbeddingBackend, default_backend, embedding_enabled, make_backend};
 pub use crate::search::Search;
 use crate::search::SearchResume;
+use crate::storage::cached::CachedStorage;
 #[cfg(feature = "lmdb")]
 pub use crate::storage::lmdb::LmdbStorage;
 #[cfg(feature = "mysql")]
@@ -63,6 +64,7 @@ use tokio::sync::RwLock;
 mod bloom;
 pub mod diff;
 pub mod embeddings;
+mod lru;
 mod radix;
 mod search;
 mod shared;
@@ -291,8 +293,7 @@ impl GraphIndex {
     /// (config chưa set → `[embedding].backend = "hashing"`), nên không load
     /// model. Nếu process đã set config fastembed trước đó mà model lỗi → panic.
     pub fn in_memory() -> Self {
-        let storage = Arc::new(RwLock::new(InMemoryStorage::default()))
-            as Arc<RwLock<dyn crate::storage::Storage>>;
+        let storage: Box<dyn crate::storage::Storage> = Box::new(InMemoryStorage::default());
         Self::new_with_storage(storage).expect("in_memory embedding backend init failed")
     }
 
@@ -408,7 +409,7 @@ impl GraphIndex {
         let storage = crate::storage::lmdb::LmdbStorage::open(path)
             .await
             .map_err(serr)?;
-        let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
+        let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
         let mut idx = Self::new_with_storage(storage)?;
         idx.rebuild().await?;
         Ok(idx)
@@ -419,7 +420,7 @@ impl GraphIndex {
         let storage = crate::storage::sqlite::SqliteStorage::open(path)
             .await
             .map_err(serr)?;
-        let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
+        let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
         let mut idx = Self::new_with_storage(storage)?;
         idx.rebuild().await?;
         Ok(idx)
@@ -450,7 +451,7 @@ impl GraphIndex {
             crate::storage::redis::RedisStorage::new(client, &format!("codegraph:idx:{db}"))
                 .await
                 .map_err(serr)?;
-        let storage = Arc::new(RwLock::new(storage)) as Arc<RwLock<dyn crate::storage::Storage>>;
+        let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
         let mut idx = Self::new_with_storage(storage)?;
         idx.rebuild().await?;
         Ok(idx)
@@ -493,8 +494,7 @@ impl GraphIndex {
                             .ensure_registered(shard, route.root())
                             .await
                             .map_err(serr)?;
-                        let storage = Arc::new(RwLock::new(storage))
-                            as Arc<RwLock<dyn crate::storage::Storage>>;
+                        let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
                         let mut idx = Self::new_with_storage(storage)?;
                         idx.rebuild().await?;
                         Ok(idx)
@@ -513,8 +513,7 @@ impl GraphIndex {
                             .ensure_registered(shard, route.root())
                             .await
                             .map_err(serr)?;
-                        let storage = Arc::new(RwLock::new(storage))
-                            as Arc<RwLock<dyn crate::storage::Storage>>;
+                        let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
                         let mut idx = Self::new_with_storage(storage)?;
                         idx.rebuild().await?;
                         Ok(idx)
@@ -531,11 +530,15 @@ impl GraphIndex {
         }
     }
 
-    fn new_with_storage(storage: Arc<RwLock<dyn crate::storage::Storage>>) -> Result<Self> {
+    fn new_with_storage(storage: Box<dyn crate::storage::Storage>) -> Result<Self> {
+        // Wrap mọi backend bằng LRU read-cache để giảm gọi xuống storage
+        // (SQL/remote) cho các read path nóng (node/children/chain/entity).
+        const CACHE_CAPACITY: usize = 8192;
+        let storage = CachedStorage::wrap(storage, CACHE_CAPACITY);
         // Name engine luôn in-memory (như semgraph SearchIndex) — storage riêng
         // để record id (1..N) không đụng record của chain engine (func ids).
-        let name_storage = Arc::new(RwLock::new(InMemoryStorage::default()))
-            as Arc<RwLock<dyn crate::storage::Storage>>;
+        let name_storage =
+            CachedStorage::wrap(Box::new(InMemoryStorage::default()), CACHE_CAPACITY);
         // Embedding chỉ bật khi config `[embedding].backend = "fastembed"` (opt-in).
         // Nếu bật mà model tải thất bại → lỗi rõ ràng (KHÔNG fallback silent).
         let (backend, enabled) = if embedding_enabled() {
