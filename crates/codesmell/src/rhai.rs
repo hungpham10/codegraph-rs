@@ -116,7 +116,11 @@ impl RhaiRuleLib {
                 if path.extension().and_then(|x| x.to_str()) != Some("rhai") {
                     continue;
                 }
-                let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                let Some(id) = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+                else {
                     continue;
                 };
                 let Ok(src) = std::fs::read_to_string(&path) else {
@@ -199,10 +203,12 @@ impl RhaiRuleLib {
     ) -> Option<Dynamic> {
         let mut scope = Scope::new();
         scope.push_constant("params", inst.params.clone());
-        match self
-            .engine
-            .call_fn::<Dynamic>(&mut scope, &self.rules[&inst.use_script].ast, hook, args)
-        {
+        match self.engine.call_fn::<Dynamic>(
+            &mut scope,
+            &self.rules[&inst.use_script].ast,
+            hook,
+            args,
+        ) {
             Ok(d) => {
                 if d.is_unit() || matches!(d.clone().try_cast::<bool>(), Some(false)) {
                     None
@@ -275,11 +281,7 @@ fn compile_rule(engine: &Engine, _id: &str, src: &str) -> anyhow::Result<RhaiRul
             _ => {}
         }
     }
-    Ok(RhaiRule {
-        ast,
-        hooks,
-        advice,
-    })
+    Ok(RhaiRule { ast, hooks, advice })
 }
 
 // ==================== Symbol → rhai value conversion ====================
@@ -298,7 +300,10 @@ pub(crate) fn symbol_map(s: &Symbol, root: &Path) -> Map {
         "signature".into(),
         Dynamic::from(s.signature.clone().unwrap_or_default()),
     );
-    m.insert("doc".into(), Dynamic::from(s.doc.clone().unwrap_or_default()));
+    m.insert(
+        "doc".into(),
+        Dynamic::from(s.doc.clone().unwrap_or_default()),
+    );
     m.insert("language".into(), Dynamic::from(s.language.clone()));
     let anns: Array = s
         .annotations
@@ -338,7 +343,11 @@ fn marker_names(chain: &[u64]) -> Array {
 // ==================== Result interpretation ====================
 
 /// Interpret a flagged value into `(message, hint, severity-from-map)`.
-fn interpret_result(d: &Dynamic, sym_name: &str, rule_id: &str) -> (String, String, Option<Severity>) {
+fn interpret_result(
+    d: &Dynamic,
+    sym_name: &str,
+    rule_id: &str,
+) -> (String, String, Option<Severity>) {
     if let Some(s) = d.clone().try_cast::<String>() {
         return (s, default_hint(sym_name, rule_id), None);
     }
@@ -354,7 +363,15 @@ fn interpret_result(d: &Dynamic, sym_name: &str, rule_id: &str) -> (String, Stri
         } else {
             msg
         };
-        return (msg, if hint.is_empty() { default_hint(sym_name, rule_id) } else { hint }, sev);
+        return (
+            msg,
+            if hint.is_empty() {
+                default_hint(sym_name, rule_id)
+            } else {
+                hint
+            },
+            sev,
+        );
     }
     (
         format!("rule `{rule_id}` flagged `{sym_name}`"),
@@ -465,9 +482,17 @@ fn in_scope(inst: &RuleInstance, s: &Symbol, root: &Path) -> bool {
     inst.paths.is_empty() || inst.paths.matches(&rel)
 }
 
-fn emit(violations: &mut Vec<Violation>, inst: &RuleInstance, s: &Symbol, policy: &Policy, d: &Dynamic) {
+fn emit(
+    violations: &mut Vec<Violation>,
+    inst: &RuleInstance,
+    s: &Symbol,
+    policy: &Policy,
+    d: &Dynamic,
+) {
     let (message, hint, result_sev) = interpret_result(d, &s.name, &inst.rule_id);
-    let severity = result_sev.or(inst.severity).unwrap_or_else(|| policy.severity_of(&inst.rule_id));
+    let severity = result_sev
+        .or(inst.severity)
+        .unwrap_or_else(|| policy.severity_of(&inst.rule_id));
     violations.push(Violation {
         rule: inst.rule_id.clone(),
         severity,
@@ -585,7 +610,6 @@ mod tests {
     use super::*;
     use crate::policy::{RULE_DENY_CALL, RULE_DENY_SYMBOL, RULE_MAX_LINES, RULE_MAX_PARAMS};
     use codegraph_core::ScopeLevel;
-
 
     fn fake_sym(name: &str, kind: SymbolKind, line: u32, end_line: u32, sig: &str) -> Symbol {
         Symbol {

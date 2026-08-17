@@ -105,7 +105,8 @@ async fn main() -> anyhow::Result<()> {
             let (p, _) = policy::load_policy(&root);
             println!(
                 "{}",
-                toml::to_string_pretty(&p).unwrap_or_else(|_| "# (policy could not be serialized)".into())
+                toml::to_string_pretty(&p)
+                    .unwrap_or_else(|_| "# (policy could not be serialized)".into())
             );
             Ok(())
         }

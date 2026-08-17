@@ -52,7 +52,12 @@ pub fn rel_path(file: &str, root: &Path) -> String {
 }
 
 /// Collect symbol candidates of the given `kinds`, narrowed by `scope`.
-pub fn collect_symbols(index: &GraphIndex, kinds: &[SymbolKind], scope: &CheckScope, root: &Path) -> Vec<codegraph_core::Symbol> {
+pub fn collect_symbols(
+    index: &GraphIndex,
+    kinds: &[SymbolKind],
+    scope: &CheckScope,
+    root: &Path,
+) -> Vec<codegraph_core::Symbol> {
     let mut all = Vec::new();
     for k in kinds {
         let (syms, _) = index.list_symbols_by_kind(*k, 0, 0);
