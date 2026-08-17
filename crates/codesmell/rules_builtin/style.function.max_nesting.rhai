@@ -8,8 +8,8 @@ fn describe(params) {
 
 fn check_flow(sym, markers) {
     let max = params.max ?? 4;
-    let mut depth = 0;
-    let mut mx = 0;
+    let depth = 0;
+    let mx = 0;
     for m in markers {
         if m == "loop" || m == "if_true" || m == "if_false" || m == "switch_case" {
             depth += 1;

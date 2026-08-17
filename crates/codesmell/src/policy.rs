@@ -69,7 +69,7 @@ pub const RULE_DENY_SYMBOL: &str = "security.deny_symbol";
 /// The same script may be referenced several times with different `params`
 /// (e.g. a stricter limit for new code); `id` optionally renames the resulting
 /// violations so entries can be told apart.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuleEntry {
     /// Script id to enable (builtin id or `.rhai` file stem).
@@ -87,19 +87,6 @@ pub struct RuleEntry {
     pub exclude: Vec<String>,
     /// Severity override for violations from this entry.
     pub severity: Option<Severity>,
-}
-
-impl Default for RuleEntry {
-    fn default() -> Self {
-        RuleEntry {
-            use_script: String::new(),
-            id: None,
-            params: None,
-            paths: Vec::new(),
-            exclude: Vec::new(),
-            severity: None,
-        }
-    }
 }
 
 fn default_rule_dirs() -> Vec<String> {

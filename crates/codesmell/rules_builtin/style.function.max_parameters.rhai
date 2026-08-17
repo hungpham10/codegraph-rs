@@ -6,18 +6,30 @@ fn describe(params) {
     "Functions normally take at most " + (params.max ?? 4).to_string() + " parameters."
 }
 
+// Strip leading/trailing ASCII spaces (rhai's `trim` is unreliable here).
+fn strip(s) {
+    let n = s.len();
+    let start = 0;
+    while start < n && s.sub_string(start, 1) == " " { start += 1; }
+    let end = n;
+    while end > start && s.sub_string(end - 1, 1) == " " { end -= 1; }
+    s.sub_string(start, end - start)
+}
+
 fn real_param(seg) {
-    let t = seg.trim();
+    let t = strip(seg);
     if t == "" { return false; }
-    t != "self" && t != "&self" && t != "&mut self" && t != "self: &Self" && t != "self: Self"
+    if t == "self" || t == "&self" || t == "&mut self" { return false; }
+    if t.starts_with("self:") { return false; }
+    true
 }
 
 fn count_params(sig) {
     let open = sig.index_of("(");
     if open < 0 { return 0; }
-    let mut depth = 0;
-    let mut end = -1;
-    let mut i = open;
+    let depth = 0;
+    let end = -1;
+    let i = open;
     while i < sig.len() {
         let c = sig.sub_string(i, 1);
         if c == "(" { depth += 1; }
@@ -29,13 +41,13 @@ fn count_params(sig) {
     }
     if end < 0 { return 0; }
     let inner = sig.sub_string(open + 1, end - open - 1);
-    if inner.trim() == "" { return 0; }
+    if strip(inner) == "" { return 0; }
     // split on top-level commas only (commas inside (..) or <..> belong to one param)
-    let mut depth = 0;
-    let mut seg = "";
-    let mut count = 0;
+    let depth = 0;
+    let seg = "";
+    let count = 0;
     let chars = inner.len();
-    let mut j = 0;
+    let j = 0;
     while j < chars {
         let c = inner.sub_string(j, 1);
         if c == "(" || c == "<" { depth += 1; seg += c; }
@@ -51,6 +63,7 @@ fn count_params(sig) {
 }
 
 fn check(sym) {
+    if sym.kind != "function" && sym.kind != "method" { return false; }
     let max = params.max ?? 4;
     let n = count_params(sym.signature);
     if n > max {

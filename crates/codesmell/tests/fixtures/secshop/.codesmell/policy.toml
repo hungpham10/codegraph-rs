@@ -1,0 +1,18 @@
+version = 1
+
+[rhai]
+rule_dirs = [".codesmell/rules"]
+
+# declarative-style security rules expressed as rhai rule templates
+[[rhai.rule]]
+use = "security.deny_call"
+params = { deny = ["eval_cli"], message = "dynamic code execution" }
+
+[[rhai.rule]]
+use = "security.deny_symbol"
+params = { kind = "constant", name_re = ['(?i)^(API_KEY|SECRET)$'], message = "hard-coded secret" }
+
+# a team-authored rule template shipped in .codesmell/rules/
+[[rhai.rule]]
+use = "team.no_panic"
+params = { max_panics = 0 }

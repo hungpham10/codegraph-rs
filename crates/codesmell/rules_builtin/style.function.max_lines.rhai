@@ -7,6 +7,7 @@ fn describe(params) {
 }
 
 fn check(sym) {
+    if sym.kind != "function" && sym.kind != "method" { return false; }
     let max = params.max ?? 60;
     let loc = sym.end_line - sym.line + 1;
     if loc > max {
