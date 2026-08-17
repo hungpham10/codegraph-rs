@@ -1,9 +1,11 @@
-//! Policy model + loading + scope-aware override resolution.
+//! Policy model + loading + pack-fragment merge.
 //!
 //! Policy lives in `.codesmell/policy.toml` (TOML, to match the codegraph
-//! ecosystem). When a symbol is checked, [`Policy::effective_for`] returns a
-//! policy with any matching `[[override]]` blocks merged in — implementing the
-//! file → directory → module → repository resolution order from the design doc.
+//! ecosystem). Every rule is a rhai script — builtin scripts ship inside the
+//! binary, custom scripts live in rule dirs (default `.codesmell/rules/`).
+//! A script only runs when an `[[rhai.rule]]` entry references it; `params`
+//! parameterizes the script, so a script is a reusable rule template and the
+//! policy file is its configuration.
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -33,208 +35,121 @@ impl Severity {
             Severity::Blocking => "error",
         }
     }
+
+    /// Parse a severity label (case-insensitive) — used by rhai rule results.
+    pub fn parse_label(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "info" => Severity::Info,
+            "warning" => Severity::Warning,
+            "required" => Severity::Required,
+            "blocking" => Severity::Blocking,
+            _ => return None,
+        })
+    }
 }
 
+/// Ids of the rule scripts embedded in the binary (`rules_builtin/*.rhai`).
+/// Kept as constants because tests, docs and the `[severity]` map refer to
+/// them; a script's id is simply its file stem.
 pub const RULE_MAX_LINES: &str = "style.function.max_lines";
 pub const RULE_MAX_PARAMS: &str = "style.function.max_parameters";
 pub const RULE_MAX_NESTING: &str = "style.function.max_nesting";
+pub const RULE_MAX_COMPLEXITY: &str = "style.function.max_complexity";
 pub const RULE_NAMING: &str = "style.naming";
 pub const RULE_BOUNDARY: &str = "architecture.boundary";
 pub const RULE_MISSING_TEST: &str = "testing.missing_test";
+pub const RULE_DENY_CALL: &str = "security.deny_call";
+pub const RULE_DENY_SYMBOL: &str = "security.deny_symbol";
 
-// ==================== Style ====================
+// ==================== Rule entries ====================
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct StyleFunction {
-    pub max_lines: Option<u32>,
-    pub max_parameters: Option<u32>,
-    pub max_nesting: Option<u32>,
-}
-
-/// A naming convention: symbols of `kind` (optionally whose signature contains
-/// `signature_contains`) must have a name matching `pattern` (a glob).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct NamingRule {
-    pub kind: String,
-    pub pattern: String,
-    pub signature_contains: Option<String>,
-    pub paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct StyleNaming {
-    #[serde(rename = "rule")]
-    pub rules: Vec<NamingRule>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Style {
-    pub function: StyleFunction,
-    pub naming: StyleNaming,
-}
-
-// ==================== Architecture ====================
-
-/// A logical layer, identified by file paths (glob) rather than by naming.
+/// One `[[rhai.rule]]` entry: enables + configures a rhai rule script.
+///
+/// `use` names the script (its id / file stem — builtin or from a rule dir).
+/// The same script may be referenced several times with different `params`
+/// (e.g. a stricter limit for new code); `id` optionally renames the resulting
+/// violations so entries can be told apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Layer {
-    pub name: String,
+#[serde(default)]
+pub struct RuleEntry {
+    /// Script id to enable (builtin id or `.rhai` file stem).
+    #[serde(rename = "use")]
+    pub use_script: String,
+    /// Display rule id for violations (defaults to `use`).
+    pub id: Option<String>,
+    /// Free-form parameters injected into the script as the `params` map.
+    pub params: Option<toml::Value>,
+    /// Only apply to symbols whose file matches one of these globs
+    /// (repo-relative; empty = every file).
     pub paths: Vec<String>,
-}
-
-/// A boundary rule. `deny` edges are forbidden; `allow` documents permitted
-/// edges (informational in MVP — only `deny` is enforced).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Boundary {
-    pub deny: Vec<String>,
-    #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
+    /// Exclude symbols whose file matches any of these globs (wins over
+    /// `paths`).
+    pub exclude: Vec<String>,
+    /// Severity override for violations from this entry.
     pub severity: Option<Severity>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Architecture {
-    #[serde(rename = "layer")]
-    pub layers: Vec<Layer>,
-    pub boundary: Vec<Boundary>,
+impl Default for RuleEntry {
+    fn default() -> Self {
+        RuleEntry {
+            use_script: String::new(),
+            id: None,
+            params: None,
+            paths: Vec::new(),
+            exclude: Vec::new(),
+            severity: None,
+        }
+    }
 }
 
-// ==================== Testing ====================
+fn default_rule_dirs() -> Vec<String> {
+    vec![".codesmell/rules".to_string()]
+}
 
-/// Selector for "business logic" that must be tested.
+/// The `[rhai]` section: where rule scripts are found + which are enabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogicSelector {
-    #[serde(default)]
-    pub layers: Vec<String>,
-    #[serde(default)]
-    pub min_lines: Option<u32>,
+pub struct RhaiSection {
+    /// Directories (relative to the repo root) scanned for `*.rhai` rule
+    /// scripts. A user script with the same id as a builtin overrides it.
+    #[serde(default = "default_rule_dirs")]
+    pub rule_dirs: Vec<String>,
+    /// Enabled rule entries; a script runs only when referenced here.
+    #[serde(default, rename = "rule")]
+    pub rules: Vec<RuleEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Coverage {
-    pub line: Option<u32>,
-    pub branch: Option<u32>,
+impl Default for RhaiSection {
+    fn default() -> Self {
+        RhaiSection {
+            rule_dirs: default_rule_dirs(),
+            rules: Vec::new(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Testing {
-    #[serde(default)]
-    pub require_tests_for_changed_logic: bool,
-    #[serde(default)]
-    pub test_paths: Vec<String>,
-    #[serde(default)]
-    pub logic_selectors: Vec<LogicSelector>,
-    #[serde(default)]
-    pub coverage: Coverage,
-}
-
-// ==================== Override + Policy ====================
-
-/// A scoped policy override (doc §3). Applied to symbols whose file matches any
-/// `paths` glob. Override is a shallow merge: scalars replace, rule/list fields
-/// are appended.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Override {
-    #[serde(default)]
-    pub paths: Vec<String>,
-    #[serde(default)]
-    pub style: Style,
-    #[serde(default)]
-    pub architecture: Architecture,
-    #[serde(default)]
-    pub testing: Testing,
-    #[serde(default)]
-    pub severity: HashMap<String, Severity>,
-}
+// ==================== Policy ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Policy {
-    #[serde(default)]
     pub version: u8,
     #[serde(default)]
-    pub style: Style,
-    #[serde(default)]
-    pub architecture: Architecture,
-    #[serde(default)]
-    pub testing: Testing,
-    #[serde(default)]
+    pub rhai: RhaiSection,
+    /// Per-rule-id severity overrides (win over each entry's default).
     pub severity: HashMap<String, Severity>,
-    #[serde(default)]
-    pub overrides: Vec<Override>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Self {
+        Policy {
             version: 1,
-            style: Style::default(),
-            architecture: Architecture::default(),
-            testing: Testing::default(),
+            rhai: RhaiSection::default(),
             severity: HashMap::new(),
-            overrides: Vec::new(),
         }
     }
 }
 
 impl Policy {
-    /// Resolve the policy effective for a given file (relative to repo root),
-    /// merging every matching `[[override]]` block.
-    pub fn effective_for(&self, rel_file: &str) -> Policy {
-        let mut eff = Policy {
-            version: self.version,
-            style: self.style.clone(),
-            architecture: self.architecture.clone(),
-            testing: self.testing.clone(),
-            severity: self.severity.clone(),
-            overrides: Vec::new(),
-        };
-        for ov in &self.overrides {
-            let hits = ov
-                .paths
-                .iter()
-                .any(|p| crate::glob::glob_matches(p, rel_file));
-            if !hits {
-                continue;
-            }
-            if let Some(v) = ov.style.function.max_lines {
-                eff.style.function.max_lines = Some(v);
-            }
-            if let Some(v) = ov.style.function.max_parameters {
-                eff.style.function.max_parameters = Some(v);
-            }
-            if let Some(v) = ov.style.function.max_nesting {
-                eff.style.function.max_nesting = Some(v);
-            }
-            eff.style.naming.rules.extend(ov.style.naming.rules.clone());
-            eff.architecture
-                .layers
-                .extend(ov.architecture.layers.clone());
-            eff.architecture
-                .boundary
-                .extend(ov.architecture.boundary.clone());
-            if ov.testing.require_tests_for_changed_logic {
-                eff.testing.require_tests_for_changed_logic = true;
-            }
-            eff.testing.test_paths.extend(ov.testing.test_paths.clone());
-            eff.testing
-                .logic_selectors
-                .extend(ov.testing.logic_selectors.clone());
-            for (k, v) in &ov.severity {
-                eff.severity.insert(k.clone(), *v);
-            }
-        }
-        eff
-    }
-
     /// Severity for a rule id, falling back to the category default.
     pub fn severity_of(&self, rule_id: &str) -> Severity {
         self.severity
@@ -244,16 +159,24 @@ impl Policy {
     }
 }
 
-/// Default severity per rule category (doc §11).
+/// Default severity per rule id (doc §11). Security rules fail the build by
+/// default; everything else is a warning unless configured otherwise.
 pub fn default_severity(rule_id: &str) -> Severity {
     match rule_id {
         RULE_BOUNDARY => Severity::Blocking,
         RULE_MISSING_TEST => Severity::Required,
+        _ if rule_id.starts_with("security.") => Severity::Required,
         _ => Severity::Warning,
     }
 }
 
-/// Load `.codesmell/policy.toml` by walking up from `start`.
+// ==================== Loading ====================
+
+/// Load `.codesmell/policy.toml` by walking up from `start`, then merge every
+/// `.codesmell/packs/*.policy.toml` fragment installed next to it (see
+/// `codesmell pack add`). Fragment rule entries are appended and their
+/// `[severity]` wins; scalars of the main policy are never overwritten.
+///
 /// Returns `(policy, found_path)`; on missing/absent file a default policy is
 /// returned (with `found_path = None`).
 pub fn load_policy(start: &Path) -> (Policy, Option<PathBuf>) {
@@ -261,15 +184,15 @@ pub fn load_policy(start: &Path) -> (Policy, Option<PathBuf>) {
     while let Some(dir) = cur {
         let candidate = dir.join(".codesmell").join("policy.toml");
         if candidate.exists() {
-            match std::fs::read_to_string(&candidate) {
+            let mut policy = match std::fs::read_to_string(&candidate) {
                 Ok(text) => match toml::from_str::<Policy>(&text) {
-                    Ok(p) => return (p, Some(candidate)),
+                    Ok(p) => p,
                     Err(e) => {
                         eprintln!(
                             "codesmell: warning: failed to parse {}: {e}; using defaults",
                             candidate.display()
                         );
-                        return (Policy::default(), Some(candidate));
+                        Policy::default()
                     }
                 },
                 Err(e) => {
@@ -277,92 +200,133 @@ pub fn load_policy(start: &Path) -> (Policy, Option<PathBuf>) {
                         "codesmell: warning: cannot read {}: {e}",
                         candidate.display()
                     );
-                    return (Policy::default(), Some(candidate));
+                    Policy::default()
                 }
-            }
+            };
+            merge_pack_fragments(&mut policy, &dir.join(".codesmell").join("packs"));
+            return (policy, Some(candidate));
         }
         cur = dir.parent().map(|p| p.to_path_buf());
     }
     (Policy::default(), None)
 }
 
+/// Merge every `*.policy.toml` fragment under `packs_dir` into `policy`
+/// (sorted by file name for determinism). A fragment that fails to parse is
+/// reported loudly and skipped — a silently inactive security pack is a hole.
+fn merge_pack_fragments(policy: &mut Policy, packs_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(packs_dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".policy.toml"))
+        })
+        .collect();
+    files.sort();
+    for file in files {
+        let text = match std::fs::read_to_string(&file) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "codesmell: warning: cannot read pack fragment {}: {e}",
+                    file.display()
+                );
+                continue;
+            }
+        };
+        match toml::from_str::<Policy>(&text) {
+            Ok(frag) => {
+                policy.rhai.rules.extend(frag.rhai.rules);
+                for (k, v) in frag.severity {
+                    policy.severity.insert(k, v);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "codesmell: warning: failed to parse pack fragment {}: {e}; fragment skipped",
+                    file.display()
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn base() -> Policy {
+    #[test]
+    fn rule_entries_load_from_toml() {
         let toml = r#"
 version = 1
-[style.function]
-max_lines = 60
-max_parameters = 4
 
-[[style.naming.rule]]
-kind = "method"
-pattern = "*Async"
-signature_contains = "async"
+[[rhai.rule]]
+use = "style.function.max_lines"
+params = { max = 60 }
 
-[[architecture.layer]]
-name = "controller"
-paths = ["src/controllers/**"]
+[[rhai.rule]]
+use = "style.function.max_lines"
+id = "style.legacy_max_lines"
+params = { max = 120 }
+paths = ["legacy/**"]
 
-[[architecture.boundary]]
-deny = ["controller -> repository"]
+[[rhai.rule]]
+use = "security.no_eval"
+severity = "blocking"
 
-[testing]
-require_tests_for_changed_logic = true
-test_paths = ["tests/**"]
+[severity]
+"style.function.max_lines" = "info"
 "#;
-        toml::from_str(toml).unwrap()
-    }
-
-    #[test]
-    fn naming_rule_loads_from_toml_array() {
-        let p = base();
-        assert_eq!(p.style.naming.rules.len(), 1);
-        assert_eq!(p.style.naming.rules[0].pattern, "*Async");
-        assert_eq!(p.architecture.layers.len(), 1);
-        assert_eq!(p.architecture.boundary.len(), 1);
-    }
-
-    #[test]
-    fn effective_for_merges_override_scalars_and_rules() {
-        let mut p = base();
-        p.overrides.push(Override {
-            paths: vec!["legacy/**".into()],
-            style: Style {
-                function: StyleFunction {
-                    max_lines: Some(120),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-        // Outside legacy: base limits win.
-        let eff = p.effective_for("src/services/order.rs");
-        assert_eq!(eff.style.function.max_lines, Some(60));
-        // Inside legacy: override wins, other base fields preserved.
-        let eff = p.effective_for("legacy/order.rs");
-        assert_eq!(eff.style.function.max_lines, Some(120));
-        assert_eq!(eff.style.function.max_parameters, Some(4));
-        assert_eq!(eff.style.naming.rules.len(), 1);
-    }
-
-    #[test]
-    fn severity_defaults_by_category() {
-        assert_eq!(default_severity(RULE_BOUNDARY), Severity::Blocking);
-        assert_eq!(default_severity(RULE_MISSING_TEST), Severity::Required);
-        assert_eq!(default_severity(RULE_MAX_LINES), Severity::Warning);
-    }
-
-    #[test]
-    fn severity_override_is_respected() {
-        let mut p = base();
-        p.severity
-            .insert(RULE_MAX_LINES.to_string(), Severity::Blocking);
-        assert_eq!(p.severity_of(RULE_MAX_LINES), Severity::Blocking);
-        // unspecified rule keeps its category default
+        let p: Policy = toml::from_str(toml).unwrap();
+        assert_eq!(p.rhai.rules.len(), 3);
+        assert_eq!(p.rhai.rules[0].use_script, "style.function.max_lines");
+        assert_eq!(p.rhai.rule_dirs, vec![".codesmell/rules".to_string()]);
+        // entry severity override
+        assert_eq!(p.rhai.rules[2].severity, Some(Severity::Blocking));
+        // [severity] map override + defaults
+        assert_eq!(p.severity_of(RULE_MAX_LINES), Severity::Info);
         assert_eq!(p.severity_of(RULE_BOUNDARY), Severity::Blocking);
+        assert_eq!(p.severity_of("security.custom"), Severity::Required);
+        assert_eq!(p.severity_of(RULE_MAX_PARAMS), Severity::Warning);
+    }
+
+    #[test]
+    fn custom_rule_dirs_are_respected() {
+        let p: Policy = toml::from_str("[rhai]\nrule_dirs = [\"policies\"]").unwrap();
+        assert_eq!(p.rhai.rule_dirs, vec!["policies".to_string()]);
+        assert!(p.rhai.rules.is_empty());
+    }
+
+    #[test]
+    fn pack_fragments_append_rules_and_win_severity() {
+        let dir = tempfile::tempdir().unwrap();
+        let packs = dir.path().join("packs");
+        std::fs::create_dir_all(&packs).unwrap();
+        std::fs::write(
+            packs.join("a.policy.toml"),
+            "[[rhai.rule]]\nuse = \"security.no_eval\"\n\n[severity]\n\"security.no_eval\" = \"blocking\"",
+        )
+        .unwrap();
+        let mut p = Policy::default();
+        p.rhai
+            .rules
+            .push(RuleEntry {
+                use_script: RULE_MAX_LINES.into(),
+                ..Default::default()
+            });
+        merge_pack_fragments(&mut p, &packs);
+        assert_eq!(p.rhai.rules.len(), 2);
+        assert_eq!(p.severity_of("security.no_eval"), Severity::Blocking);
+
+        // A broken fragment is skipped loudly, not merged.
+        std::fs::write(packs.join("b.policy.toml"), "not [ valid toml").unwrap();
+        let mut p2 = Policy::default();
+        merge_pack_fragments(&mut p2, &packs);
+        assert_eq!(p2.rhai.rules.len(), 1); // only a.policy.toml's entry
     }
 }

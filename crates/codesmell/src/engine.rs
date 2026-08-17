@@ -1,13 +1,14 @@
-//! Evaluation engine: collect candidate symbols, run rules, produce a report.
+//! Evaluation engine: collect symbols by kind, run the rhai rule instances,
+//! produce a sorted report.
 
-use codegraph_core::{Symbol, SymbolKind};
+use codegraph_core::SymbolKind;
 use codegraph_graph::{diff::ParsedDiff, GraphIndex};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::policy::Policy;
-use crate::rules;
+use crate::rhai;
 
 /// A single policy violation surfaced to the developer / LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,14 +51,13 @@ pub fn rel_path(file: &str, root: &Path) -> String {
         .unwrap_or_else(|_| file.to_string())
 }
 
-/// Symbols eligible for rule evaluation: every function + method in the repo,
-/// narrowed by `scope`.
-pub fn collect_candidates(index: &GraphIndex, scope: &CheckScope, root: &Path) -> Vec<Symbol> {
-    let (mut fns, _) = index.list_symbols_by_kind(SymbolKind::Function, 0, 0);
-    let (mut meths, _) = index.list_symbols_by_kind(SymbolKind::Method, 0, 0);
-    let mut all = Vec::with_capacity(fns.len() + meths.len());
-    all.append(&mut fns);
-    all.append(&mut meths);
+/// Collect symbol candidates of the given `kinds`, narrowed by `scope`.
+pub fn collect_symbols(index: &GraphIndex, kinds: &[SymbolKind], scope: &CheckScope, root: &Path) -> Vec<codegraph_core::Symbol> {
+    let mut all = Vec::new();
+    for k in kinds {
+        let (syms, _) = index.list_symbols_by_kind(*k, 0, 0);
+        all.append(&mut syms.into_iter().collect());
+    }
 
     match scope {
         CheckScope::All => all,
@@ -80,8 +80,6 @@ pub fn collect_candidates(index: &GraphIndex, scope: &CheckScope, root: &Path) -
                     .to_string();
                 let entry = changed.entry(PathBuf::from(rel)).or_default();
                 for h in &fd.hunks {
-                    // Any symbol overlapping the hunk's new-line region is a
-                    // changed symbol (range, not just `+` body lines).
                     let lo = h.new_start;
                     let hi = h.new_start.saturating_add(h.new_len).saturating_sub(1);
                     for l in lo..=hi {
@@ -104,18 +102,14 @@ pub fn collect_candidates(index: &GraphIndex, scope: &CheckScope, root: &Path) -
     }
 }
 
-/// Run all policies and return a severity-sorted report.
+/// Run the policy over the repository and return a severity-sorted report.
 pub async fn evaluate(
     index: &GraphIndex,
     scope: &CheckScope,
     policy: &Policy,
     root: &Path,
 ) -> anyhow::Result<CheckReport> {
-    let candidates = collect_candidates(index, scope, root);
-    let mut violations = Vec::new();
-    violations.extend(rules::run_style(index, &candidates, policy, root).await?);
-    violations.extend(rules::run_architecture(index, &candidates, policy, root).await?);
-    violations.extend(rules::run_testing(index, &candidates, policy, root).await?);
+    let mut violations = rhai::run(index, scope, policy, root).await?;
 
     // Most serious first.
     violations.sort_by_key(|v| std::cmp::Reverse(v.severity));

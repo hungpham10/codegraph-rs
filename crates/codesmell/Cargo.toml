@@ -17,6 +17,8 @@ globset = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
+rhai = { version = "1", features = ["sync"] }
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

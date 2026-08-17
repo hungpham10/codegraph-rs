@@ -5,7 +5,9 @@ use codegraph_graph::diff::parse_unified_diff;
 use codesmell::engine::{evaluate, CheckScope};
 use codesmell::guide;
 use codesmell::index::build_index;
+use codesmell::packs;
 use codesmell::policy;
+use codesmell::rhai::RhaiRuleLib;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -41,9 +43,29 @@ enum Cmd {
         path: Option<PathBuf>,
     },
     /// Write a starter `.codesmell/policy.toml` and print an AGENTS.md snippet.
-    Init,
+    Init {
+        /// Also install a built-in pack (e.g. `security`).
+        #[arg(long)]
+        pack: Option<String>,
+    },
     /// Print the effective resolved policy as TOML.
     Policy,
+    /// Manage built-in policy packs.
+    Pack {
+        #[command(subcommand)]
+        command: PackCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PackCmd {
+    /// List built-in packs.
+    List,
+    /// Copy a pack's scripts + fragment into `.codesmell/` (idempotent).
+    Add {
+        /// Pack name from `codesmell pack list`.
+        name: String,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -67,25 +89,27 @@ async fn main() -> anyhow::Result<()> {
         } => check(&root, paths, diff, format, fail_on).await,
         Cmd::Guide { path } => {
             let (p, _) = policy::load_policy(&root);
-            let p = if let Some(path) = path {
-                let rel = path.to_string_lossy().into_owned();
-                p.effective_for(&rel)
-            } else {
-                p
-            };
-            println!("{}", guide::render_guide(&p));
+            let lib = RhaiRuleLib::load(&root, &p.rhai.rule_dirs)
+                .map_err(|e| {
+                    eprintln!("codesmell: warning: {e}");
+                })
+                .ok();
+            if let Some(path) = path {
+                println!("# conventions effective for: {}", path.display());
+            }
+            println!("{}", guide::render_guide(&p, lib.as_ref()));
             Ok(())
         }
-        Cmd::Init => init(&root),
+        Cmd::Init { pack } => init(&root, pack.as_deref()),
         Cmd::Policy => {
             let (p, _) = policy::load_policy(&root);
             println!(
                 "{}",
-                toml::to_string_pretty(&p)
-                    .unwrap_or_else(|_| "# (policy could not be serialized)".into())
+                toml::to_string_pretty(&p).unwrap_or_else(|_| "# (policy could not be serialized)".into())
             );
             Ok(())
         }
+        Cmd::Pack { command } => pack(&root, command),
     }
 }
 
@@ -163,7 +187,7 @@ fn print_human(report: &codesmell::engine::CheckReport) {
     println!("{total} violation(s): {}", parts.join(", "));
 }
 
-fn init(root: &std::path::Path) -> anyhow::Result<()> {
+fn init(root: &std::path::Path, pack: Option<&str>) -> anyhow::Result<()> {
     let dir = root.join(".codesmell");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("policy.toml");
@@ -179,5 +203,42 @@ fn init(root: &std::path::Path) -> anyhow::Result<()> {
     println!("\nAdd this to AGENTS.md / CLAUDE.md so the LLM follows conventions:");
     println!("----");
     println!("{}", guide::AGENTS_SNIPPET);
+
+    if let Some(name) = pack {
+        println!();
+        match packs::builtin_packs().iter().find(|p| p.name == name) {
+            Some(pack) => packs::add_pack(root, pack)?,
+            None => {
+                eprintln!("codesmell: unknown pack `{name}`");
+                eprintln!("available packs:");
+                for p in packs::builtin_packs() {
+                    eprintln!("  {}", p.name);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
     Ok(())
+}
+
+fn pack(root: &std::path::Path, command: PackCmd) -> anyhow::Result<()> {
+    match command {
+        PackCmd::List => {
+            for p in packs::builtin_packs() {
+                println!("{} — {}", p.name, p.description);
+            }
+            Ok(())
+        }
+        PackCmd::Add { name } => match packs::builtin_packs().iter().find(|p| p.name == name) {
+            Some(pack) => packs::add_pack(root, pack),
+            None => {
+                eprintln!("codesmell: unknown pack `{name}`");
+                eprintln!("available packs:");
+                for p in packs::builtin_packs() {
+                    eprintln!("  {}", p.name);
+                }
+                std::process::exit(1);
+            }
+        },
+    }
 }
