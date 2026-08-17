@@ -57,9 +57,7 @@ pub fn add_pack(root: &Path, pack: &Pack) -> anyhow::Result<()> {
     for (file_name, src) in pack.rules {
         let dest = rules_dir.join(file_name);
         if dest.exists() {
-            eprintln!(
-                "codesmell: `{file_name}` already exists; not overwriting.",
-            );
+            eprintln!("codesmell: `{file_name}` already exists; not overwriting.",);
         } else {
             std::fs::write(&dest, src).with_context(|| format!("writing {}", dest.display()))?;
             println!("codesmell: wrote {}", dest.display());

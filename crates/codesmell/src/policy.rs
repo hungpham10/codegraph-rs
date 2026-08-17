@@ -313,12 +313,10 @@ severity = "blocking"
         )
         .unwrap();
         let mut p = Policy::default();
-        p.rhai
-            .rules
-            .push(RuleEntry {
-                use_script: RULE_MAX_LINES.into(),
-                ..Default::default()
-            });
+        p.rhai.rules.push(RuleEntry {
+            use_script: RULE_MAX_LINES.into(),
+            ..Default::default()
+        });
         merge_pack_fragments(&mut p, &packs);
         assert_eq!(p.rhai.rules.len(), 2);
         assert_eq!(p.severity_of("security.no_eval"), Severity::Blocking);
