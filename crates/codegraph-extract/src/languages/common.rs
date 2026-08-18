@@ -431,7 +431,10 @@ fn annotation_args(node: &Node, src: &[u8]) -> HashMap<String, String> {
     let mut args = HashMap::new();
     for ch in named_children(node) {
         // Java: `annotation_argument_list`; C#/PHP: `attribute_argument_list`.
-        if !matches!(ch.kind(), "annotation_argument_list" | "attribute_argument_list") {
+        if !matches!(
+            ch.kind(),
+            "annotation_argument_list" | "attribute_argument_list"
+        ) {
             continue;
         }
         for (i, arg) in named_children(&ch).into_iter().enumerate() {

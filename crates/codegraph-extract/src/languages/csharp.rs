@@ -183,13 +183,9 @@ public class ProductsController : ControllerBase
             .find(|a| a.name == "Route")
             .expect("Route annotation");
         assert!(
-            route
-                .args
-                .values()
-                .any(|v| v.contains("api/[controller]")),
+            route.args.values().any(|v| v.contains("api/[controller]")),
             "route args: {:?}",
             route.args
         );
     }
 }
-
