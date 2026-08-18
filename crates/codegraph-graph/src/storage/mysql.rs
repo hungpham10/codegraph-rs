@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use super::{
-    Result, Storage, StorageError, Tx, decode_chain, decode_vector, encode_chain, encode_vector,
+    IndexCounts, Result, Storage, StorageError, Tx, decode_chain, decode_vector, encode_chain,
+    encode_vector,
 };
 use async_trait::async_trait;
 use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
@@ -71,6 +72,21 @@ impl MySqlStorage {
                 symbol_id BIGINT NOT NULL,
                 vector LONGBLOB NOT NULL,
                 PRIMARY KEY (repo_id, symbol_id)
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        // Stats tổng hợp (codegraph_status đọc O(1) không rebuild) — idempotent.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sg_stats (
+                repo_id BIGINT NOT NULL,
+                symbols BIGINT NOT NULL,
+                chains BIGINT NOT NULL,
+                edges BIGINT NOT NULL,
+                files BIGINT NOT NULL,
+                next_id BIGINT NOT NULL,
+                PRIMARY KEY (repo_id)
             )",
         )
         .execute(&self.pool)
@@ -706,6 +722,45 @@ impl Storage for MySqlStorage {
         .await
         .map_err(db_err)?;
         Ok(())
+    }
+
+    async fn set_stats(&mut self, s: IndexCounts) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sg_stats (repo_id, symbols, chains, edges, files, next_id) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE \
+             symbols = VALUES(symbols), chains = VALUES(chains), \
+             edges = VALUES(edges), files = VALUES(files), next_id = VALUES(next_id)",
+        )
+        .bind(self.repo_id as i64)
+        .bind(s.symbols as i64)
+        .bind(s.chains as i64)
+        .bind(s.edges as i64)
+        .bind(s.files as i64)
+        .bind(s.next_id as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn stats(&self) -> Result<IndexCounts> {
+        let row: Option<(i64, i64, i64, i64, i64)> =
+            sqlx::query_as("SELECT symbols, chains, edges, files, next_id FROM sg_stats WHERE repo_id = ?")
+                .bind(self.repo_id as i64)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_err)?;
+        match row {
+            Some((symbols, chains, edges, files, next_id)) => Ok(IndexCounts {
+                symbols: symbols as u64,
+                chains: chains as u64,
+                edges: edges as u64,
+                files: files as u64,
+                next_id: next_id as u64,
+            }),
+            None => Ok(IndexCounts::default()),
+        }
     }
 
     async fn clear_entities(&mut self) -> Result<()> {

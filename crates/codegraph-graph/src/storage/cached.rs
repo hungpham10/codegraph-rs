@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use codegraph_core::{FileInfo, Symbol};
 
 use crate::lru::LruCache;
-use crate::storage::{Storage, StorageError, Tx};
+use crate::storage::{IndexCounts, Storage, StorageError, Tx};
 
 /// Số shard của mỗi `LruCache` — phải lũy thừa của 2.
 const SHARDS: usize = 32;
@@ -405,6 +405,14 @@ impl Storage for CachedStorage {
 
     async fn set_version(&mut self, v: u64) -> Result<(), StorageError> {
         self.inner.set_version(v).await
+    }
+
+    async fn set_stats(&mut self, s: IndexCounts) -> Result<(), StorageError> {
+        self.inner.set_stats(s).await
+    }
+
+    async fn stats(&self) -> Result<IndexCounts, StorageError> {
+        self.inner.stats().await
     }
 
     async fn clear_entities(&mut self) -> Result<(), StorageError> {

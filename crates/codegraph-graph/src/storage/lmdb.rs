@@ -24,8 +24,8 @@ use lmdb::EnvironmentFlags;
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
 
 use super::{
-    EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_chain, decode_vector, encode_chain,
-    encode_vector,
+    EMPTY, IndexCounts, Result, Storage, StorageError, Tx, TxOp, decode_chain, decode_vector,
+    encode_chain, encode_vector,
 };
 
 /// Map lỗi LMDB → `StorageError`.
@@ -48,6 +48,28 @@ fn ku64(v: u64) -> [u8; 8] {
 #[inline]
 fn de_u64(b: &[u8]) -> u64 {
     u64::from_le_bytes(b.try_into().expect("8-byte value"))
+}
+
+/// Pack `IndexCounts` (5 × u64 LE) thành 40-byte value — lưu gọn trong 1 key.
+fn pack_counts(c: &IndexCounts) -> [u8; 40] {
+    let mut b = [0u8; 40];
+    b[0..8].copy_from_slice(&c.symbols.to_le_bytes());
+    b[8..16].copy_from_slice(&c.chains.to_le_bytes());
+    b[16..24].copy_from_slice(&c.edges.to_le_bytes());
+    b[24..32].copy_from_slice(&c.files.to_le_bytes());
+    b[32..40].copy_from_slice(&c.next_id.to_le_bytes());
+    b
+}
+
+fn unpack_counts(b: &[u8]) -> IndexCounts {
+    let at = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().expect("8-byte value"));
+    IndexCounts {
+        symbols: at(0),
+        chains: at(8),
+        edges: at(16),
+        files: at(24),
+        next_id: at(32),
+    }
 }
 
 // ── key chuỗi dài ──
@@ -154,6 +176,7 @@ const D_CALL_NAMES: &str = "sg_call_names";
 const D_FILES: &str = "sg_files";
 const D_VERSION: &str = "sg_meta";
 const D_EMBEDDINGS: &str = "sg_embeddings";
+const D_STATS: &str = "sg_stats";
 
 /// Key duy nhất cho các "row đơn" (counter / next_id / version) — mỗi DBI chỉ có 1 row.
 const KEY_ONE: [u8; 8] = [0u8; 8];
@@ -177,6 +200,9 @@ fn open_env_read_only(path: &str) -> lmdb::Result<Environment> {
     let mut b = Environment::new();
     b.set_flags(EnvironmentFlags::READ_ONLY);
     b.set_max_dbs(32);
+    // Phải set map_size khớp với env read-write (1 GiB) — mở read-only không set
+    // map_size có thể trả EACCES/PERMISSION_DENIED trên một số platform.
+    b.set_map_size(1 << 30);
     b.open(Path::new(path))
 }
 
@@ -250,6 +276,7 @@ pub struct LmdbStorage {
     files: Database,
     version: Database,
     embeddings: Database,
+    stats: Database,
 }
 
 impl LmdbStorage {
@@ -318,6 +345,9 @@ impl LmdbStorage {
         let embeddings = env
             .create_db(Some(D_EMBEDDINGS), DatabaseFlags::empty())
             .map_err(e)?;
+        let stats = env
+            .create_db(Some(D_STATS), DatabaseFlags::empty())
+            .map_err(e)?;
         Ok(Self {
             env,
             nodes,
@@ -339,6 +369,7 @@ impl LmdbStorage {
             files,
             version,
             embeddings,
+            stats,
         })
     }
 
@@ -361,6 +392,10 @@ impl LmdbStorage {
         }
         if matches!(tx.get(self.version, &KEY_ONE), Err(lmdb::Error::NotFound)) {
             tx.put(self.version, &KEY_ONE, &ku64(0), WriteFlags::empty())
+                .map_err(e)?;
+        }
+        if matches!(tx.get(self.stats, &KEY_ONE), Err(lmdb::Error::NotFound)) {
+            tx.put(self.stats, &KEY_ONE, &[0u8; 40], WriteFlags::empty())
                 .map_err(e)?;
         }
         tx.commit().map_err(e)?;
@@ -757,6 +792,23 @@ impl Storage for LmdbStorage {
             .map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
+    }
+
+    async fn set_stats(&mut self, s: IndexCounts) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.put(self.stats, &KEY_ONE, &pack_counts(&s), WriteFlags::empty())
+            .map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
+    async fn stats(&self) -> Result<IndexCounts> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        match tx.get(self.stats, &KEY_ONE) {
+            Ok(b) => Ok(unpack_counts(b)),
+            Err(lmdb::Error::NotFound) => Ok(IndexCounts::default()),
+            Err(err) => Err(StorageError::Internal(err.to_string())),
+        }
     }
 
     async fn clear_entities(&mut self) -> Result<()> {
@@ -1217,5 +1269,27 @@ mod tests {
         let files = s.load_all_files().await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, long_path);
+    }
+
+    #[tokio::test]
+    async fn test_stats_roundtrip() {
+        let (_d, path) = tmp_path();
+        let mut s = LmdbStorage::open(&path).await.unwrap();
+        // Chưa ghi → trả zeros (caller fallback rebuild).
+        assert_eq!(s.stats().await.unwrap(), IndexCounts::default());
+        let counts = IndexCounts {
+            symbols: 12,
+            chains: 3,
+            edges: 5,
+            files: 2,
+            next_id: 100,
+        };
+        s.set_stats(counts).await.unwrap();
+        assert_eq!(s.stats().await.unwrap(), counts);
+        drop(s);
+        // Mở lại (stats_cached mở storage từ route — LMDB cho phép nhiều RW handle)
+        // vẫn đọc được counts đã persist.
+        let ro = LmdbStorage::open(&path).await.unwrap();
+        assert_eq!(ro.stats().await.unwrap(), counts);
     }
 }

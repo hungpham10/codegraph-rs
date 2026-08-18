@@ -46,7 +46,7 @@ pub use crate::storage::mysql::MySqlStorage;
 pub use crate::storage::postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use crate::storage::sqlite::SqliteStorage;
-pub use crate::storage::{InMemoryStorage, Storage, Tx};
+pub use crate::storage::{InMemoryStorage, IndexCounts, Storage, Tx};
 use crate::vector_index::VectorIndex;
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
@@ -653,6 +653,19 @@ impl GraphIndex {
         self.rebuild_chain_engine(None).await?;
         self.rebuild_name_engine(None).await?;
         self.rebuild_vector_index(None).await?;
+        // Persist counts để `codegraph_status` đọc O(1) (không rebuild lại).
+        {
+            let mut st = self.storage.write().await;
+            st.set_stats(IndexCounts {
+                symbols: self.symbols.len() as u64,
+                chains: self.chains_map.len() as u64,
+                edges: self.edges.len() as u64,
+                files: self.files.len() as u64,
+                next_id: self.next_id,
+            })
+            .await
+            .map_err(serr)?;
+        }
         Ok(())
     }
 
@@ -958,6 +971,15 @@ impl GraphIndex {
             let mut st = self.storage.write().await;
             st.save_next_id(self.next_id).await.map_err(serr)?;
             st.set_version(self.version).await.map_err(serr)?;
+            st.set_stats(IndexCounts {
+                symbols: self.symbols.len() as u64,
+                chains: self.chains_map.len() as u64,
+                edges: self.edges.len() as u64,
+                files: self.files.len() as u64,
+                next_id: self.next_id,
+            })
+            .await
+            .map_err(serr)?;
         }
         Ok(())
     }

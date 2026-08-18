@@ -776,6 +776,7 @@ dependencies = [
  "codegraph-core",
  "codegraph-extract",
  "codegraph-graph",
+ "dirs 5.0.1",
  "globset",
  "regex",
  "rhai",

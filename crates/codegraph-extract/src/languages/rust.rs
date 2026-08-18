@@ -29,7 +29,7 @@ pub static SPEC: LangSpec = LangSpec {
         "mod_item",
     ],
     param_kinds: &[],
-    annotation_kinds: &[],
+    annotation_kinds: &["attribute"],
     // `impl Foo` không có name field — tên nằm ở field `type`.
     name_type_fallback: true,
     calls: &[CallRule {
@@ -68,3 +68,58 @@ pub static SPEC: LangSpec = LangSpec {
 };
 
 crate::lang_parser!(RustParser, SPEC);
+
+#[cfg(test)]
+mod tests {
+    use crate::LangParser;
+    use codegraph_core::{Symbol, SymbolKind};
+
+    fn parse(src: &str) -> Vec<Symbol> {
+        super::RustParser::new()
+            .parse_file("test.rs", src)
+            .unwrap()
+            .symbols
+    }
+
+    fn ann_names(sym: &Symbol) -> Vec<String> {
+        sym.annotations.iter().map(|a| a.name.clone()).collect()
+    }
+
+    #[test]
+    fn rust_attributes_are_extracted() {
+        let src = r#"
+#[derive(Debug, Clone)]
+pub struct Foo;
+
+#[tokio::main]
+async fn main() {}
+"#;
+        let syms = parse(src);
+
+        let foo = syms
+            .iter()
+            .find(|s| s.name == "Foo")
+            .expect("Foo not found")
+            .clone();
+        assert_eq!(foo.kind, SymbolKind::Class);
+        let ann = ann_names(&foo);
+        assert!(
+            ann.contains(&"derive".to_string()),
+            "Foo missing derive: {ann:?}"
+        );
+
+        let main = syms
+            .iter()
+            .find(|s| s.name == "main")
+            .expect("main not found")
+            .clone();
+        assert_eq!(main.kind, SymbolKind::Function);
+        let ann = ann_names(&main);
+        // Rust attribute has no `name` field, so the first path identifier is used.
+        assert!(
+            ann.contains(&"tokio".to_string()),
+            "main missing tokio attribute: {ann:?}"
+        );
+    }
+}
+

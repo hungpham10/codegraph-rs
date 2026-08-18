@@ -494,7 +494,7 @@ pub async fn dispatch_with_api(
             emit(root.as_str(), &files)
         }
         "codegraph_status" => {
-            let stats = api.stats().await;
+            let stats = api.stats_cached().await;
             emit(root.as_str(), &stats)
         }
         "codegraph_search_symbol" => {
