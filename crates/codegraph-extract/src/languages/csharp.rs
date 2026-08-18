@@ -88,3 +88,108 @@ pub static SPEC: LangSpec = LangSpec {
 };
 
 crate::lang_parser!(CSharpParser, SPEC);
+
+#[cfg(test)]
+mod tests {
+    use crate::LangParser;
+    use codegraph_core::{Symbol, SymbolKind};
+
+    fn parse(src: &str) -> Vec<Symbol> {
+        super::CSharpParser::new()
+            .parse_file("test.cs", src)
+            .unwrap()
+            .symbols
+    }
+
+    fn ann_names(sym: &Symbol) -> Vec<String> {
+        sym.annotations.iter().map(|a| a.name.clone()).collect()
+    }
+
+    #[test]
+    fn csharp_controller_annotations_are_extracted() {
+        let src = r#"
+using Microsoft.AspNetCore.Mvc;
+
+namespace CodeGraphReproFixtures.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase
+{
+    [HttpGet]
+    public IActionResult GetAll() => Ok();
+
+    [HttpGet("{id}")]
+    public IActionResult GetById(string id) => Ok();
+
+    [HttpPost()]
+    public IActionResult Create([FromBody] object body) => Ok();
+
+    [HttpPost("custom")]
+    public IActionResult CreateCustom([FromBody] object body) => Ok();
+
+    [HttpPut("{id}")]
+    public IActionResult Replace(string id, [FromBody] object body) => Ok();
+
+    [HttpPatch("{id}")]
+    public IActionResult PartialUpdate(string id, [FromBody] object body) => Ok();
+
+    [HttpDelete("{id}")]
+    public IActionResult Delete(string id) => Ok();
+}
+"#;
+        let syms = parse(src);
+        let by_name = |n: &str| {
+            syms.iter()
+                .find(|s| s.name == n)
+                .unwrap_or_else(|| panic!("symbol `{n}` not found"))
+                .clone()
+        };
+
+        let cls = by_name("ProductsController");
+        assert_eq!(cls.kind, SymbolKind::Class);
+        let cls_ann = ann_names(&cls);
+        assert!(
+            cls_ann.contains(&"ApiController".to_string()),
+            "class missing ApiController: {cls_ann:?}"
+        );
+        assert!(
+            cls_ann.contains(&"Route".to_string()),
+            "class missing Route: {cls_ann:?}"
+        );
+
+        for (method, attr) in [
+            ("GetAll", "HttpGet"),
+            ("GetById", "HttpGet"),
+            ("Create", "HttpPost"),
+            ("CreateCustom", "HttpPost"),
+            ("Replace", "HttpPut"),
+            ("PartialUpdate", "HttpPatch"),
+            ("Delete", "HttpDelete"),
+        ] {
+            let m = by_name(method);
+            assert_eq!(m.kind, SymbolKind::Method, "kind of {method}");
+            let ann = ann_names(&m);
+            assert!(
+                ann.contains(&attr.to_string()),
+                "{method} missing {attr}: {ann:?}"
+            );
+        }
+
+        // Route argument template should be captured positionally.
+        let route = cls
+            .annotations
+            .iter()
+            .find(|a| a.name == "Route")
+            .expect("Route annotation");
+        assert!(
+            route
+                .args
+                .values()
+                .any(|v| v.contains("api/[controller]")),
+            "route args: {:?}",
+            route.args
+        );
+    }
+}
+

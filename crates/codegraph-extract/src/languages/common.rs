@@ -365,13 +365,40 @@ fn base_type_name(tn: &str) -> String {
     s.rsplit(['.', ':']).next().unwrap_or(s).trim().to_string()
 }
 
+/// A node that directly or indirectly holds annotation leaves: either a known
+/// wrapper container (`modifiers`, `decorators`, `attributes`, `attribute_list`,
+/// `attribute_item`) or a leaf annotation kind itself.
+fn is_annotation_container(kind: &str, kinds: &'static [&'static str]) -> bool {
+    matches!(
+        kind,
+        "modifiers" | "decorators" | "attributes" | "attribute_list" | "attribute_item"
+    ) || kinds.contains(&kind)
+}
+
 fn extract_annotations(node: &Node, src: &[u8], kinds: &'static [&'static str]) -> Vec<Annotation> {
     if kinds.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
+    // Attributes attached as children (Java modifiers, C#/PHP attribute_list, ...).
     for ch in named_children(node) {
         collect_annotation(&ch, src, kinds, &mut out);
+    }
+    // Languages like Rust attach attributes as preceding sibling `attribute_item`
+    // nodes rather than as children of the declaration. Collect the contiguous
+    // run of attribute containers immediately before this symbol and stop at the
+    // first non-container sibling, so we don't grab another item's attributes.
+    if let Some(parent) = node.parent() {
+        let sibs = named_children(&parent);
+        if let Some(pos) = sibs.iter().position(|s| s.id() == node.id()) {
+            for sib in sibs[..pos].iter().rev() {
+                if is_annotation_container(sib.kind(), kinds) {
+                    collect_annotation(sib, src, kinds, &mut out);
+                } else {
+                    break;
+                }
+            }
+        }
     }
     out
 }
@@ -392,8 +419,8 @@ fn collect_annotation(
         let line = node.start_position().row as u32 + 1;
         out.push(Annotation { name, args, line });
     }
-    // Wrapper node: Java modifiers, TS decorators, C# attributes...
-    if matches!(node.kind(), "modifiers" | "decorators" | "attributes") {
+    // Wrapper node: Java modifiers, TS decorators, C#/PHP attributes, Rust attribute_item...
+    if is_annotation_container(node.kind(), kinds) {
         for ch in named_children(node) {
             collect_annotation(&ch, src, kinds, out);
         }
@@ -403,7 +430,8 @@ fn collect_annotation(
 fn annotation_args(node: &Node, src: &[u8]) -> HashMap<String, String> {
     let mut args = HashMap::new();
     for ch in named_children(node) {
-        if ch.kind() != "annotation_argument_list" {
+        // Java: `annotation_argument_list`; C#/PHP: `attribute_argument_list`.
+        if !matches!(ch.kind(), "annotation_argument_list" | "attribute_argument_list") {
             continue;
         }
         for (i, arg) in named_children(&ch).into_iter().enumerate() {

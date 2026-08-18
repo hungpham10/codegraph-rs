@@ -15,7 +15,8 @@
 //! được chọn theo scheme trong route, không phải theo thứ tự feature.
 
 use crate::GraphIndex;
-use codegraph_core::{Result, StorageRoute};
+use crate::storage::Storage;
+use codegraph_core::{Result, SemgraphStats, StorageRoute};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -38,6 +39,8 @@ pub struct SharedGraphIndex {
     state: RwLock<IndexState>,
     /// Serialize rebuild — N request stale đồng thời chỉ 1 lần rebuild.
     rebuild_lock: Arc<Mutex<()>>,
+    /// Storage read-only cache để `stats_cached` đọc counts O(1) không rebuild.
+    stats_storage: RwLock<Option<Arc<dyn Storage>>>,
 }
 
 impl SharedGraphIndex {
@@ -58,6 +61,7 @@ impl SharedGraphIndex {
                 ready: false,
             }),
             rebuild_lock: Arc::new(Mutex::new(())),
+            stats_storage: RwLock::new(None),
         })
     }
 
@@ -201,6 +205,91 @@ impl SharedGraphIndex {
         state.ready = true;
         Ok(())
     }
+
+    /// Đọc counts tổng hợp từ đĩa (`sg_stats`) mà KHÔNG rebuild in-memory
+    /// `GraphIndex` — O(1) với repo lớn. Hỗ trợ sqlite/lmdb/postgres/mysql;
+    /// backend khác / index cũ thiếu bảng → trả `None` để caller fallback rebuild.
+    ///
+    /// Trả `None` cả khi counts toàn 0 (index cũ chưa ghi `sg_stats`) để không
+    /// trình ra số 0 sai lệch.
+    pub async fn stats_cached(&self) -> Option<SemgraphStats> {
+        let storage = self.stats_storage_handle().await?;
+        let counts = storage.stats().await.ok()?;
+        if counts.symbols == 0 && counts.chains == 0 && counts.edges == 0 && counts.files == 0 {
+            return None;
+        }
+        Some(SemgraphStats {
+            symbols: counts.symbols,
+            chains: counts.chains,
+            edges: counts.edges,
+            files: counts.files,
+            next_id: counts.next_id,
+        })
+    }
+
+    /// Lấy (và cache) storage read-only từ route để đọc `sg_stats` không rebuild.
+    /// Hỗ trợ: sqlite (Local), lmdb (Local, read-only để không tranh lock),
+    /// postgres/mysql (Sharded — resolve dsn đầu + repo_id). Backend khác
+    /// (redis/unknown) → `None` → caller fallback rebuild.
+    async fn stats_storage_handle(&self) -> Option<Arc<dyn Storage>> {
+        {
+            let g = self.stats_storage.read().await;
+            if let Some(s) = g.as_ref() {
+                return Some(s.clone());
+            }
+        }
+        let st: Arc<dyn Storage> = match &self.route {
+            #[cfg(feature = "sqlite")]
+            Some(StorageRoute::Local(d)) if d.starts_with("sqlite://") => {
+                let s = crate::storage::sqlite::SqliteStorage::open(trim_scheme(d))
+                    .await
+                    .ok()?;
+                Arc::new(s)
+            }
+            #[cfg(feature = "lmdb")]
+            Some(StorageRoute::Local(d)) if d.starts_with("lmdb://") => {
+                let s = crate::storage::lmdb::LmdbStorage::open(trim_scheme(d))
+                    .await
+                    .ok()?;
+                Arc::new(s)
+            }
+            #[cfg(any(feature = "postgres", feature = "mysql"))]
+            Some(StorageRoute::Sharded { dsns, repo_id, .. }) => {
+                let dsn = dsns.first()?;
+                let rid = (*repo_id)?;
+                if dsn.starts_with("postgres://") {
+                    #[cfg(feature = "postgres")]
+                    {
+                        let s = crate::storage::postgres::PostgresStorage::open(dsn, rid)
+                            .await
+                            .ok()?;
+                        Arc::new(s)
+                    }
+                    #[cfg(not(feature = "postgres"))]
+                    {
+                        return None;
+                    }
+                } else if dsn.starts_with("mysql://") {
+                    #[cfg(feature = "mysql")]
+                    {
+                        let s = crate::storage::mysql::MySqlStorage::open(dsn, rid)
+                            .await
+                            .ok()?;
+                        Arc::new(s)
+                    }
+                    #[cfg(not(feature = "mysql"))]
+                    {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        *self.stats_storage.write().await = Some(st.clone());
+        Some(st)
+    }
 }
 
 /// Bỏ `scheme://` khỏi DSN — trả phần còn lại (path cho probe file).
@@ -299,5 +388,35 @@ mod tests {
         assert_eq!(idx2.version(), 2);
         assert_eq!(idx2.stats().symbols, 1);
         assert_eq!(idx2.symbol_by_id(SYMBOL_BASE).unwrap().name, "x");
+    }
+
+    /// `stats_cached` đọc counts từ đĩa (`sg_stats`) mà KHÔNG rebuild in-memory
+    /// `GraphIndex` — xác nhận `codegraph_status` tức thì trên repo lớn.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_stats_cached_reads_disk_without_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+
+        // Index qua process riêng — ghi `sg_stats` lúc ingest.
+        {
+            let mut idx = GraphIndex::open(&db_str).await.unwrap();
+            let r = mk_result(
+                "a.ts",
+                vec![sym("a", SYMBOL_BASE), sym("b", SYMBOL_BASE + 1)],
+                vec![SYMBOL_BASE, SYMBOL_BASE + 1],
+            );
+            idx.ingest(&[r]).await.unwrap();
+        }
+
+        let sgi = SharedGraphIndex::open(Some(db_str.clone())).await.unwrap();
+        // Chưa gọi `ensure_fresh` — `stats_cached` mở storage riêng đọc `sg_stats`.
+        let stats = sgi.stats_cached().await.expect("sg_stats đã populate");
+        assert_eq!(stats.symbols, 2);
+        assert_eq!(stats.chains, 1);
+        assert_eq!(stats.edges, 1);
+        assert_eq!(stats.files, 1);
+        assert_eq!(stats.next_id, SYMBOL_BASE + 2);
     }
 }

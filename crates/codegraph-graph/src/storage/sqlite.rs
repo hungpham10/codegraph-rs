@@ -42,7 +42,7 @@ use codegraph_core::{FileInfo, Symbol};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
-use super::{EMPTY, Result, Storage, StorageError, Tx, TxOp, decode_vector, encode_vector};
+use super::{EMPTY, IndexCounts, Result, Storage, StorageError, Tx, TxOp, decode_vector, encode_vector};
 use crate::embeddings::resolve_vss_extensions;
 
 fn db_err(e: sqlx::Error) -> StorageError {
@@ -218,6 +218,15 @@ impl SqliteStorage {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 version INTEGER NOT NULL
             )",
+            // ── Stats (counts tổng hợp — codegraph_status đọc O(1)) ──
+            "CREATE TABLE IF NOT EXISTS sg_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                symbols INTEGER NOT NULL,
+                chains INTEGER NOT NULL,
+                edges INTEGER NOT NULL,
+                files INTEGER NOT NULL,
+                next_id INTEGER NOT NULL
+            )",
             // ── Embeddings (vector per symbol id) ──
             "CREATE TABLE IF NOT EXISTS sg_embeddings (
                 symbol_id INTEGER PRIMARY KEY,
@@ -229,6 +238,7 @@ impl SqliteStorage {
             // next_id bắt đầu từ SYMBOL_BASE (marker reserved 1..=99).
             "INSERT OR IGNORE INTO sg_next_id (id, next) VALUES (1, 100)",
             "INSERT OR IGNORE INTO sg_meta (id, version) VALUES (1, 0)",
+            "INSERT OR IGNORE INTO sg_stats (id, symbols, chains, edges, files, next_id) VALUES (1, 0, 0, 0, 0, 0)",
         ] {
             sqlx::query(stmt)
                 .execute(&mut *conn)
@@ -743,6 +753,47 @@ impl Storage for SqliteStorage {
             .await
             .map_err(db_err)?;
         Ok(())
+    }
+
+    async fn set_stats(&mut self, s: IndexCounts) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO sg_stats (id, symbols, chains, edges, files, next_id) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(id) DO UPDATE SET \
+             symbols = excluded.symbols, chains = excluded.chains, \
+             edges = excluded.edges, files = excluded.files, next_id = excluded.next_id",
+        )
+        .bind(s.symbols as i64)
+        .bind(s.chains as i64)
+        .bind(s.edges as i64)
+        .bind(s.files as i64)
+        .bind(s.next_id as i64)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn stats(&self) -> Result<IndexCounts> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let row: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT symbols, chains, edges, files, next_id FROM sg_stats WHERE id = 1",
+        )
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        match row {
+            Some((symbols, chains, edges, files, next_id)) => Ok(IndexCounts {
+                symbols: symbols as u64,
+                chains: chains as u64,
+                edges: edges as u64,
+                files: files as u64,
+                next_id: next_id as u64,
+            }),
+            // Bảng thiếu (index cũ) → trả 0 để caller fallback rebuild.
+            None => Ok(IndexCounts::default()),
+        }
     }
 
     async fn clear_entities(&mut self) -> Result<()> {
@@ -1385,5 +1436,36 @@ mod tests {
         // Node id mới tiếp tục cấp trên counter đã persist.
         let n = s.new_node(b"new".to_vec(), 1).await.unwrap();
         assert!(n > parent);
+    }
+
+    #[tokio::test]
+    async fn test_stats_roundtrip() {
+        let (_d, path) = tmp_path();
+        let mut s = SqliteStorage::open(&path).await.unwrap();
+        s.init().await.unwrap();
+        // Chưa ghi → trả zeros (caller fallback rebuild).
+        assert_eq!(s.stats().await.unwrap(), IndexCounts::default());
+        let counts = IndexCounts {
+            symbols: 12,
+            chains: 3,
+            edges: 5,
+            files: 2,
+            next_id: 100,
+        };
+        s.set_stats(counts).await.unwrap();
+        let got = s.stats().await.unwrap();
+        assert_eq!(got.symbols, 12);
+        assert_eq!(got.chains, 3);
+        assert_eq!(got.edges, 5);
+        assert_eq!(got.files, 2);
+        assert_eq!(got.next_id, 100);
+        // Ghi lại đè → UPSERT cập nhật (không duplicate row).
+        s.set_stats(IndexCounts {
+            symbols: 99,
+            ..IndexCounts::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(s.stats().await.unwrap().symbols, 99);
     }
 }

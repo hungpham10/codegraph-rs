@@ -673,6 +673,15 @@ impl GraphApi {
     pub async fn stats(&self) -> codegraph_core::SemgraphStats {
         self.index().await.stats()
     }
+
+    /// Stats đọc O(1) từ đĩa (không rebuild in-memory) — fallback `stats()`
+    /// nếu backend không hỗ trợ hoặc index cũ thiếu `sg_stats`.
+    pub async fn stats_cached(&self) -> codegraph_core::SemgraphStats {
+        match self.shared_index.stats_cached().await {
+            Some(s) => s,
+            None => self.stats().await,
+        }
+    }
 }
 
 /// Deadline từ `timeout_ms`: `0` = không giới hạn (None), `u64::MAX`

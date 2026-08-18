@@ -144,6 +144,17 @@ pub trait Tx: Send {
 
 // ==================== Storage trait ====================
 
+/// Counts tổng hợp của index — `codegraph_status` đọc O(1) từ đĩa mà không
+/// cần rebuild in-memory `GraphIndex` (vốn rất đắt trên repo lớn).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexCounts {
+    pub symbols: u64,
+    pub chains: u64,
+    pub edges: u64,
+    pub files: u64,
+    pub next_id: u64,
+}
+
 /// Radix-node storage: node management + transaction.
 #[async_trait]
 pub trait Storage: Send + Sync {
@@ -345,6 +356,16 @@ pub trait Storage: Send + Sync {
     /// Lưu version — mặc định: no-op.
     async fn set_version(&mut self, _v: u64) -> Result<()> {
         Ok(())
+    }
+    /// Lưu counts tổng hợp (symbols/chains/edges/files) — `codegraph_status`
+    /// đọc trực tiếp từ đĩa, bỏ qua rebuild in-memory. Mặc định: no-op.
+    async fn set_stats(&mut self, _s: IndexCounts) -> Result<()> {
+        Ok(())
+    }
+    /// Đọc counts tổng hợp từ đĩa. Mặc định: `Ok(IndexCounts::default())`
+    /// (toàn 0). Backend không lưu → caller fallback sang rebuild.
+    async fn stats(&self) -> Result<IndexCounts> {
+        Ok(IndexCounts::default())
     }
     /// Xoá toàn bộ entity data (symbols/next_id/call_records/call_names/files/
     /// version) — dùng khi full re-index. Mặc định: no-op.
