@@ -116,6 +116,25 @@ impl Default for RhaiSection {
 
 // ==================== Policy ====================
 
+/// One `[[include]]` entry in `policy.toml`: pulls a pack into the policy by
+/// reference. Its `policy.fragment.toml` is merged into the policy and its
+/// `rules/` directory is scanned for rhai scripts — without copying the pack's
+/// files into the repository.
+///
+/// Set exactly one of `name` (resolved against a registry) or `path` (a local
+/// pack directory, absolute or relative to the repo root).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IncludeEntry {
+    /// Pack name in the registry (resolved via `--registry` / `CODESMELL_REGISTRY`
+    /// / `~/.config/codesmell/config.toml`).
+    pub name: Option<String>,
+    /// Direct path to a pack directory (absolute, or relative to the repo root).
+    pub path: Option<String>,
+    /// Override the registry source for this include only.
+    pub registry: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Policy {
@@ -124,6 +143,10 @@ pub struct Policy {
     pub rhai: RhaiSection,
     /// Per-rule-id severity overrides (win over each entry's default).
     pub severity: HashMap<String, Severity>,
+    /// Packs pulled in by reference (see [`IncludeEntry`]); serialized as the
+    /// `[[include]]` table in `policy.toml`.
+    #[serde(default, rename = "include")]
+    pub includes: Vec<IncludeEntry>,
 }
 
 impl Default for Policy {
@@ -132,6 +155,7 @@ impl Default for Policy {
             version: 1,
             rhai: RhaiSection::default(),
             severity: HashMap::new(),
+            includes: Vec::new(),
         }
     }
 }
@@ -198,9 +222,28 @@ pub fn load_policy(start: &Path) -> (Policy, Option<PathBuf>) {
     (Policy::default(), None)
 }
 
+/// Merge a single pack fragment (TOML text) into `policy`: append its
+/// `[[rhai.rule]]` entries and let its `[severity]` overrides win. A fragment
+/// that fails to parse is reported loudly and skipped — a silently inactive
+/// security pack is a hole.
+pub(crate) fn merge_fragment_text(policy: &mut Policy, text: &str) -> bool {
+    match toml::from_str::<Policy>(text) {
+        Ok(frag) => {
+            policy.rhai.rules.extend(frag.rhai.rules);
+            for (k, v) in frag.severity {
+                policy.severity.insert(k, v);
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("codesmell: warning: failed to parse pack fragment: {e}; fragment skipped");
+            false
+        }
+    }
+}
+
 /// Merge every `*.policy.toml` fragment under `packs_dir` into `policy`
-/// (sorted by file name for determinism). A fragment that fails to parse is
-/// reported loudly and skipped — a silently inactive security pack is a hole.
+/// (sorted by file name for determinism).
 fn merge_pack_fragments(policy: &mut Policy, packs_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(packs_dir) else {
         return;
@@ -226,20 +269,7 @@ fn merge_pack_fragments(policy: &mut Policy, packs_dir: &Path) {
                 continue;
             }
         };
-        match toml::from_str::<Policy>(&text) {
-            Ok(frag) => {
-                policy.rhai.rules.extend(frag.rhai.rules);
-                for (k, v) in frag.severity {
-                    policy.severity.insert(k, v);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "codesmell: warning: failed to parse pack fragment {}: {e}; fragment skipped",
-                    file.display()
-                );
-            }
-        }
+        merge_fragment_text(policy, &text);
     }
 }
 

@@ -4,11 +4,12 @@
 use codegraph_graph::diff::parse_unified_diff;
 use codesmell::engine::{evaluate, CheckScope};
 use codesmell::index::build_index;
-use codesmell::packs::{self, SECURITY_PACK};
+use codesmell::packs::{self, Registry, SECURITY_PACK};
 use codesmell::policy;
 use codesmell::rhai::RhaiRuleLib;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 async fn index_for(name: &str) -> (PathBuf, codegraph_graph::GraphIndex) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -157,5 +158,170 @@ fn pack_install_copies_files_and_is_idempotent_and_merges() {
         lib.is_ok(),
         "pack scripts failed to compile: {:?}",
         lib.err()
+    );
+}
+
+// A minimal rhai rule used by the include/registry tests.
+const DEMO_RULE: &str = r#"
+const ADVICE = "demo rule for testing includes";
+fn check(sym) {
+    if sym.name == "smell_me" {
+        "found smell_me"
+    }
+}
+"#;
+
+/// `[[include]] path = "<pack>"` pulls a pack's fragment + rules into the
+/// policy without copying files into the repo.
+#[test]
+fn include_local_path_pulls_pack_rules() {
+    let reg = tempfile::tempdir().unwrap();
+    let pack = reg.path().join("demo");
+    std::fs::create_dir_all(pack.join("rules")).unwrap();
+    std::fs::write(
+        pack.join("policy.fragment.toml"),
+        "[[rhai.rule]]\nuse = \"demo.smell\"\n",
+    )
+    .unwrap();
+    std::fs::write(pack.join("rules/demo.smell.rhai"), DEMO_RULE).unwrap();
+
+    let proj = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(proj.path().join(".codesmell")).unwrap();
+    std::fs::write(
+        proj.path().join(".codesmell/policy.toml"),
+        format!(
+            "version = 1\n\n[[include]]\npath = \"{}\"\n",
+            pack.display()
+        ),
+    )
+    .unwrap();
+
+    let (mut policy, found) = policy::load_policy(proj.path());
+    assert!(found.is_some(), "policy not found");
+    packs::expand_includes(&mut policy, proj.path(), None).unwrap();
+
+    assert!(
+        policy
+            .rhai
+            .rules
+            .iter()
+            .any(|r| r.use_script == "demo.smell"),
+        "pack fragment not merged into policy"
+    );
+    let lib = RhaiRuleLib::load(proj.path(), &policy.rhai.rule_dirs)
+        .expect("rule library should compile");
+    assert!(
+        lib.instances(&policy)
+            .iter()
+            .any(|i| i.rule_id == "demo.smell"),
+        "pack rule not instantiated"
+    );
+}
+
+/// A `[[include]]` with `name` but no configured registry must error loudly.
+#[test]
+fn include_name_without_registry_errors() {
+    let mut p = policy::Policy::default();
+    p.includes.push(policy::IncludeEntry {
+        name: Some("x".into()),
+        ..Default::default()
+    });
+    let err = packs::expand_includes(&mut p, Path::new("."), None);
+    assert!(err.is_err(), "expected error when registry is missing");
+}
+
+/// A git registry (here a local `file://` repo) is cloned into the cache by
+/// `update_registry`, then resolved offline by `[[include]] name = ...`.
+#[test]
+fn include_from_git_registry_resolves_offline_after_update() {
+    if Command::new("git").arg("--version").status().is_err() {
+        eprintln!("git not available; skipping git registry test");
+        return;
+    }
+
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("srcrepo");
+    std::fs::create_dir_all(src.join("demo/rules")).unwrap();
+    std::fs::write(
+        src.join("demo/policy.fragment.toml"),
+        "[[rhai.rule]]\nuse = \"demo.smell\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("demo/rules/demo.smell.rhai"), DEMO_RULE).unwrap();
+    std::fs::write(
+        src.join("demo/pack.toml"),
+        "name = \"demo\"\ndescription = \"demo pack\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .current_dir(&src)
+            .args(args)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.email=test@test",
+        "-c",
+        "user.name=test",
+        "add",
+        "-A",
+    ]);
+    git(&[
+        "-c",
+        "user.email=test@test",
+        "-c",
+        "user.name=test",
+        "commit",
+        "-q",
+        "-m",
+        "add pack",
+    ]);
+
+    let url = format!("file://{}", src.canonicalize().unwrap().display());
+    let cache = work.path().join("cache");
+    let reg = Registry::git(url, cache.clone());
+
+    packs::update_registry(&reg).unwrap();
+    assert!(cache.join("demo").is_dir(), "pack not cloned into cache");
+
+    let proj = work.path().join("proj");
+    std::fs::create_dir_all(proj.join(".codesmell")).unwrap();
+    std::fs::write(
+        proj.join(".codesmell/policy.toml"),
+        "version = 1\n\n[[include]]\nname = \"demo\"\n",
+    )
+    .unwrap();
+
+    let (mut policy, found) = policy::load_policy(&proj);
+    assert!(found.is_some());
+    packs::expand_includes(&mut policy, &proj, Some(&reg)).unwrap();
+
+    assert!(
+        policy
+            .rhai
+            .rules
+            .iter()
+            .any(|r| r.use_script == "demo.smell"),
+        "pack fragment not merged from git registry"
+    );
+    let lib = RhaiRuleLib::load(&proj, &policy.rhai.rule_dirs).expect("rule lib compiles");
+    assert!(
+        lib.instances(&policy)
+            .iter()
+            .any(|i| i.rule_id == "demo.smell"),
+        "pack rule not instantiated from git registry"
+    );
+
+    let infos = packs::list_registry_packs(&reg).unwrap();
+    assert!(
+        infos
+            .iter()
+            .any(|p| p.name == "demo" && p.version.as_deref() == Some("0.1.0")),
+        "pack metadata not listed: {infos:?}"
     );
 }
