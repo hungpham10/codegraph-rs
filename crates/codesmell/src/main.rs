@@ -1,15 +1,17 @@
 //! CodeSmell CLI — a team convention linter (like eslint/clippy).
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::io::Read;
+use std::path::PathBuf;
+
 use codegraph_graph::diff::parse_unified_diff;
 use codesmell::engine::{evaluate, CheckScope};
 use codesmell::guide;
 use codesmell::index::build_index;
 use codesmell::packs;
+use codesmell::packs::Registry;
 use codesmell::policy;
 use codesmell::rhai::RhaiRuleLib;
-use std::io::Read;
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -17,6 +19,10 @@ use std::path::PathBuf;
     about = "Team convention linter for maintainable, LLM-friendly code"
 )]
 struct Cli {
+    /// Codesmell pack registry (path or git URL). Overrides CODESMELL_REGISTRY
+    /// and ~/.config/codesmell/config.toml. Used by `[[include]]` in policy.toml.
+    #[arg(long)]
+    registry: Option<String>,
     #[command(subcommand)]
     command: Cmd,
 }
@@ -50,7 +56,7 @@ enum Cmd {
     },
     /// Print the effective resolved policy as TOML.
     Policy,
-    /// Manage built-in policy packs.
+    /// Manage built-in policy packs and the pack registry.
     Pack {
         #[command(subcommand)]
         command: PackCmd,
@@ -59,13 +65,20 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum PackCmd {
-    /// List built-in packs.
+    /// List built-in packs and (if a registry is configured) registry packs.
     List,
-    /// Copy a pack's scripts + fragment into `.codesmell/` (idempotent).
+    /// Copy a built-in pack's scripts + fragment into `.codesmell/` (idempotent).
     Add {
         /// Pack name from `codesmell pack list`.
         name: String,
     },
+    /// Pre-fetch a registry pack into the local cache (no files copied to repo).
+    Pull {
+        /// Pack name from `codesmell pack list`.
+        name: String,
+    },
+    /// Refresh the registry cache (git pull; no-op for local path registries).
+    Update,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -86,19 +99,13 @@ async fn main() -> anyhow::Result<()> {
             diff,
             format,
             fail_on,
-        } => check(&root, paths, diff, format, fail_on).await,
+        } => {
+            let registry = packs::resolve_registry(cli.registry.as_deref()).ok();
+            check(&root, paths, diff, format, fail_on, registry.as_ref()).await
+        }
         Cmd::Guide { path } => {
-            let (p, _) = policy::load_policy(&root);
-            let lib = RhaiRuleLib::load(&root, &p.rhai.rule_dirs)
-                .map_err(|e| {
-                    eprintln!("codesmell: warning: {e}");
-                })
-                .ok();
-            if let Some(path) = path {
-                println!("# conventions effective for: {}", path.display());
-            }
-            println!("{}", guide::render_guide(&p, lib.as_ref()));
-            Ok(())
+            let registry = packs::resolve_registry(cli.registry.as_deref()).ok();
+            guide(&root, path, registry.as_ref())
         }
         Cmd::Init { pack } => init(&root, pack.as_deref()),
         Cmd::Policy => {
@@ -110,7 +117,10 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::Pack { command } => pack(&root, command),
+        Cmd::Pack { command } => {
+            let registry = packs::resolve_registry(cli.registry.as_deref());
+            pack(&root, command, registry)
+        }
     }
 }
 
@@ -120,14 +130,16 @@ async fn check(
     diff: Option<PathBuf>,
     format: OutFormat,
     fail_on: policy::Severity,
+    registry: Option<&Registry>,
 ) -> anyhow::Result<()> {
-    let (policy, found) = policy::load_policy(root);
+    let (mut policy, found) = policy::load_policy(root);
     if found.is_none() {
         eprintln!(
             "codesmell: no .codesmell/policy.toml found; using built-in defaults. \
              Run `codesmell init` to create one."
         );
     }
+    packs::expand_includes(&mut policy, root, registry)?;
 
     let scope = if let Some(dp) = diff {
         let text = if dp.as_os_str() == "-" {
@@ -165,6 +177,25 @@ async fn check(
     if should_fail {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+fn guide(
+    root: &std::path::Path,
+    path: Option<PathBuf>,
+    registry: Option<&Registry>,
+) -> anyhow::Result<()> {
+    let (mut p, _) = policy::load_policy(root);
+    packs::expand_includes(&mut p, root, registry)?;
+    let lib = RhaiRuleLib::load(root, &p.rhai.rule_dirs)
+        .map_err(|e| {
+            eprintln!("codesmell: warning: {e}");
+        })
+        .ok();
+    if let Some(path) = path {
+        println!("# conventions effective for: {}", path.display());
+    }
+    println!("{}", guide::render_guide(&p, lib.as_ref()));
     Ok(())
 }
 
@@ -222,11 +253,31 @@ fn init(root: &std::path::Path, pack: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn pack(root: &std::path::Path, command: PackCmd) -> anyhow::Result<()> {
+fn pack(
+    root: &std::path::Path,
+    command: PackCmd,
+    registry: anyhow::Result<Registry>,
+) -> anyhow::Result<()> {
     match command {
         PackCmd::List => {
+            println!("Built-in packs:");
             for p in packs::builtin_packs() {
-                println!("{} — {}", p.name, p.description);
+                println!("  {} — {}", p.name, p.description);
+            }
+            match &registry {
+                Ok(reg) => {
+                    println!("\nRegistry packs ({}):", reg.describe());
+                    for info in packs::list_registry_packs(reg)? {
+                        let ver = info.version.map(|v| format!(" (v{v})")).unwrap_or_default();
+                        println!("  {} — {}{}", info.name, info.description, ver);
+                    }
+                }
+                Err(_) => {
+                    println!(
+                        "\n(No registry configured; set --registry, CODESMELL_REGISTRY, or \
+                         ~/.config/codesmell/config.toml to list registry packs.)"
+                    );
+                }
             }
             Ok(())
         }
@@ -241,5 +292,16 @@ fn pack(root: &std::path::Path, command: PackCmd) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
+        PackCmd::Pull { name } => {
+            let reg = registry?;
+            packs::pull_pack(&reg, &name)?;
+            Ok(())
+        }
+        PackCmd::Update => {
+            let reg = registry?;
+            packs::update_registry(&reg)?;
+            println!("codesmell: registry updated.");
+            Ok(())
+        }
     }
 }

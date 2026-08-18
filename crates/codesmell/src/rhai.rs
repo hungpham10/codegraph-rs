@@ -25,7 +25,7 @@ use codegraph_graph::GraphIndex;
 use rhai::{Array, Dynamic, Engine, Map, Scope, AST};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::engine::{collect_symbols, rel_path, CheckScope, Violation};
 use crate::glob::GlobSet;
@@ -107,7 +107,11 @@ impl RhaiRuleLib {
             }
         }
         for dir in dirs {
-            let abs = root.join(dir);
+            let abs = if Path::new(dir).is_absolute() {
+                PathBuf::from(dir)
+            } else {
+                root.join(dir)
+            };
             let Ok(entries) = std::fs::read_dir(&abs) else {
                 continue;
             };

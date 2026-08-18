@@ -15,6 +15,7 @@ toml = "0.8"
 camino = { workspace = true }
 globset = { workspace = true }
 anyhow = { workspace = true }
+dirs = "5"
 clap = { workspace = true }
 tokio = { workspace = true }
 rhai = { version = "1", features = ["sync"] }
