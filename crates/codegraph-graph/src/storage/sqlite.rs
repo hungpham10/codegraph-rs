@@ -42,7 +42,9 @@ use codegraph_core::{FileInfo, Symbol};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
-use super::{EMPTY, IndexCounts, Result, Storage, StorageError, Tx, TxOp, decode_vector, encode_vector};
+use super::{
+    EMPTY, IndexCounts, Result, Storage, StorageError, Tx, TxOp, decode_vector, encode_vector,
+};
 use crate::embeddings::resolve_vss_extensions;
 
 fn db_err(e: sqlx::Error) -> StorageError {

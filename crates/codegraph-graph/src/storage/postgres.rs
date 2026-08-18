@@ -757,12 +757,13 @@ impl Storage for PostgresStorage {
     }
 
     async fn stats(&self) -> Result<IndexCounts> {
-        let row: Option<(i64, i64, i64, i64, i64)> =
-            sqlx::query_as("SELECT symbols, chains, edges, files, next_id FROM sg_stats WHERE repo_id = $1")
-                .bind(self.repo_id as i64)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db_err)?;
+        let row: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT symbols, chains, edges, files, next_id FROM sg_stats WHERE repo_id = $1",
+        )
+        .bind(self.repo_id as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
         match row {
             Some((symbols, chains, edges, files, next_id)) => Ok(IndexCounts {
                 symbols: symbols as u64,
