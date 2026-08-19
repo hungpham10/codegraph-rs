@@ -76,7 +76,7 @@ finds every `*Service` class), and `exact`. Use `total` + `offset` to page.
 
 ## Large indexes: timeout + resume
 
-On very large indexes a broad search (`codegraph_search`, `codegraph_search_symbol`,
+On very large indexes a broad search (`codegraph_search_symbol`,
 `codegraph_search_by_annotation`, `codegraph_search_flow`, `codegraph_references`,
 `codegraph_search_by_call`, `codegraph_list_classes`, `codegraph_list_interfaces`)
 can exceed its time budget. All of these tools accept `timeout_ms` (default `20000`;
@@ -105,8 +105,6 @@ times out yields a fresh resume id.
   response includes a `resume` id in addition to `total`/`has_more` — pass it
   on the next call (with a new `offset`) to page further **without re-scanning**
   the index.
-- `codegraph_search` on success returns a plain array (no `resume` field); if
-  you need more results, narrow the query or use `codegraph_search_symbol`.
 
 ## Trust the results
 
@@ -115,7 +113,7 @@ that's slower, less accurate, and wastes context.
 
 ## Output detail & token usage
 
-Symbols in list-tool responses (`codegraph_search`, `codegraph_callers`,
+Symbols in list-tool responses (`codegraph_callers`,
 `codegraph_callees`, `codegraph_impact`, `codegraph_search_symbol`,
 `codegraph_search_by_annotation`, `codegraph_list_classes`,
 `codegraph_list_interfaces`, and the symbol embedded in `codegraph_flow`) are

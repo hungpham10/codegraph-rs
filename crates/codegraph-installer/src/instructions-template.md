@@ -1,7 +1,7 @@
 # CodeGraph
 
 This project has a CodeGraph MCP server configured. CodeGraph is a tree-sitter
-knowledge graph of every symbol, edge, and file in the workspace. Reads are
+semantic graph of every symbol and call chain in the workspace. Reads are
 sub-millisecond and return structural information grep cannot.
 
 ## When to prefer codegraph
@@ -12,11 +12,12 @@ for literal text queries.
 
 | Question | Tool |
 |---|---|
-| "Where is X defined?" | `codegraph_search` |
+| "Where is X defined?" | `codegraph_search_symbol` |
+| "Show me X by id / exact name" | `codegraph_symbol` |
 | "What calls Y?" | `codegraph_callers` |
 | "What does Y call?" | `codegraph_callees` |
 | "What would break if I changed Z?" | `codegraph_impact` |
-| "Show me Y's signature / source" | `codegraph_node` |
+| "Show me Y's call chain" | `codegraph_flow` |
 | "Give me focused context for a task" | `codegraph_context` |
 | "What files exist under path/" | `codegraph_files` |
 | "Is the index healthy?" | `codegraph_status` |
@@ -26,9 +27,12 @@ for literal text queries.
 - **Trust codegraph results.** They come from a full AST parse. Do NOT
   re-verify with grep.
 - **Don't grep first** when looking up a symbol by name.
-- **`codegraph_context` is one call** — don't chain search + node yourself.
+- **`codegraph_context` is one call** — don't chain search + symbol yourself.
+- **Duplicate names** return `ambiguous: true` — retry with the numeric `id`.
 
-## If `.codegraph/` doesn't exist
+## If no index exists yet
 
-The MCP server returns "not initialized." Run `codegraph init -i` to build
-the index.
+Query tools refuse until the session is bound. Call
+`codegraph_init {"path": ...}` (non-blocking — does NOT index by default),
+then `codegraph_index {}` to build the index. On the CLI, `codegraph init`
+creates `.codegraph/` and indexes in one step.

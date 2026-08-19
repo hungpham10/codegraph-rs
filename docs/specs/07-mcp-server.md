@@ -1,79 +1,72 @@
-# Spec 07 — MCP server (stdio JSON-RPC)
+# Spec 07 — MCP server
 
-**État**: pending
+**Status**: ✅ done — implemented in `crates/codegraph-mcp` on the official
+Rust SDK (`rmcp` v3.1.x). The hand-rolled JSON-RPC design was replaced by the
+SDK once it matured; the 9-tool surface grew to 27.
 
-## Objectif
-
-Serveur MCP minimaliste sur stdio. Pas de SDK Rust officiel mature → hand-roll JSON-RPC 2.0 + framing MCP. ~300 LOC.
-
-## Protocole
-
-- Transport: stdin/stdout. Framing JSON-RPC en LSP-style? Non — MCP utilise une ligne JSON par message (LSP-style headers seulement pour le mode HTTP). Pour stdio: une ligne `\n`-terminée par message.
-- Méthodes obligatoires:
-  - `initialize` → renvoie `serverInfo`, `capabilities.tools`, `instructions` (le contenu de `server-instructions.md`).
-  - `initialized` (notification, no-op côté serveur).
-  - `tools/list` → array de tools.
-  - `tools/call` → invoque le tool.
-  - `ping` → `{}`.
-  - `shutdown` (optionnel selon agent).
-
-## Tools
-
-| Nom MCP | Handler | Args |
-|---|---|---|
-| `codegraph_search` | `db.search_nodes` | `{ query, limit?, kind? }` |
-| `codegraph_node` | `db.node_by_id` ou by_name | `{ id?, name? }` |
-| `codegraph_callers` | `traversal.callers` | `{ node, depth? }` |
-| `codegraph_callees` | `traversal.callees` | `{ node, depth? }` |
-| `codegraph_impact` | `traversal.impact_radius` | `{ node, max_depth? }` |
-| `codegraph_context` | `context::build` | `{ query, depth?, include_source?, format? }` |
-| `codegraph_explore` | `context::explore` | `{ paths[], depth? }` |
-| `codegraph_files` | `db.files_under` | `{ path? }` |
-| `codegraph_status` | `db.stats` | `{}` |
-
-Chaque tool a un JSON Schema `inputSchema` exposé dans `tools/list`.
+Full operator reference: [docs/mcp.md](../mcp.md). Agent-facing guide embedded
+in the binary: [docs/codegraph.md](../codegraph.md).
 
 ## Architecture
 
-```rust
-pub struct McpServer {
-    db: Arc<Db>,
-    traversal: Arc<Traversal<'static>>, // ... ou re-create par call
-}
+`CodegraphServer` implements `rmcp::handler::server::ServerHandler` and holds
+a `Session` (root binding + index handle + detail/format defaults), usage
+telemetry, and a `SearchSessionStore` for resumable search cursors.
 
-impl McpServer {
-    pub async fn run(self, stdin: impl AsyncBufRead, stdout: impl AsyncWrite) -> Result<()>;
-}
-```
+- `get_info()` advertises `enable_tools()` + instructions from
+  `SERVER_INSTRUCTIONS` — `include_str!("../../../docs/codegraph.md")`, so
+  the shipped guide and the repo doc are the same file.
+- `list_tools()` returns the static `ToolDef` list (`tools.rs::tool_defs`) —
+  single source of truth — with `ttl_ms(0)` + `cache_scope(Public)`
+  (SEP-2549 / protocol 2026-07-28).
+- `call_tool()` rejects unknown names as `method_not_found`, then dispatches:
+  admin tools (`init`/`deinit`/`index`) on the session; queries through
+  `GraphApi`; the sandbox trio directly over `SharedGraphIndex` + sboxes.
 
-Boucle:
-1. `read_line` → parse `JsonRpcMessage` (request/notification).
-2. Dispatch async via `tokio::spawn` (un task par call — concurrence).
-3. Réponse écrite avec `Mutex<stdout>` pour sérialisation des writes.
+## Transports
 
-## Server instructions
+- **stdio** (`stdio.rs`) — `serve(rmcp::transport::io::stdio())`; one process
+  = one session. Startup `--path` is only a pre-seed (Claude Desktop starts
+  from `/` — the empty session binds via `codegraph_init`).
+- **Streamable HTTP** (`http.rs`, feature `http`) — `StreamableHttpService`
+  on axum, mounted at `/` and `/mcp`; a factory builds a fresh
+  `CodegraphServer` per `mcp-session-id`; DNS-rebinding protection via
+  `with_allowed_hosts`; `with_legacy_session_mode(true)` keeps sessions for
+  pre-2026-07-28 clients. Known TODOs: bearer auth (`--api-key` parsed but
+  unenforced) and `/health`//`/metrics` endpoints (flag accepted, not
+  mounted).
 
-`include_str!("server-instructions.md")` — contenu identique à `archive/src/mcp/server-instructions.ts`. Renvoyé dans `initialize.result.instructions`.
+## Tools (27)
 
-À garder en sync avec `instructions-template` de l'installer (spec 08).
+Session/admin: `codegraph_init`, `codegraph_deinit`, `codegraph_index`,
+`codegraph_status`, `codegraph_query_usage_report`.
+Search: `codegraph_search_symbol` (contains/prefix/suffix/exact + opt-in
+semantic/hybrid), `codegraph_symbol`, `codegraph_search_by_annotation`,
+`codegraph_search_by_call`, `codegraph_references`, `codegraph_search_flow`,
+`codegraph_files`, `codegraph_dependencies`.
+Graph: `codegraph_callers`, `codegraph_callees`, `codegraph_impact`,
+`codegraph_flow`, `codegraph_class_methods`, `codegraph_class`,
+`codegraph_list_classes`, `codegraph_list_interfaces`,
+`codegraph_function_scope`, `codegraph_context`.
+Diff/sandbox: `codegraph_diff`, `codegraph_sandbox`,
+`codegraph_diff_simulate`, `codegraph_origin_simulate` — full contract in
+[docs/sandbox.md](../sandbox.md); engine in `codegraph-sboxes`.
 
-## Erreurs
+## Token-lean output conventions
 
-JSON-RPC 2.0 standard:
-- `-32700` parse error
-- `-32600` invalid request
-- `-32601` method not found
-- `-32602` invalid params
-- `-32603` internal error
-- `-32000..-32099` server-defined (NotInitialized → `-32001`)
+- `detail` minimal/medium/verbose (session default at `codegraph_init`,
+  per-call override) and `format` minimize/medium (startup → session → call).
+- `minimize` (default): symbols as fixed 14-element positional arrays;
+  `medium`: keyed objects with `omit_defaults` (absent = default);
+  paths relativized to the workspace root.
+- Broad searches take `timeout_ms` + `resume`: on timeout the tool errors
+  with a resume id; retry the same call + id to continue (short-lived,
+  in-process cursors in `SearchSessionStore`).
 
 ## Tests
 
-- Integration: spawn `codegraph serve --mcp` sur fixture indexé, écris séquence `initialize` → `tools/call codegraph_search`, assert response.
-- Pas de SDK client — fabrique requêtes JSON à la main.
-
-## Pièges
-
-- `tracing_subscriber` doit écrire sur **stderr** (jamais stdout — corrompt le protocole).
-- Si DB pas init (`.codegraph/` absent): `initialize` OK mais tous tools renvoient `-32001 NotInitialized` avec message guidant `codegraph init`.
-- Multi-instance: lockfile sur `.codegraph/db.sqlite` pour éviter writer concurrent.
+Inline unit tests in `tools.rs` cover the formatting helpers (detail/format
+parsing, positional-array schema index-by-index, `omit_defaults`,
+relativization, tools/list cache fields); `http.rs` has an axum `oneshot`
+smoke test asserting `initialize` returns `serverInfo.name = "codegraph"`.
+Query behavior is tested one layer down in `crates/codegraph-api`.

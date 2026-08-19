@@ -35,7 +35,8 @@ use rmcp::{ErrorData as McpError, RoleServer};
 use serde_json::{json, Value};
 
 /// Hướng dẫn sử dụng tools — client render trong instructions sau `initialize`.
-pub const SERVER_INSTRUCTIONS: &str = include_str!("server-instructions.md");
+/// Nguồn chân lý nằm ở `docs/codegraph.md` (gom chung tài liệu trong docs/).
+pub const SERVER_INSTRUCTIONS: &str = include_str!("../../../docs/codegraph.md");
 pub const SERVER_NAME: &str = "codegraph";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 

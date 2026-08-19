@@ -1,0 +1,39 @@
+version = 1
+
+[rhai]
+rule_dirs = [".codesmell/rules"]
+
+# --- style ---
+[[rhai.rule]]
+use = "style.function.max_lines"
+params = { max = 30 }
+
+[[rhai.rule]]
+use = "style.function.max_parameters"
+params = { max = 4 }
+
+[[rhai.rule]]
+use = "style.function.max_nesting"
+params = { max = 4 }
+
+[[rhai.rule]]
+use = "style.function.max_complexity"
+params = { max = 10 }
+
+[[rhai.rule]]
+use = "style.naming"
+params = { rules = [{ kind = "method", pattern = "*Async", signature_contains = "async" }] }
+
+# --- architecture ---
+[[rhai.rule]]
+use = "architecture.boundary"
+params = { layers = [{ name = "controller", paths = ["src/controllers/**"] }, { name = "service", paths = ["src/services/**"] }, { name = "repository", paths = ["src/repositories/**"] }], deny = ["controller -> repository"] }
+
+# --- testing ---
+[[rhai.rule]]
+use = "testing.missing_test"
+params = { require = true, test_paths = ["tests/**", "**/test_*.rs", "**/*_test.rs"], selectors = [{ layers = ["service"] }, { min_lines = 20 }] }
+
+[severity]
+"architecture.boundary" = "blocking"
+"testing.missing_test" = "required"
