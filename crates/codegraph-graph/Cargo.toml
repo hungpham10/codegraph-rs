@@ -10,6 +10,7 @@ warnings = "deny"
 
 [dependencies]
 codegraph-core = { path = "../codegraph-core" }
+dirs = { workspace = true }
 
 # SQLite-backed Db (moved here from the removed codegraph-db crate).
 rusqlite = { workspace = true }

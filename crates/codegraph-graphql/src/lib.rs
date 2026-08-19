@@ -207,6 +207,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mermaid_gate_enforced() {
+        // Không bật --mermaid: mermaid phải báo lỗi gate (không gọi index).
+        let app = build_app(&cfg(false), make_state(false));
+        let (status, json) = post_graphql(&app, r#"{ mermaid(id: "1", kind: FLOW) }"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let msg = json["errors"][0]["message"].as_str().unwrap();
+        assert!(msg.contains("Mermaid"), "expected gate error, got: {msg}");
+
+        // Bật --mermaid: vượt gate, sau đó lỗi do chưa có index (khác gate).
+        let app2 = build_app(&cfg(true), make_state(true));
+        let (_status, json2) = post_graphql(&app2, r#"{ mermaid(id: "1", kind: FLOW) }"#).await;
+        let msg2 = json2["errors"][0]["message"].as_str().unwrap();
+        assert!(
+            !msg2.contains("Mermaid"),
+            "gate should be off when --mermaid set, got: {msg2}"
+        );
+    }
+
+    #[tokio::test]
     async fn api_key_required_when_set() {
         let mut c = cfg(false);
         c.api_key = Some("secret".to_string());

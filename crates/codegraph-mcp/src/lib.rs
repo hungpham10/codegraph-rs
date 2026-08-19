@@ -47,40 +47,52 @@ pub struct CodegraphServer {
     /// Session store cho search resumable — sống qua nhiều tool call để resume
     /// id (trả về khi timeout) có thể retry được.
     search_sessions: Arc<SearchSessionStore>,
+    /// Bật output Mermaid cho `codegraph_mermaid` (diagram visualization). Tắt →
+    /// tool trả lỗi rõ ràng. Tương ứng flag `--mermaid` ở CLI.
+    mermaid: bool,
 }
 
 impl CodegraphServer {
     /// Server với session trống — `codegraph_init` sẽ bind root trong phiên.
     pub fn new() -> Self {
-        Self::new_with_format(OutputStyle::default())
+        Self::new_with_format(OutputStyle::default(), false)
     }
 
     /// `new()` nhưng seed output format từ CLI lúc khởi động
-    /// (`codegraph serve --mcp --format=...`).
-    pub fn new_with_format(format: OutputStyle) -> Self {
+    /// (`codegraph serve --mcp --format=...`), và flag `--mermaid`.
+    pub fn new_with_format(format: OutputStyle, mermaid: bool) -> Self {
         Self {
             session: Session::new_with_format(format),
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
             search_sessions: Arc::new(SearchSessionStore::new()),
+            mermaid,
         }
     }
 
     /// Pre-seed root từ `--path` lúc khởi động (tương đương đã `codegraph_init`
     /// với root đó, không index thêm). Giữ CLI/watcher flow không vỡ.
     pub async fn with_root(root: camino::Utf8PathBuf) -> anyhow::Result<Self> {
-        Self::with_root_and_format(root, OutputStyle::default()).await
+        Self::with_root_and_format(root, OutputStyle::default(), false).await
     }
 
-    /// `with_root()` nhưng seed output format từ CLI lúc khởi động.
+    /// `with_root()` nhưng seed output format và flag `--mermaid` từ CLI lúc
+    /// khởi động.
     pub async fn with_root_and_format(
         root: camino::Utf8PathBuf,
         format: OutputStyle,
+        mermaid: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             session: Session::with_root_and_format(root, format).await?,
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
             search_sessions: Arc::new(SearchSessionStore::new()),
+            mermaid,
         })
+    }
+
+    /// Flag `--mermaid` của server (gate cho `codegraph_mermaid`).
+    pub fn mermaid_enabled(&self) -> bool {
+        self.mermaid
     }
 
     /// Dispatch một tool call đã verify tên. Trả [`ToolOutput::Text`] cho thành
@@ -213,7 +225,18 @@ impl CodegraphServer {
                 codegraph_api::tools::dispatch_origin_simulate(&root, sgi.clone(), args.clone())
                     .await
             }
-            _ => tools::dispatch_with_api(&api, &root, detail, format, name, args).await,
+            _ => {
+                tools::dispatch_with_api(
+                    &api,
+                    &root,
+                    detail,
+                    format,
+                    self.mermaid_enabled(),
+                    name,
+                    args,
+                )
+                .await
+            }
         };
 
         match dispatch {

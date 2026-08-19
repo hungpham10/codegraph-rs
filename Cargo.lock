@@ -830,6 +830,7 @@ dependencies = [
  "codegraph-extract",
  "criterion",
  "dashmap",
+ "dirs 5.0.1",
  "fastembed",
  "libsqlite3-sys",
  "lmdb-rkv",

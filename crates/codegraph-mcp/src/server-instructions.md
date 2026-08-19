@@ -29,6 +29,7 @@ file-reading subtask — codegraph IS the index.
 | what does this call directly? | `codegraph_callees` |
 | change-impact radius | `codegraph_impact` |
 | call chain (markers + callees + sites) | `codegraph_flow` |
+| diagram (Mermaid) of flow/callers/callees/impact | `codegraph_mermaid` (needs `--mermaid`) |
 | functions whose chain matches a pattern | `codegraph_search_flow` |
 | composed context for a symbol/topic | `codegraph_context` |
 | who calls library call `foo`? | `codegraph_references` |
