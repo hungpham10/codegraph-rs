@@ -426,7 +426,7 @@ async fn cmd_serve(
         } else {
             Some(api_key.join(","))
         };
-        let use_root = !is_fs_root(&root);
+        let use_root = !is_fs_root(root);
         let cfg = codegraph_graphql::ServeConfig {
             addr,
             api_key,
@@ -456,7 +456,7 @@ async fn cmd_serve(
         } else {
             allowed_hosts.extend(allow_host);
         }
-        let use_root = !is_fs_root(&root);
+        let use_root = !is_fs_root(root);
         if use_root && is_initialized(root) {
             watcher::spawn(root.to_path_buf(), storage_dsn(root));
         }
@@ -482,7 +482,7 @@ async fn cmd_serve(
     // like Claude Desktop launch servers with cwd=/ and no `--path` — the root
     // resolving to `/` is NOT an error anymore: we just start with an EMPTY
     // session and let the agent bind the project path through the tool.
-    let use_root = !is_fs_root(&root);
+    let use_root = !is_fs_root(root);
     let initialized = use_root && is_initialized(root);
     let dsn = if initialized { storage_dsn(root) } else { None };
     if initialized {
