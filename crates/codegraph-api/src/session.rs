@@ -322,13 +322,19 @@ fn normalize_root(path: Utf8PathBuf) -> Result<Utf8PathBuf> {
         .map_err(|e| anyhow!("cannot resolve {}: {e}", path))?;
     let canon =
         Utf8PathBuf::from_path_buf(canon).map_err(|p| anyhow!("path is not valid UTF-8: {p:?}"))?;
-    if canon.as_str() == "/" {
+    if is_fs_root(&canon) {
         return Err(anyhow!(
-            "refusing to use `/` as the workspace root \
+            "refusing to use the filesystem root as the workspace root \
              (MCP hosts may launch servers from `/`). Pass an absolute project path."
         ));
     }
     Ok(canon)
+}
+
+/// Đường dẫn có phải là gốc filesystem không (`/` trên Unix, `C:\` trên
+/// Windows). Dùng `parent().is_none()` cho cross-platform (không so chuỗi `/`).
+fn is_fs_root(p: &Utf8Path) -> bool {
+    p.parent().is_none()
 }
 
 /// Full re-index: mở index theo backend config → `Orchestrator::index_all`

@@ -41,6 +41,7 @@ use crate::{CodegraphServer, OutputStyle};
 /// Không có — bind thất bại / lỗi serve trả `Err` qua `anyhow`.
 pub async fn serve_http(
     format: OutputStyle,
+    mermaid: bool,
     addr: SocketAddr,
     allowed_hosts: Vec<String>,
     _enable_observability: bool,
@@ -54,7 +55,7 @@ pub async fn serve_http(
         // Per SEP-2567 request 2026-07-28 vẫn luôn chạy stateless.
         .with_legacy_session_mode(true);
     let service = StreamableHttpService::new(
-        move || Ok(CodegraphServer::new_with_format(format)),
+        move || Ok(CodegraphServer::new_with_format(format, mermaid)),
         session_manager,
         config,
     );

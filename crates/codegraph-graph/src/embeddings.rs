@@ -186,16 +186,16 @@ fn default_cache_dir() -> Option<PathBuf> {
     expand_tilde("~/.cache/codegraph/embeddings")
 }
 
-/// Expand `~` thành home dir (best-effort). Trả `Some` nếu không bắt đầu bằng `~`.
+/// Expand `~` thành home dir (best-effort, cross-platform). Trả `Some` nếu
+/// không bắt đầu bằng `~`. Dùng `dirs::home_dir()` để lấy home đúng trên mọi OS
+/// (Windows: `USERPROFILE`/`HOMEDRIVE`, macOS/Linux: `$HOME`).
 fn expand_tilde(path: &str) -> Option<PathBuf> {
     if !path.starts_with('~') {
         return Some(PathBuf::from(path));
     }
-    let home = std::env::var("HOME")
-        .ok()
-        .or_else(|| std::env::var("USERPROFILE").ok())?;
+    let home = dirs::home_dir()?;
     let rest = path.strip_prefix('~').unwrap_or("");
-    Some(PathBuf::from(home).join(rest.trim_start_matches('/')))
+    Some(home.join(rest.trim_start_matches('/')))
 }
 
 /// Suffix file extension của sqlite-vss theo OS (`.dylib` / `.so` / `.dll`).

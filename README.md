@@ -171,6 +171,7 @@ report, plus the session tools `codegraph_init` / `codegraph_deinit` /
 | `codegraph_index` | Full re-index of the bound workspace |
 | `codegraph_sandbox` | Compile a function group to machine code and run it against Rhai mocks |
 | `codegraph_diff` | Draft report of what an MR/patch would change in the graph |
+| `codegraph_mermaid` | Render a Mermaid diagram (flow / callers / callees / impact) — the visual variant of the diagram queries; requires the server to start with `--mermaid` |
 
 Read the [server instructions](crates/codegraph-mcp/src/server-instructions.md) that ship with the binary — they tell your agent when to reach for which tool.
 

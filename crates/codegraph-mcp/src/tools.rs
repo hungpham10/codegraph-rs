@@ -83,6 +83,15 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["node"] }),
         ),
         tool(
+            "codegraph_mermaid",
+            "Render a Mermaid diagram (flowchart / graph) for a symbol — the visual variant of the diagram queries. `kind`: 'flow' (control-flow chain), 'callers' (upstream, transitive), 'callees' (downstream), or 'impact' (transitive callers). `depth` limits BFS hops for callers/callees/impact (default 1; ignored for flow). Requires the server to start with --mermaid; otherwise the tool returns an error.",
+            json!({ "type": "object", "properties": {
+                "node": { "type": "integer", "description": "Symbol id to render." },
+                "kind": { "type": "string", "enum": ["flow", "callers", "callees", "impact"], "default": "flow" },
+                "depth": { "type": "integer", "default": 1, "description": "BFS hops for callers/callees/impact (ignored for flow)." }
+            }, "required": ["node"] }),
+        ),
+        tool(
             "codegraph_search_flow",
             "Find functions whose call chain contains a pattern. Pattern = comma-separated tokens: numeric ids, marker names (LOOP, IF_TRUE, IF_FALSE, BRANCH_END, RETURN, LOOP_BACK, SWITCH_CASE, SWITCH_END, BREAK, CONTINUE, THROW) or symbol names. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
@@ -275,10 +284,44 @@ pub async fn dispatch_with_api(
     root: &Utf8Path,
     session_detail: DetailLevel,
     session_format: OutputStyle,
+    mermaid: bool,
     name: &str,
     args: Value,
 ) -> Result<String> {
     match name {
+        "codegraph_mermaid" => {
+            if !mermaid {
+                return Err(Error::Invalid(
+                    "Mermaid output is disabled. Start the MCP server with --mermaid to enable diagram rendering.".into(),
+                ));
+            }
+            let node = args.get("node").and_then(|v| v.as_u64()).ok_or_else(|| {
+                Error::Invalid("codegraph_mermaid requires `node` (symbol id)".into())
+            })?;
+            let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("flow");
+            let depth = args
+                .get("depth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as u32;
+            let diagram = match kind_str {
+                "callers" => codegraph_api::mermaid::callers_mermaid(api, node, depth).await,
+                "callees" => codegraph_api::mermaid::callees_mermaid(api, node, depth).await,
+                "impact" => codegraph_api::mermaid::impact_mermaid(api, node, depth).await,
+                _ => {
+                    let flow = api
+                        .flow(node)
+                        .await
+                        .map_err(|e| Error::Invalid(e.to_string()))?;
+                    Ok(codegraph_api::mermaid::control_flow(&flow))
+                }
+            }
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+            emit_value(
+                root.as_str(),
+                json!({ "node": node, "kind": kind_str, "mermaid": diagram }),
+            )
+        }
         "codegraph_symbol" => {
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);

@@ -120,3 +120,17 @@ pub enum TypeKind {
     Interface,
     Enum,
 }
+
+// ==================== Mermaid kind ====================
+
+/// Loại diagram Mermaid cho resolver `mermaid(id, kind, depth)` — render biến
+/// thể hình ảnh của các query diagram (`flow` / `callers` / `callees` / `impact`).
+/// Chỉ hoạt động khi server bật `--mermaid`.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+#[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
+pub enum MermaidKind {
+    Flow,
+    Callers,
+    Callees,
+    Impact,
+}

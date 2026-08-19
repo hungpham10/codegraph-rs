@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>codegraph</id>
+    <version>1.2.0</version>
+    <title>codegraph</title>
+    <authors>Cleboost</authors>
+    <projectUrl>https://github.com/Cleboost/codegraph-rs</projectUrl>
+    <licenseUrl>https://github.com/Cleboost/codegraph-rs/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Local-first code intelligence: tree-sitter knowledge graph + MCP server. Indexes a codebase locally and exposes it over an MCP server and GraphQL API.</description>
+    <summary>Local-first code intelligence (MCP server).</summary>
+    <tags>codegraph mcp code-intelligence tree-sitter graph</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

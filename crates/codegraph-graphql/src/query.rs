@@ -159,6 +159,47 @@ impl Query {
             .map_err(|e| async_graphql::Error::new(e.to_string()))
     }
 
+    /// Diagram Mermaid cho một symbol — biến thể hình ảnh của `flow` /
+    /// `callers` / `callees` / `impact`. `kind` chọn loại diagram; `depth` (mặc
+    /// định 1) giới hạn BFS hop cho callers/callees/impact (bị bỏ qua với flow).
+    /// Chỉ hoạt động khi server bật `--mermaid`; tắt → lỗi rõ ràng.
+    async fn mermaid(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        kind: MermaidKind,
+        depth: Option<i32>,
+    ) -> GqlResult<String> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        if !state.mermaid {
+            return Err(async_graphql::Error::new(
+                "Mermaid output is disabled. Start the GraphQL server with --mermaid to enable diagram rendering.",
+            ));
+        }
+        let id = parse_id(&id)?;
+        let depth = depth.unwrap_or(1).max(1) as u32;
+        let api = api_for(ctx).await?;
+        let diagram = match kind {
+            MermaidKind::Flow => {
+                let flow = api
+                    .flow(id)
+                    .await
+                    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+                codegraph_api::mermaid::control_flow(&flow)
+            }
+            MermaidKind::Callers => codegraph_api::mermaid::callers_mermaid(&api, id, depth)
+                .await
+                .map_err(|e| async_graphql::Error::new(e.to_string()))?,
+            MermaidKind::Callees => codegraph_api::mermaid::callees_mermaid(&api, id, depth)
+                .await
+                .map_err(|e| async_graphql::Error::new(e.to_string()))?,
+            MermaidKind::Impact => codegraph_api::mermaid::impact_mermaid(&api, id, depth)
+                .await
+                .map_err(|e| async_graphql::Error::new(e.to_string()))?,
+        };
+        Ok(diagram)
+    }
+
     /// Functions có chain chứa pattern (id/marker/tên symbol, cách nhau bởi `,`).
     async fn search_flow(
         &self,
