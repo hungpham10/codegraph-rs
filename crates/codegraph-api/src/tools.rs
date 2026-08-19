@@ -208,8 +208,7 @@ pub async fn dispatch_sandbox(
             )
             .await?
             .page;
-        hits
-            .into_iter()
+        hits.into_iter()
             .find(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
             .map(|s| s.id)
             .ok_or_else(|| Error::Invalid(format!("no function matching `{q}`")))?

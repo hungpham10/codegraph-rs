@@ -363,7 +363,10 @@ async fn cmd_doctor(root: &Utf8Path) -> Result<()> {
 /// Trả version string của external tool nếu chạy được `--version`, ngược lại
 /// `None` (tool không có trên PATH hoặc thoát lỗi).
 fn check_tool_version(tool: &str) -> Option<String> {
-    let out = std::process::Command::new(tool).arg("--version").output().ok()?;
+    let out = std::process::Command::new(tool)
+        .arg("--version")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
