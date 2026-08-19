@@ -43,6 +43,8 @@ pub static SPEC: LangSpec = LangSpec {
     param_kinds: &["parameter"],
     annotation_kinds: &["attribute"],
     name_type_fallback: false,
+
+    link_impl_methods: false,
     calls: &[
         CallRule {
             kind: "invocation_expression",

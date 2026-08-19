@@ -61,10 +61,19 @@ enum Cmd {
         #[arg(long)]
         cache_dir: Option<String>,
     },
-    /// Run as MCP server (stdio qua `--mcp`, hoặc Streamable HTTP qua `--http`).
+    /// Run as MCP server (stdio via `--mcp`, hoặc Streamable HTTP via `--http`).
     Serve {
         #[arg(long)]
         mcp: bool,
+        /// Serve GraphQL HTTP API (on-prem Dashboard) tại `--addr` — không qua
+        /// MCP. Endpoint `/graphql` (POST) + `/graphiql` (dev explorer). UI chủ
+        /// động `init` workspace root; `--path` pre-bind nếu đã có `.codegraph/`.
+        #[arg(long)]
+        graphql: bool,
+        /// Bật Mermaid diagram output cho GraphQL API (`*_meraid`). Tắt → những
+        /// resolver này trả lỗi rõ ràng. Chỉ có nghĩa khi chạy `--graphql`.
+        #[arg(long)]
+        mermaid: bool,
         /// Serve qua Streamable HTTP (POST/GET/DELETE + SSE) thay vì stdio —
         /// mount ở cả `/` và `/mcp`. Default bind 0.0.0.0:8123 (docker-friendly).
         #[arg(long)]
@@ -145,6 +154,8 @@ async fn main() -> Result<()> {
         Cmd::Embed { model, cache_dir } => cmd_embed(&model, cache_dir.as_deref()).await,
         Cmd::Serve {
             mcp,
+            graphql,
+            mermaid,
             http,
             addr,
             allow_host,
@@ -156,6 +167,8 @@ async fn main() -> Result<()> {
             cmd_serve(
                 &root,
                 mcp,
+                graphql,
+                mermaid,
                 http,
                 addr,
                 allow_host,
@@ -268,6 +281,8 @@ async fn cmd_embed(model: &str, cache_dir: Option<&str>) -> Result<()> {
 async fn cmd_serve(
     root: &Utf8Path,
     mcp: bool,
+    graphql: bool,
+    mermaid: bool,
     http: bool,
     addr: std::net::SocketAddr,
     allow_host: Vec<String>,
@@ -276,6 +291,39 @@ async fn cmd_serve(
     enable_observability: bool,
     api_key: Vec<String>,
 ) -> Result<()> {
+    if graphql {
+        // GraphQL on-prem: Pre-bind `--path` nếu đã có `.codegraph/`, không thì
+        // chờ UI `init`. CORS mở cho loopback (+ allow-host), api-key nếu set.
+        let mut allowed = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ];
+        if allow_any_host {
+            allowed.clear();
+        } else {
+            allowed.extend(allow_host);
+        }
+        let api_key = if api_key.is_empty() {
+            None
+        } else {
+            Some(api_key.join(","))
+        };
+        let use_root = root.as_str() != "/";
+        let cfg = codegraph_graphql::ServeConfig {
+            addr,
+            api_key,
+            root: if use_root {
+                Some(root.to_path_buf())
+            } else {
+                None
+            },
+            format,
+            allow_hosts: allowed,
+            mermaid,
+        };
+        return codegraph_graphql::serve(cfg).await;
+    }
     if http {
         // Mỗi session HTTP (mcp-session-id) được rmcp cấp một CodegraphServer
         // riêng → session bắt đầu TRỐNG; agent bind root bằng codegraph_init

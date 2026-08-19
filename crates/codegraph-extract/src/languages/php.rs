@@ -65,6 +65,8 @@ pub static SPEC: LangSpec = LangSpec {
     param_kinds: &["simple_parameter", "property_promotion_parameter"],
     annotation_kinds: &["attribute"],
     name_type_fallback: false,
+
+    link_impl_methods: false,
     calls: &[
         CallRule {
             kind: "function_call_expression",

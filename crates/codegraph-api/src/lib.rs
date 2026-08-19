@@ -15,6 +15,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Transport-agnostic tool implementations (sandbox / diff / simulate) — dùng
+/// chung bởi MCP server và GraphQL server.
+pub mod tools;
+/// Mermaid diagram generators (control-flow / call-graph) — shared bởi mọi frontend.
+pub mod mermaid;
+/// Session — quản lý vòng đời index (bind/init/deindex/reindex) của một
+/// workspace root. Dùng chung bởi MCP server và GraphQL server (cả hai đều
+/// là transport mỏng trên tầng `codegraph-api`).
+pub mod session;
+
 pub struct GraphApi {
     shared_index: Arc<SharedGraphIndex>,
     /// Session store cho search resumable (resume id → cursor).

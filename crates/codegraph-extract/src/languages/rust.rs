@@ -1,4 +1,4 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{text, CallRule, LangSpec};
 use codegraph_core::SymbolKind;
 
 fn ts_language() -> tree_sitter::Language {
@@ -32,6 +32,8 @@ pub static SPEC: LangSpec = LangSpec {
     annotation_kinds: &["attribute"],
     // `impl Foo` không có name field — tên nằm ở field `type`.
     name_type_fallback: true,
+    // Rust: impl_item cũng là Class → re-parent methods về struct def cùng tên.
+    link_impl_methods: true,
     calls: &[CallRule {
         kind: "call_expression",
         callee_field: "function",
@@ -39,7 +41,7 @@ pub static SPEC: LangSpec = LangSpec {
         name_fn: None,
         target_fn: None,
     }],
-    class_type_name: None,
+    class_type_name: Some(rust_class_type_name),
     if_kinds: &["if_expression", "if_let_expression"],
     elif_kinds: &[],
     if_block_kinds: &[],
@@ -66,6 +68,17 @@ pub static SPEC: LangSpec = LangSpec {
     if_alt_field: "alternative",
     body_field: "body",
 };
+
+/// Chỉ `impl Foo` / `impl Trait for Foo` có `type` field (self type) — dùng làm
+/// `type_name` để `link_impl_methods_to_def` nối impl → struct def cùng tên.
+/// Các class-like khác (struct/enum/trait/mod) trả None → không bị coi là impl.
+fn rust_class_type_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    if node.kind() == "impl_item" {
+        node.child_by_field_name("type").and_then(|t| text(&t, src))
+    } else {
+        None
+    }
+}
 
 crate::lang_parser!(RustParser, SPEC);
 
@@ -119,6 +132,46 @@ async fn main() {}
         assert!(
             ann.contains(&"tokio".to_string()),
             "main missing tokio attribute: {ann:?}"
+        );
+    }
+
+    #[test]
+    fn rust_impl_methods_attached_to_struct() {
+        let src = r#"
+pub struct Foo {
+    x: i32,
+}
+impl Foo {
+    pub fn new() -> Foo { Foo { x: 0 } }
+    pub fn get(&self) -> i32 { self.x }
+}
+"#;
+        let syms = parse(src);
+
+        // Đúng 1 symbol Class "Foo" có type_ref == 0 (chính là struct def).
+        let defs: Vec<&Symbol> = syms
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class && s.name == "Foo" && s.type_ref == 0)
+            .collect();
+        assert_eq!(defs.len(), 1, "expected exactly one struct definition Foo");
+        let struct_id = defs[0].id;
+
+        // Impl symbol (cũng Class "Foo") phải có type_ref trỏ về struct.
+        let impls: Vec<&Symbol> = syms
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class && s.name == "Foo" && s.type_ref != 0)
+            .collect();
+        assert_eq!(impls.len(), 1, "expected one impl symbol linked to struct");
+        assert_eq!(impls[0].type_ref, struct_id);
+
+        // Method `new` phải được scoped vào struct, không phải impl.
+        let new_method = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Method && s.name == "new")
+            .expect("new method not found");
+        assert_eq!(
+            new_method.scope_id, struct_id,
+            "method should be scoped to the struct, not the impl"
         );
     }
 }

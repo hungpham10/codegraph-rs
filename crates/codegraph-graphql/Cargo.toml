@@ -1,0 +1,27 @@
+[package]
+name = "codegraph-graphql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+codegraph-api     = { path = "../codegraph-api" }
+codegraph-core    = { path = "../codegraph-core", features = ["graphql"] }
+codegraph-context = { path = "../codegraph-context" }
+codegraph-graph   = { path = "../codegraph-graph", features = ["sqlite"] }
+
+async-graphql = { workspace = true }
+async-graphql-axum = { workspace = true }
+axum = { workspace = true }
+tower-http = { version = "0.6", features = ["cors"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+camino = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+tempfile = "3"

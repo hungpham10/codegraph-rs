@@ -14,6 +14,7 @@ path = "src/main.rs"
 codegraph-graph     = { path = "../codegraph-graph", features = ["sqlite", "lmdb", "bloom-search"] }
 codegraph-extract   = { path = "../codegraph-extract" }
 codegraph-mcp       = { path = "../codegraph-mcp", features = ["http"] }
+codegraph-graphql   = { path = "../codegraph-graphql" }
 clap = { workspace = true }
 tokio = { workspace = true }
 notify = { workspace = true }

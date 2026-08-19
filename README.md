@@ -23,7 +23,7 @@ Agents that consult the semantic graph instead of grepping the filesystem make *
 - **Full re-index always.** No incremental sync — watcher debounces and re-indexes completely (simpler, no stale state).
 - **Multi-agent.** One binary serves any MCP client (Claude Code, Cursor, Codex, opencode, Hermes, Antigravity) over stdio or Streamable HTTP (`--http`) — the agent binds the workspace with `codegraph_init` and drives everything through tools.
 - **Optional semantic search.** Enable `[embedding] backend = "fastembed"` in config to get vector KNN / hybrid symbol search — BGE-small embeddings running locally, backend already bundled in the release binary.
-- **27 MCP tools** including `codegraph_flow` (call chain), `codegraph_search_flow` (pattern search), `codegraph_references` (library call consumers), `codegraph_diff` (MR impact draft), and a behavior sandbox (`codegraph_sandbox`).
+- **24 MCP tools** including `codegraph_flow` (call chain), `codegraph_search_flow` (pattern search), `codegraph_references` (library call consumers), `codegraph_diff` (MR impact draft), and a behavior sandbox (`codegraph_sandbox`).
 
 ## Install
 
@@ -148,7 +148,7 @@ Each language emits:
 
 ## MCP tools
 
-Agents see **27 tools** through the MCP server (search with match modes
+Agents see **24 tools** through the MCP server (search with match modes
 including opt-in semantic/hybrid, callers/callees/impact/flow, class queries,
 annotations, dependencies, diff draft/simulation, behavior sandbox, usage
 report, plus the session tools `codegraph_init` / `codegraph_deinit` /
@@ -206,7 +206,7 @@ crates/
   codegraph-context/    Markdown/JSON context formatter (symbol + callers + callees + source)
   codegraph-api/        GraphApi wrapper on SharedGraphIndex (async query surface)
   codegraph-sboxes/     Behavior sandbox: Cranelift JIT compile of function groups + Rhai mock runtime
-  codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 27-tool dispatch, session-driven
+  codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 24-tool dispatch, session-driven
   codegraph-bench/      Benchmarks (criterion search benches, storage benches, codspeed)
   codegraph/            CLI lifecycle (init/deinit/embed/serve --mcp) + watcher (notify + debounced full re-index)
 ```

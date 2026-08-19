@@ -1398,6 +1398,23 @@ impl GraphIndex {
         if matches.is_empty() {
             return Err(Error::Invalid(format!("symbol {name:?} not found")));
         }
+        // Narrow ambiguous same-name matches to type definitions (type_ref == 0),
+        // e.g. Rust `struct Foo` vs `impl Foo` which are both Class symbols with
+        // the same name. Prefer the definition so class tools resolve correctly.
+        if matches.len() > 1 {
+            let defs: Vec<Symbol> = matches
+                .iter()
+                .filter(|s| s.type_ref == 0)
+                .cloned()
+                .collect();
+            if defs.len() == 1 {
+                return Ok(ResolveResult {
+                    symbol: Some(defs.into_iter().next().unwrap()),
+                    matches: Vec::new(),
+                    ambiguous: false,
+                });
+            }
+        }
         if matches.len() > 1 {
             return Ok(ResolveResult {
                 symbol: None,
@@ -1780,10 +1797,30 @@ impl GraphIndex {
             .unwrap_or_default()
     }
 
+    /// Resolve một class id về definition id. Rust: nếu `id` là impl symbol
+    /// (`type_ref != 0`) không có method riêng, theo `type_ref` về struct def để
+    /// vẫn trả đúng methods khi caller truyền impl id.
+    fn class_target_id(&self, id: u64) -> u64 {
+        let Some(sym) = self.symbols.get(&id) else {
+            return id;
+        };
+        if sym.type_ref != 0 {
+            let has_own_methods = self
+                .members_of(id)
+                .iter()
+                .any(|m| matches!(m.kind, SymbolKind::Function | SymbolKind::Method));
+            if !has_own_methods {
+                return sym.type_ref;
+            }
+        }
+        id
+    }
+
     /// Methods của class (kind Function/Method), projection `MemberInfo` gọn.
     pub fn list_methods_of_class(&self, id: u64) -> Vec<MemberInfo> {
+        let target = self.class_target_id(id);
         let mut members: Vec<MemberInfo> = self
-            .members_of(id)
+            .members_of(target)
             .into_iter()
             .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
             .map(|s| MemberInfo::from_symbol(&s))
@@ -1795,7 +1832,8 @@ impl GraphIndex {
     /// Thông tin class: symbol + fields và methods tách riêng. `None` nếu symbol
     /// không phải class/interface/enum (function có scope params → không class).
     pub fn get_class_info(&self, id: u64) -> Option<ClassInfo> {
-        let class = self.symbols.get(&id)?;
+        let target = self.class_target_id(id);
+        let class = self.symbols.get(&target)?;
         if !matches!(
             class.kind,
             SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum
@@ -1803,7 +1841,7 @@ impl GraphIndex {
             return None;
         }
         let class = class.clone();
-        let members = self.members_of(id);
+        let members = self.members_of(target);
         let fields: Vec<MemberInfo> = members
             .iter()
             .filter(|s| {
@@ -1847,6 +1885,26 @@ impl GraphIndex {
         })
     }
 
+    /// Với kind == Class, nhiều symbol cùng tên có thể tồn tại (VD Rust
+    /// `struct Foo` + `impl Foo` đều là Class). Chỉ giữ 1 symbol mỗi tên, ưu
+    /// tiên definition (type_ref == 0) — impl symbol không có method riêng sau
+    /// khi re-parent nên không cần hiện riêng.
+    fn dedup_class_symbols(all: Vec<Symbol>) -> Vec<Symbol> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut kept: Vec<Symbol> = Vec::new();
+        for s in &all {
+            if s.type_ref == 0 && seen.insert(s.name.clone()) {
+                kept.push(s.clone());
+            }
+        }
+        for s in &all {
+            if s.type_ref != 0 && seen.insert(s.name.clone()) {
+                kept.push(s.clone());
+            }
+        }
+        kept
+    }
+
     /// Liệt kê symbol theo kind (class/interface/enum/...), phân trang —
     /// sort theo name rồi id để ổn định giữa các trang.
     pub fn list_symbols_by_kind(
@@ -1861,6 +1919,9 @@ impl GraphIndex {
             .filter(|s| s.kind == kind)
             .cloned()
             .collect();
+        if kind == SymbolKind::Class {
+            all = Self::dedup_class_symbols(all);
+        }
         all.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         let total = all.len();
         let limit = if limit == 0 { usize::MAX } else { limit };
@@ -1885,6 +1946,9 @@ impl GraphIndex {
             if s.kind == kind {
                 all.push(s.clone());
             }
+        }
+        if kind == SymbolKind::Class {
+            all = Self::dedup_class_symbols(all);
         }
         all.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         let total = all.len();
