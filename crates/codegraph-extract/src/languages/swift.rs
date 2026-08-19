@@ -35,6 +35,8 @@ pub static SPEC: LangSpec = LangSpec {
     param_kinds: &["parameter"],
     annotation_kinds: &["attribute"],
     name_type_fallback: false,
+
+    link_impl_methods: false,
     calls: &[CallRule {
         // Swift call_expression không có callee field — dùng named child đầu tiên
         // làm callee (verify bằng dump_tree).

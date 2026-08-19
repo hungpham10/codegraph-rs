@@ -69,6 +69,10 @@ pub struct LangSpec {
     /// `impl Foo` — tên nằm ở `type`). Bật cho ngôn ngữ không có node kind
     /// xung đột (C# `variable_declaration{type}` phải để false).
     pub name_type_fallback: bool,
+    /// Rust: tách `struct Foo` (def) và `impl Foo` (impl) thành 2 symbol Class
+    /// cùng tên, methods scoped vào impl. Bật flag để re-parent methods từ impl
+    /// về symbol def cùng tên (xem `link_impl_methods_to_def`). Chỉ bật cho Rust.
+    pub link_impl_methods: bool,
     // ── marker rules ──
     pub if_kinds: &'static [&'static str],
     pub elif_kinds: &'static [&'static str],
@@ -121,6 +125,9 @@ pub fn run_spec(
     collect_symbols(&root, &mut ctx, spec);
     let mut symbols = ctx.symbols;
     resolve_type_refs(&mut symbols);
+    if spec.link_impl_methods {
+        link_impl_methods_to_def(&mut symbols);
+    }
 
     // func_index: (name, line) → id — overload-safe (method trùng tên khác line).
     let func_index: HashMap<(String, u32), u64> = symbols
@@ -350,6 +357,44 @@ fn resolve_type_refs(symbols: &mut [Symbol]) {
         };
         if let Some(&tid) = by_name.get(&base_type_name(&tn)) {
             s.type_ref = tid;
+        }
+    }
+}
+
+/// Rust: `struct Foo` (def, type_name=None) và `impl Foo` (impl, type_name=`Foo`)
+/// là 2 symbol `Class` cùng tên; methods được scoped vào symbol impl. Hàm này
+/// gắn methods về symbol def:
+/// 1. build `def_by_name`: class-like có `type_name=None` (struct/enum/trait def).
+/// 2. mỗi impl (Class có `type_name=Some`) → `type_ref` = def cùng tên.
+/// 3. mỗi Method có `scope_id` trỏ vào impl → re-point `scope_id` về def id.
+///
+/// Kết quả: `scope_index` (xây ở graph) map def id → [fields..., methods...].
+fn link_impl_methods_to_def(symbols: &mut [Symbol]) {
+    let mut def_by_name: HashMap<String, u64> = HashMap::new();
+    for s in symbols.iter() {
+        if matches!(
+            s.kind,
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum
+        ) && s.type_name.is_none()
+        {
+            def_by_name.entry(s.name.clone()).or_insert(s.id);
+        }
+    }
+    for s in symbols.iter_mut() {
+        if s.kind == SymbolKind::Class && s.type_name.is_some() {
+            if let Some(&def_id) = def_by_name.get(&s.name) {
+                s.type_ref = def_id;
+            }
+        }
+    }
+    let type_refs: HashMap<u64, u64> = symbols.iter().map(|s| (s.id, s.type_ref)).collect();
+    for s in symbols.iter_mut() {
+        if s.kind == SymbolKind::Method {
+            if let Some(&parent_ref) = type_refs.get(&s.scope_id) {
+                if parent_ref != 0 && parent_ref != s.scope_id {
+                    s.scope_id = parent_ref;
+                }
+            }
         }
     }
 }

@@ -103,6 +103,8 @@ pub fn marker_id(name: &str) -> Option<u64> {
 /// Loại symbol — bộ kinds của semgraph (gọn hơn NodeKind cũ).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[cfg_attr(feature = "graphql", graphql(rename_items = "SCREAMING_SNAKE_CASE"))]
 pub enum SymbolKind {
     /// Hàm tự do (không thuộc class).
     Function,
@@ -163,6 +165,8 @@ impl SymbolKind {
 /// Mức scope của symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[cfg_attr(feature = "graphql", graphql(rename_items = "SCREAMING_SNAKE_CASE"))]
 pub enum ScopeLevel {
     /// Global (top-level).
     Global,
@@ -199,6 +203,8 @@ impl ScopeLevel {
 /// Phân loại tác động bên ngoài của một call (để impact/report).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[cfg_attr(feature = "graphql", graphql(rename_items = "SCREAMING_SNAKE_CASE"))]
 pub enum EffectType {
     #[default]
     None,
@@ -277,6 +283,7 @@ pub type SymbolId = u64;
 
 /// Một symbol (function/class/variable/...) trong graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
@@ -301,6 +308,7 @@ pub struct Symbol {
 
 /// Annotation (VD `@Override`, `@Cacheable`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct Annotation {
     pub name: String,
     #[serde(default)]
@@ -353,6 +361,7 @@ pub struct CallRecord {
 /// Giá trị của inverted index `call name → call sites` (dùng cho query
 /// "callers của library call" — không cần resolve được mới hiện).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct CallSite {
     pub caller_id: SymbolId,
     pub call_name: String,
@@ -365,6 +374,7 @@ pub struct CallSite {
 
 /// Thông tin file trong graph (không lưu content — dùng cho files/status).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct FileInfo {
     pub path: String,
     pub language: String,
@@ -376,6 +386,7 @@ pub struct FileInfo {
 
 /// Flow của một hàm — chain render ra (marker name / symbol name / call thô).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct FlowResult {
     /// Symbol chủ (hàm có flow này).
     pub symbol: Symbol,
@@ -389,6 +400,7 @@ pub struct FlowResult {
 
 /// Một call-site trong flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct FlowCall {
     pub position: usize,
     /// Tên call (tên symbol nếu resolve được, không thì tên thô).
@@ -406,6 +418,7 @@ pub struct FlowCall {
 /// Kết quả resolve symbol theo id/name — `ambiguous=true` khi name trùng nhiều
 /// symbol (MCP layer bảo LLM retry với `symbol_id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct ResolveResult {
     /// Symbol khớp duy nhất (nếu không ambiguous và tìm thấy).
     pub symbol: Option<Symbol>,
@@ -416,6 +429,7 @@ pub struct ResolveResult {
 
 /// Số liệu tổng hợp (`/api/status`, `codegraph status`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct DbStats {
     pub symbols: u64,
     pub chains: u64,
@@ -426,6 +440,7 @@ pub struct DbStats {
 
 /// Kết quả `search_flow` — hàm có chain chứa pattern.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct SearchFlowResult {
     pub function_id: SymbolId,
     pub function_name: String,
@@ -440,6 +455,7 @@ pub struct SearchFlowResult {
 /// Trả về mọi function gọi một library call có tên chứa `query` (kể cả call
 /// không resolve được thành symbol — đây là cửa sổ ra "thế giới ngoài repo").
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct CallSiteResult {
     pub func_id: SymbolId,
     pub func_name: String,
@@ -453,6 +469,8 @@ pub struct CallSiteResult {
 /// Match mode khi search symbol theo tên (nâng cấp của `search_symbol`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[cfg_attr(feature = "graphql", graphql(rename_items = "SCREAMING_SNAKE_CASE"))]
 pub enum SymbolMatch {
     /// Substring bất kỳ (mặc định).
     Contains,
@@ -488,6 +506,7 @@ impl SymbolMatch {
 /// Projection gọn của một member (method/field) trong class — bỏ doc/signature
 /// dài để giảm payload cho LLM (tương ứng `compact` của `semgraph_get_class_methods`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct MemberInfo {
     pub id: SymbolId,
     pub name: String,
@@ -514,6 +533,7 @@ impl MemberInfo {
 /// Thông tin class: symbol class + fields và methods tách riêng (tương ứng
 /// `semgraph_get_class`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct ClassInfo {
     pub class: Symbol,
     pub fields: Vec<MemberInfo>,
@@ -523,6 +543,7 @@ pub struct ClassInfo {
 /// Scope của function: parameters + local variables (tương ứng
 /// `semgraph_get_function_scope`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct FunctionScope {
     pub function: Symbol,
     pub parameters: Vec<Symbol>,
@@ -531,6 +552,7 @@ pub struct FunctionScope {
 
 /// Một dependency (module/package prefix rút từ call names).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct Dependency {
     pub name: String,
     /// Số call sites tham chiếu tới module này.
@@ -539,6 +561,7 @@ pub struct Dependency {
 
 /// Báo cáo dependencies của repo (tương ứng `semgraph_get_dependencies`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
 pub struct DependenciesReport {
     pub internal: Vec<Dependency>,
     pub external: Vec<Dependency>,

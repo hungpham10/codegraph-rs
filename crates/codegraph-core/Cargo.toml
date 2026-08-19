@@ -13,3 +13,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
+# GraphQL là extension — chỉ bật khi crate tiêu thụ (vd codegraph-graphql)
+# cần expose type dưới dạng async-graphql object. Giữ core transport-agnostic.
+async-graphql = { workspace = true, optional = true }
+
+[features]
+# Bật để các type domain (Symbol/FlowResult/...) derive async_graphql
+# SimpleObject/Enum — cho phép GraphQL layer tái dùng trực tiếp không mirror.
+graphql = ["async-graphql"]

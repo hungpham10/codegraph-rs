@@ -200,13 +200,18 @@ impl CodegraphServer {
         let detail = self.session.detail().await;
         let format = self.session.format().await;
         let dispatch = match name {
-            "codegraph_sandbox" => tools::dispatch_sandbox(&root, sgi.clone(), args.clone()).await,
-            "codegraph_diff" => tools::dispatch_diff(&root, sgi.clone(), args.clone()).await,
+            "codegraph_sandbox" => {
+                codegraph_api::tools::dispatch_sandbox(&root, sgi.clone(), args.clone()).await
+            }
+            "codegraph_diff" => {
+                codegraph_api::tools::dispatch_diff(&root, sgi.clone(), args.clone()).await
+            }
             "codegraph_diff_simulate" => {
-                tools::dispatch_diff_simulate(&root, sgi.clone(), args.clone()).await
+                codegraph_api::tools::dispatch_diff_simulate(&root, sgi.clone(), args.clone()).await
             }
             "codegraph_origin_simulate" => {
-                tools::dispatch_origin_simulate(&root, sgi.clone(), args.clone()).await
+                codegraph_api::tools::dispatch_origin_simulate(&root, sgi.clone(), args.clone())
+                    .await
             }
             _ => tools::dispatch_with_api(&api, &root, detail, format, name, args).await,
         };
