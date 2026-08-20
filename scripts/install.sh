@@ -30,7 +30,11 @@ echo "Downloading $url"
 curl -fsSL "$url" -o "$tmp/cg.tar.xz"
 tar -xJf "$tmp/cg.tar.xz" -C "$tmp"
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$tmp/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+# cargo-dist wraps the binary in a per-target directory (e.g.
+# codegraph-x86_64-apple-darwin/codegraph), so locate it instead of assuming
+# it sits at the archive root.
+bin_path=$(find "$tmp" -name "$BIN_NAME" -type f | head -n1)
+install -m 0755 "$bin_path" "$INSTALL_DIR/$BIN_NAME"
 
 # Strip the macOS quarantine attribute so Gatekeeper doesn't flag the binary
 # (we don't code-sign the prebuilt binary, so a downloaded file is quarantined).

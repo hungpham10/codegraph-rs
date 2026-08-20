@@ -72,7 +72,10 @@ if (-not (Test-Path $ZipPath) -or ((Get-Item $ZipPath).Length -eq 0)) {
 # Extract.
 Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force
 
-$BinSrc = Join-Path $TmpDir $BinName
+# cargo-dist wraps the binary in a per-target directory, so search recursively
+# instead of assuming it sits at the archive root.
+$BinSrc = Get-ChildItem -Path $TmpDir -Recurse -Filter $BinName -File |
+    Select-Object -First 1 | ForEach-Object { $_.FullName }
 if (-not (Test-Path $BinSrc)) {
     Remove-Item -Recurse -Force $TmpDir
     Write-Error "Asset $AssetName did not contain $BinName."

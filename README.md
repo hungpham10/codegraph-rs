@@ -94,7 +94,49 @@ sudo dnf install ./codegraph-*.rpm
    | macOS arm64 | `codegraph-aarch64-apple-darwin.tar.xz` |
    | Windows x86_64 | `codegraph-x86_64-pc-windows-msvc.zip` |
 
-2. Extract and place the `codegraph` binary somewhere on your `PATH`.
+   Or grab it with `gh`:
+   ```sh
+   gh release download v2.0.4 --repo hungpham10/codegraph-rs \
+     --pattern 'codegraph-x86_64-apple-darwin.tar.xz*'
+   ```
+
+2. **(Recommended) Verify before trusting it** — every release attaches `.sig`
+   / `.crt` files. See
+   [Cryptographic verification](#cryptographic-verification-with-cosign-sigstore-keyless)
+   below.
+
+3. Extract and install:
+
+   **macOS / Linux**
+   ```sh
+   tar -xJf codegraph-x86_64-apple-darwin.tar.xz   # đổi tên file theo platform
+   # archive bọc binary trong thư mục theo target, ví dụ:
+   #   codegraph-x86_64-apple-darwin/codegraph
+   sudo mv codegraph-x86_64-apple-darwin/codegraph /usr/local/bin/
+   # macOS: binary chưa code-sign → gỡ quarantine để không bị báo "damaged"
+   xattr -cr /usr/local/bin/codegraph
+   codegraph --version
+   ```
+   (Thay `/usr/local/bin` bằng `~/.local/bin` nếu thích trùng thư mục mặc định
+   của install script. Đảm bảo nó nằm trong `$PATH`.)
+
+   **Windows (PowerShell)**
+   ```powershell
+   Expand-Archive codegraph-x86_64-pc-windows-msvc.zip -DestinationPath dist
+   # archive bọc binary trong thư mục theo target:
+   #   dist\codegraph-x86_64-pc-windows-msvc\codegraph.exe
+   Move-Item dist\codegraph-x86_64-pc-windows-msvc\codegraph.exe "$env:LOCALAPPDATA\codegraph\bin\"
+   # gỡ Mark-of-the-Web để SmartScreen / Defender không chặn
+   Unblock-File "$env:LOCALAPPDATA\codegraph\bin\codegraph.exe"
+   codegraph --version
+   ```
+
+4. **Run** — start the MCP server your AI agent connects to:
+   ```sh
+   codegraph mcp            # MCP server (stdio)
+   codegraph mcp --http     # MCP over Streamable HTTP
+   codegraph install        # wire MCP into Claude Code / Cursor
+   ```
 
 </details>
 
@@ -167,6 +209,7 @@ GitHub release. To verify a downloaded archive is authentic:
 cosign verify-blob \
   --certificate-identity-regexp 'https://github.com/hungpham10/codegraph-rs/.github/workflows/.*' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --certificate codegraph-x86_64-apple-darwin.tar.xz.crt \
   --signature codegraph-x86_64-apple-darwin.tar.xz.sig \
   codegraph-x86_64-apple-darwin.tar.xz
 ```
