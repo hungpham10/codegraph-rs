@@ -8,7 +8,7 @@ cargo-dist-version = "0.32.0"
 # Allow release.yml to be hand-edited (we append the codesign + cosign jobs
 # after the generated `host` job). Without this, cargo-dist aborts the release
 # because the committed release.yml no longer matches its generated output.
-allow-dirty = true
+allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
 # cargo-dist builds cross-compiled archives and the GitHub Release.
