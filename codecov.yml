@@ -1,0 +1,10 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 70% # Tổng coverage toàn dự án phải đạt tối thiểu 70%
+        threshold: 10% # Cho phép sai lệch tối đa 10 điểm % (PR vẫn pass nếu coverage >= 60%)
+    patch:
+      default:
+        target: 100% # Các dòng code mới trong PR phải được test phủ 100%
+        threshold: 0% # Không chấp nhận bất kỳ dòng code mới nào thiếu test
