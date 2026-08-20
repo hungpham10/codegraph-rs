@@ -4,19 +4,16 @@ class Codegraph < Formula
   version "@@VERSION@@"
   license "MIT"
 
-  on_macos do
-    on_arm do
-      url "https://github.com/hungpham10/codegraph-rs/releases/download/@@TAG@@/codegraph-aarch64-apple-darwin.tar.gz"
-      sha256 "@@ARM_SHA@@"
-    end
-    on_intel do
-      url "https://github.com/hungpham10/codegraph-rs/releases/download/@@TAG@@/codegraph-x86_64-apple-darwin.tar.gz"
-      sha256 "@@X86_SHA@@"
-    end
-  end
+  # Build from source so macOS Gatekeeper / antivirus don't flag an unsigned
+  # prebuilt binary. Homebrew compiles it locally (Rust is provided below).
+  url "https://github.com/hungpham10/codegraph-rs/archive/refs/tags/@@TAG@@.tar.gz"
+  sha256 "@@SRC_SHA@@"
+
+  depends_on "rust" => :build
 
   def install
-    bin.install "codegraph"
+    system "cargo", "build", "--release", "--locked", "-p", "codegraph"
+    bin.install "target/release/codegraph"
   end
 
   test do

@@ -58,6 +58,9 @@ yay -S codegraph-rs-bin
 brew install hungpham10/codegraph/codegraph
 ```
 
+> Builds from source on your machine, so macOS Gatekeeper won't flag it.
+> Requires the Xcode Command Line Tools (`xcode-select --install`).
+
 **Debian / Ubuntu (.deb)**
 
 Download the `.deb` for your architecture from the
@@ -107,13 +110,31 @@ cargo build --release -p codegraph
 # binary at target/release/codegraph
 ```
 
-Or via Cargo directly:
+Or via Cargo directly (builds from source → no OS warnings):
 
 ```sh
 cargo install --git https://github.com/hungpham10/codegraph-rs codegraph
+# pinned to a specific release:
+cargo install --git https://github.com/hungpham10/codegraph-rs --tag v2.0.0 codegraph
 ```
 
 </details>
+
+> **Why does macOS / Windows warn about the downloaded binary?**
+> The prebuilt binaries in the GitHub release are **not code-signed** (we don't
+> pay for Apple / Authenticode signing yet), so Gatekeeper ("cannot be verified"
+> / "damaged") and SmartScreen / Defender may flag them as suspicious. They are
+> safe — built from this repo. To run a manually downloaded binary:
+> - **macOS:** strip the quarantine attribute, then run it:
+>   ```sh
+>   xattr -cr /path/to/codegraph
+>   ```
+> - **Windows:** right-click the `.zip` → *Properties* → *Unblock*, or in
+>   PowerShell: `Unblock-File .\codegraph-x86_64-pc-windows-msvc.zip`; if
+>   SmartScreen appears, choose *More info → Run anyway*.
+>
+> To skip the warning entirely, install via **Homebrew** or **`cargo install`**
+> — both build from source on your machine.
 
 ### Set up as an MCP server for your agent
 
@@ -128,6 +149,46 @@ codegraph install --target claude --global   # user-wide (~/.claude/settings.jso
 Other targets: `cursor`, `codex`, `opencode`, `hermes`, `antigravity`, or `all`.
 `--global` registers the (e.g. Homebrew-installed) binary at user level; without
 it the registration is scoped to the current project directory.
+
+## Verify releases & reduce AV false positives
+
+The prebuilt binaries are **not code-signed** (no paid Apple / Authenticode
+cert), so macOS Gatekeeper and Windows SmartScreen / Defender may warn. Two
+things help:
+
+### Cryptographic verification with cosign (Sigstore, keyless)
+
+Every release archive is signed with [cosign](https://github.com/sigstore/cosign)
+(keyless, via GitHub OIDC) and the `.sig` / `.crt` files are attached to the
+GitHub release. To verify a downloaded archive is authentic:
+
+```sh
+# install cosign: brew install cosign  (see https://docs.sigstore.dev)
+cosign verify-blob \
+  --certificate-identity-regexp 'https://github.com/hungpham10/codegraph-rs/.github/workflows/.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --signature codegraph-x86_64-apple-darwin.tar.gz.sig \
+  codegraph-x86_64-apple-darwin.tar.gz
+```
+
+A *passing* verification confirms the file was produced by **this repo's CI**
+(not that the OS warning disappears — that still needs a paid cert). Use it to
+confirm a binary you downloaded wasn't tampered with.
+
+### Help reduce false positives
+
+If your AV flags a release, report it as a false positive so reputation improves
+over time:
+
+- **Microsoft Defender / SmartScreen:** submit the file at
+  <https://www.microsoft.com/en-us/wdsi/filesubmission>.
+- **VirusTotal:** re-scan / submit at <https://www.virustotal.com> to update
+  vendor detections.
+- **Other vendors:** most AV vendors publish a false-positive submission form
+  (search "<vendor> false positive submission").
+
+To skip the OS warning entirely, install via **Homebrew** or **`cargo install`**
+— both compile from source on your machine.
 
 ## Quick start
 

@@ -5,11 +5,11 @@
 #
 # Usage (pin a version / download the script first):
 #   irm https://raw.githubusercontent.com/hungpham10/codegraph-rs/main/scripts/install.ps1 -OutFile install.ps1
-#   .\install.ps1 -Version 2.0.1
+#   .\install.ps1 -Version 2.0.2
 
 [CmdletBinding()]
 param(
-    # Pin a specific version, e.g. "2.0.1". Empty = latest release.
+    # Pin a specific version, e.g. "2.0.2". Empty = latest release.
     [string]$Version
 )
 
@@ -84,6 +84,10 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
 Copy-Item -Path $BinSrc -Destination (Join-Path $InstallDir $BinName) -Force
+
+# Remove the Mark-of-the-Web so SmartScreen / Defender don't block the binary
+# (we don't code-sign the prebuilt binary, so a downloaded file is flagged).
+try { Unblock-File -Path (Join-Path $InstallDir $BinName) -ErrorAction SilentlyContinue } catch { }
 
 # Cleanup.
 Remove-Item -Recurse -Force $TmpDir

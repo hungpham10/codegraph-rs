@@ -32,6 +32,12 @@ tar -xzf "$tmp/cg.tar.gz" -C "$tmp"
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
 
+# Strip the macOS quarantine attribute so Gatekeeper doesn't flag the binary
+# (we don't code-sign the prebuilt binary, so a downloaded file is quarantined).
+if [ "$uname_s" = "darwin" ]; then
+  xattr -cr "$INSTALL_DIR/$BIN_NAME" 2>/dev/null || true
+fi
+
 echo "Installed $BIN_NAME $tag to $INSTALL_DIR"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

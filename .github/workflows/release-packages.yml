@@ -88,7 +88,8 @@ jobs:
           rpm=$(find target -name '*.rpm' | head -n1)
           gh release upload "${{ github.event.release.tag_name }}" "$rpm"
 
-  # Render the Homebrew formula from the macOS archives and push it to the tap.
+  # Build the Homebrew formula from SOURCE (no prebuilt binary, so no
+  # Gatekeeper/AV warnings) and push it to the tap.
   # Prereq: create the `hungpham10/homebrew-codegraph` tap repo and set the
   # HOMEBREW_TAP_GITHUB_TOKEN secret (a PAT with write access to the tap).
   homebrew:
@@ -98,21 +99,14 @@ jobs:
       HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
-      - name: Download macOS archives + compute sha256
+      - name: Fetch source tarball + compute sha256
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          mkdir -p dl
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern 'codegraph-x86_64-apple-darwin.tar.gz' \
-            --pattern 'codegraph-aarch64-apple-darwin.tar.gz' \
-            --dir dl
-          x86=$(sha256sum dl/codegraph-x86_64-apple-darwin.tar.gz | awk '{print $1}')
-          arm=$(sha256sum dl/codegraph-aarch64-apple-darwin.tar.gz | awk '{print $1}')
-          echo "X86_SHA=$x86" >> "$GITHUB_ENV"
-          echo "ARM_SHA=$arm" >> "$GITHUB_ENV"
+          curl -fsSL "https://github.com/${{ github.repository }}/archive/refs/tags/$TAG.tar.gz" -o src.tar.gz
+          src=$(sha256sum src.tar.gz | awk '{print $1}')
+          echo "SRC_SHA=$src" >> "$GITHUB_ENV"
       - name: Render formula
         env:
           TAG: ${{ github.event.release.tag_name }}
@@ -122,8 +116,7 @@ jobs:
           ver="${TAG#v}"
           sed -e "s/@@VERSION@@/$ver/" \
               -e "s/@@TAG@@/$TAG/" \
-              -e "s/@@X86_SHA@@/$X86_SHA/" \
-              -e "s/@@ARM_SHA@@/$ARM_SHA/" \
+              -e "s/@@SRC_SHA@@/$SRC_SHA/" \
               "$TEMPLATE" > codegraph.rb
           echo "--- codegraph.rb ---"; cat codegraph.rb
       - name: Push formula to tap
