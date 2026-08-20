@@ -118,18 +118,18 @@ jobs:
           RUSTFLAGS: "-Cinstrument-coverage"
           TEST_RDBMS_DSN: "postgres://postgres:postgres@127.0.0.1:5432/codegraph"
           TEST_RDBMS_REPO_ID: "1"
-        run: cargo llvm-cov test -p codegraph-graph --features postgres --test rdbms -- --ignored --nocapture --test-threads=1 --no-report
+        run: cargo llvm-cov test -p codegraph-graph --features postgres --test rdbms --no-report -- --ignored --nocapture --test-threads=1
       - name: Storage integration tests (mysql)
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
           TEST_RDBMS_DSN: "mysql://root:postgres@127.0.0.1:3306/codegraph"
           TEST_RDBMS_REPO_ID: "1"
-        run: cargo llvm-cov test -p codegraph-graph --features mysql --test rdbms -- --ignored --nocapture --test-threads=1 --no-report
+        run: cargo llvm-cov test -p codegraph-graph --features mysql --test rdbms --no-report -- --ignored --nocapture --test-threads=1
       - name: Storage integration tests (redis)
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
           TEST_REDIS_DSN: "redis://127.0.0.1:6379"
-        run: cargo llvm-cov test -p codegraph-graph --features redis --test redis -- --ignored --nocapture --no-report
+        run: cargo llvm-cov test -p codegraph-graph --features redis --test redis --no-report -- --ignored --nocapture
       - name: Generate coverage reports
         run: |
           mkdir -p ./target/coverage
