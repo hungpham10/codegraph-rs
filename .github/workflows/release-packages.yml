@@ -1,0 +1,187 @@
+# Builds native Linux packages (.deb / .rpm) and publishes the Homebrew
+# formula + AUR package, using the artifacts cargo-dist uploaded to the
+# GitHub Release.
+#
+# Runs after cargo-dist's `release.yml` publishes the release, so all source
+# archives are already available for download.
+
+name: Release Packages
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  # Build .deb packages for Debian/Ubuntu (and derivatives) from the gnu targets.
+  deb:
+    name: deb (${{ matrix.target }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross linker (aarch64)
+        if: ${{ matrix.target == 'aarch64-unknown-linux-gnu' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build + package .deb
+        run: cargo deb -p codegraph --target ${{ matrix.target }}
+      - name: Upload .deb to release
+        run: |
+          set -euo pipefail
+          deb=$(find target -name '*.deb' | head -n1)
+          gh release upload "${{ github.event.release.tag_name }}" "$deb"
+
+  # Build .rpm packages for Fedora/RHEL (and derivatives) from the gnu targets.
+  rpm:
+    name: rpm (${{ matrix.target }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install rpm tooling + cross linker (aarch64)
+        if: ${{ matrix.target == 'aarch64-unknown-linux-gnu' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu rpm
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Install rpm tooling (x86_64)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+      - name: Install cargo-rpm
+        run: cargo install cargo-rpm --locked
+      - name: Build + package .rpm
+        run: cargo rpm build -p codegraph --target ${{ matrix.target }}
+      - name: Upload .rpm to release
+        run: |
+          set -euo pipefail
+          rpm=$(find target -name '*.rpm' | head -n1)
+          gh release upload "${{ github.event.release.tag_name }}" "$rpm"
+
+  # Render the Homebrew formula from the macOS archives and push it to the tap.
+  # Prereq: create the `hungpham10/homebrew-codegraph` tap repo and set the
+  # HOMEBREW_TAP_GITHUB_TOKEN secret (a PAT with write access to the tap).
+  homebrew:
+    name: Publish Homebrew formula
+    runs-on: ubuntu-22.04
+    env:
+      HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download macOS archives + compute sha256
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern 'codegraph-x86_64-apple-darwin.tar.gz' \
+            --pattern 'codegraph-aarch64-apple-darwin.tar.gz' \
+            --dir dl
+          x86=$(sha256sum dl/codegraph-x86_64-apple-darwin.tar.gz | awk '{print $1}')
+          arm=$(sha256sum dl/codegraph-aarch64-apple-darwin.tar.gz | awk '{print $1}')
+          echo "X86_SHA=$x86" >> "$GITHUB_ENV"
+          echo "ARM_SHA=$arm" >> "$GITHUB_ENV"
+      - name: Render formula
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          TEMPLATE: ${{ github.workspace }}/packaging/homebrew/codegraph.rb.template
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          sed -e "s/@@VERSION@@/$ver/" \
+              -e "s/@@TAG@@/$TAG/" \
+              -e "s/@@X86_SHA@@/$X86_SHA/" \
+              -e "s/@@ARM_SHA@@/$ARM_SHA/" \
+              "$TEMPLATE" > codegraph.rb
+          echo "--- codegraph.rb ---"; cat codegraph.rb
+      - name: Push formula to tap
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git clone "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/hungpham10/homebrew-codegraph.git" tap
+          mkdir -p tap/Formula
+          cp codegraph.rb tap/Formula/codegraph.rb
+          cd tap
+          git add -A
+          git commit -m "codegraph ${{ github.event.release.tag_name }}" || echo "no changes"
+          git push
+
+  # Publish the prebuilt-binary AUR package (codegraph-rs-bin).
+  aur:
+    name: Publish AUR (codegraph-rs-bin)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern 'codegraph-x86_64-unknown-linux-musl.tar.gz' \
+            --pattern 'codegraph-aarch64-unknown-linux-gnu.tar.gz' \
+            --dir dl
+          x86_sha=$(sha256sum dl/codegraph-x86_64-unknown-linux-musl.tar.gz | awk '{print $1}')
+          arm_sha=$(sha256sum dl/codegraph-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+          echo "X86_SHA=$x86_sha" >> "$GITHUB_ENV"
+          echo "ARM_SHA=$arm_sha" >> "$GITHUB_ENV"
+      - name: Render PKGBUILD
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          ver="${VERSION#v}"
+          cd packaging/aur/codegraph-rs-bin
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=$ver/" \
+            -e "s/^pkgrel=.*/pkgrel=1/" \
+            -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$X86_SHA')/" \
+            -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$ARM_SHA')/" \
+            PKGBUILD
+          echo "--- PKGBUILD ---"; cat PKGBUILD
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: codegraph-rs-bin
+          pkgbuild: packaging/aur/codegraph-rs-bin/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ github.event.release.tag_name }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
