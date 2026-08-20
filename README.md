@@ -1,6 +1,6 @@
 # CodeGraph
 
-[![CI](https://github.com/hungpham10/codegraph-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Cleboost/codegraph-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/hungpham10/codegraph-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/hungpham10/codegraph-rs/actions/workflows/ci.yml)
 [![CodSpeed Badge](https://img.shields.io/endpoint?url=https://app.codspeed.io//badge.json)](https://app.codspeed.io//hungpham10/codegraph-rs?utm_source=badge)
 [![codecov](https://codecov.io/gh/hungpham10/codegraph-rs/graph/badge.svg?token=PUSMFF0CM8)](https://codecov.io/gh/hungpham10/codegraph-rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -52,6 +52,30 @@ Installs to `%LOCALAPPDATA%\codegraph\bin` and adds it to the user PATH.
 yay -S codegraph-rs-bin
 ```
 
+**macOS (Homebrew)**
+
+```sh
+brew install hungpham10/codegraph/codegraph
+```
+
+**Debian / Ubuntu (.deb)**
+
+Download the `.deb` for your architecture from the
+[latest release](https://github.com/hungpham10/codegraph-rs/releases/latest), then:
+
+```sh
+sudo apt install ./codegraph_*.deb
+```
+
+**Fedora / RHEL (.rpm)**
+
+Download the `.rpm` for your architecture from the
+[latest release](https://github.com/hungpham10/codegraph-rs/releases/latest), then:
+
+```sh
+sudo dnf install ./codegraph-*.rpm
+```
+
 </details>
 
 <details>
@@ -90,6 +114,20 @@ cargo install --git https://github.com/hungpham10/codegraph-rs codegraph
 ```
 
 </details>
+
+### Set up as an MCP server for your agent
+
+After installing, register `codegraph` as an MCP server for your AI agent so it
+can launch `codegraph serve --mcp` for your workspace:
+
+```sh
+codegraph install --target claude            # project-local (~/.claude/settings.local.json)
+codegraph install --target claude --global   # user-wide (~/.claude/settings.json)
+```
+
+Other targets: `cursor`, `codex`, `opencode`, `hermes`, `antigravity`, or `all`.
+`--global` registers the (e.g. Homebrew-installed) binary at user level; without
+it the registration is scoped to the current project directory.
 
 ## Quick start
 

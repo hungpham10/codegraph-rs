@@ -1,10 +1,10 @@
 #!/bin/sh
 # codegraph install script
-# Usage: curl -fsSL https://raw.githubusercontent.com/cleboost/codegraph/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/hungpham10/codegraph-rs/main/scripts/install.sh | sh
 
 set -eu
 
-REPO="cleboost/codegraph"
+REPO="hungpham10/codegraph-rs"
 BIN_NAME="codegraph"
 INSTALL_DIR="${CODEGRAPH_INSTALL_DIR:-$HOME/.local/bin}"
 
