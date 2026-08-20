@@ -4,6 +4,10 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 repository.workspace = true
+# Không ship binary `codegraph-bench` trong release — crate này chỉ để chạy
+# benchmark/test local (`cargo bench -p codegraph-bench`, `cargo codspeed`).
+# `publish = false` khiến cargo-dist bỏ qua binary này khi build/distribute.
+publish = false
 description = "Benchmark codegraph-extract + codegraph-graph trên các repo thật"
 
 [dependencies]
