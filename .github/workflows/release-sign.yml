@@ -1,7 +1,8 @@
 # Signs + ad-hoc-codesigns release artifacts AFTER cargo-dist publishes them.
-# Runs on `release: published` (same trigger as release.yml). It is intentionally
-# separate from cargo-dist's generated release.yml so re-generating dist config
-# never clobbers it.
+# Triggered by `workflow_run` on cargo-dist's `release.yml` (the documented,
+# reliable pattern — `release: published` is racy and doesn't always fire for
+# dist-driven releases). It is intentionally separate from cargo-dist's
+# generated release.yml so re-generating dist config never clobbers it.
 #
 # What it does:
 #   - wait-assets : poll until the macOS tarballs are uploaded by release.yml
@@ -18,20 +19,29 @@
 name: Sign & Verify Release
 
 on:
-  release:
-    types: [published]
-  # Allow manually signing an already-published release (e.g. v2.0.1) from the
+  # Run after cargo-dist finishes uploading artifacts. `head_branch` of the
+  # triggering run is the pushed tag (e.g. v2.0.4).
+  workflow_run:
+    workflows: ["release.yml"]
+    types: [completed]
+  # Allow manually signing an already-published release (e.g. v2.0.4) from the
   # Actions tab — useful for backfilling signatures without a new release.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to sign (e.g. v2.0.1)"
+        description: "Release tag to sign (e.g. v2.0.4)"
         required: true
         default: ""
 
 permissions:
   contents: write        # upload release assets (.sig / .crt / re-packed tarball)
   id-token: write        # keyless cosign (Sigstore OIDC)
+
+# Serialize runs so concurrent triggers (e.g. workflow_run + manual dispatch)
+# don't race on `gh release upload --clobber`.
+concurrency:
+  group: sign-${{ github.event.workflow_run.head_branch || github.event.inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   wait-assets:
@@ -41,9 +51,10 @@ jobs:
       - name: Poll until macOS tarballs exist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          TAG: ${{ github.event.workflow_run.head_branch || github.event.inputs.tag }}
         run: |
           set -euo pipefail
+          TAG="${TAG#refs/tags/}"
           for i in $(seq 1 60); do
             names=$(gh release view "$TAG" --repo "${{ github.repository }}" \
               --json assets -q '[.assets[].name] | join("\n")')
@@ -64,10 +75,11 @@ jobs:
       - name: Re-codesign + re-upload macOS tarballs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          TAG: ${{ github.event.workflow_run.head_branch || github.event.inputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          TAG="${TAG#refs/tags/}"
           for triple in x86_64-apple-darwin aarch64-apple-darwin; do
             asset="codegraph-$triple.tar.xz"
             echo "== $asset =="
@@ -94,10 +106,11 @@ jobs:
       - name: Sign every binary archive
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          TAG: ${{ github.event.workflow_run.head_branch || github.event.inputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          TAG="${TAG#refs/tags/}"
           mkdir -p dl
           gh release download "$TAG" --repo "$REPO" --dir dl
           shopt -s nullglob
