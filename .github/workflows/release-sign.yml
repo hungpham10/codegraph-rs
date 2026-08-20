@@ -48,8 +48,8 @@ jobs:
             names=$(gh release view "$TAG" --repo "${{ github.repository }}" \
               --json assets -q '[.assets[].name] | join("\n")')
             echo "assets so far: $(echo "$names" | wc -l)"
-            if echo "$names" | grep -qx 'codegraph-aarch64-apple-darwin.tar.gz' \
-               && echo "$names" | grep -qx 'codegraph-x86_64-apple-darwin.tar.gz'; then
+            if echo "$names" | grep -qx 'codegraph-aarch64-apple-darwin.tar.xz' \
+               && echo "$names" | grep -qx 'codegraph-x86_64-apple-darwin.tar.xz'; then
               echo "darwin assets present"; exit 0
             fi
             sleep 15
@@ -69,16 +69,16 @@ jobs:
         run: |
           set -euo pipefail
           for triple in x86_64-apple-darwin aarch64-apple-darwin; do
-            asset="codegraph-$triple.tar.gz"
+            asset="codegraph-$triple.tar.xz"
             echo "== $asset =="
             rm -rf work && mkdir work && cd work
             gh release download "$TAG" --repo "$REPO" --pattern "$asset" --dir .
-            tar -xzf "$asset"
+            tar -xJf "$asset"
             bin=$(find . -name codegraph -type f | head -n1)
             echo "codesign --force --deep --sign - $bin"
             codesign --force --deep --sign - "$bin"
             top=$(basename "$(dirname "$bin")")
-            tar -czf "../$asset" "$top"
+            tar -cJf "../$asset" "$top"
             cd ..
             sha=$(sha256sum "$asset" | awk '{print $1}')
             echo "$sha" > "$asset.sha256"
@@ -101,7 +101,7 @@ jobs:
           mkdir -p dl
           gh release download "$TAG" --repo "$REPO" --dir dl
           shopt -s nullglob
-          for f in dl/codegraph-*.tar.gz dl/codegraph-*.zip; do
+          for f in dl/codegraph-*.tar.xz dl/codegraph-*.zip; do
             echo "cosign $f"
             cosign sign-blob --yes "$f" \
               --output-signature "$f.sig" \

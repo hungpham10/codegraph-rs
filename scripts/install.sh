@@ -22,13 +22,13 @@ esac
 tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -m1 tag_name | sed -E 's/.*"([^"]+)".*/\1/')"
 [ -n "$tag" ] || { echo "could not detect latest tag" >&2; exit 1; }
 
-url="https://github.com/$REPO/releases/download/$tag/codegraph-$target.tar.gz"
+url="https://github.com/$REPO/releases/download/$tag/codegraph-$target.tar.xz"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "Downloading $url"
-curl -fsSL "$url" -o "$tmp/cg.tar.gz"
-tar -xzf "$tmp/cg.tar.gz" -C "$tmp"
+curl -fsSL "$url" -o "$tmp/cg.tar.xz"
+tar -xJf "$tmp/cg.tar.xz" -C "$tmp"
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
 

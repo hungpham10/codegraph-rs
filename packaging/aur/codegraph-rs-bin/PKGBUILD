@@ -1,6 +1,6 @@
 # Maintainer: Hung Pham <hung0913208@icloud.com>
 pkgname=codegraph-rs-bin
-pkgver=2.0.3
+pkgver=2.0.4
 pkgrel=1
 pkgdesc="Local-first code intelligence: tree-sitter knowledge graph + MCP server (prebuilt binary)"
 arch=('x86_64' 'aarch64')

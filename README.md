@@ -88,10 +88,10 @@ sudo dnf install ./codegraph-*.rpm
 
    | Platform | File |
    |---|---|
-   | Linux x86_64 | `codegraph-x86_64-unknown-linux-musl.tar.gz` |
-   | Linux aarch64 | `codegraph-aarch64-unknown-linux-gnu.tar.gz` |
-   | macOS x86_64 | `codegraph-x86_64-apple-darwin.tar.gz` |
-   | macOS arm64 | `codegraph-aarch64-apple-darwin.tar.gz` |
+   | Linux x86_64 | `codegraph-x86_64-unknown-linux-musl.tar.xz` |
+   | Linux aarch64 | `codegraph-aarch64-unknown-linux-gnu.tar.xz` |
+   | macOS x86_64 | `codegraph-x86_64-apple-darwin.tar.xz` |
+   | macOS arm64 | `codegraph-aarch64-apple-darwin.tar.xz` |
    | Windows x86_64 | `codegraph-x86_64-pc-windows-msvc.zip` |
 
 2. Extract and place the `codegraph` binary somewhere on your `PATH`.
@@ -167,8 +167,8 @@ GitHub release. To verify a downloaded archive is authentic:
 cosign verify-blob \
   --certificate-identity-regexp 'https://github.com/hungpham10/codegraph-rs/.github/workflows/.*' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  --signature codegraph-x86_64-apple-darwin.tar.gz.sig \
-  codegraph-x86_64-apple-darwin.tar.gz
+  --signature codegraph-x86_64-apple-darwin.tar.xz.sig \
+  codegraph-x86_64-apple-darwin.tar.xz
 ```
 
 A *passing* verification confirms the file was produced by **this repo's CI**
