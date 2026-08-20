@@ -1,0 +1,25 @@
+class Codegraph < Formula
+  desc "Local-first code intelligence: tree-sitter knowledge graph + MCP server"
+  homepage "https://github.com/hungpham10/codegraph-rs"
+  version "@@VERSION@@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/hungpham10/codegraph-rs/releases/download/@@TAG@@/codegraph-aarch64-apple-darwin.tar.gz"
+      sha256 "@@ARM_SHA@@"
+    end
+    on_intel do
+      url "https://github.com/hungpham10/codegraph-rs/releases/download/@@TAG@@/codegraph-x86_64-apple-darwin.tar.gz"
+      sha256 "@@X86_SHA@@"
+    end
+  end
+
+  def install
+    bin.install "codegraph"
+  end
+
+  test do
+    assert_match "codegraph", shell_output("#{bin}/codegraph --version")
+  end
+end

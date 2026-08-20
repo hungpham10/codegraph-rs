@@ -19,7 +19,8 @@ version = "1.2.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
-repository = "https://github.com/cleboost/codegraph"
+repository = "https://github.com/hungpham10/codegraph-rs"
+homepage = "https://github.com/hungpham10/codegraph-rs"
 authors = ["Cleboost <clement.balarot@gmail.com>"]
 
 [workspace.dependencies]
@@ -109,3 +110,8 @@ panic = "abort"
 [profile.release-small]
 inherits = "release"
 opt-level = "z"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

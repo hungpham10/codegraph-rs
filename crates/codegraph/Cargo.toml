@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Local-first code intelligence: tree-sitter knowledge graph + MCP server."
 
 [[bin]]
@@ -15,6 +16,7 @@ codegraph-graph     = { path = "../codegraph-graph", features = ["sqlite", "lmdb
 codegraph-extract   = { path = "../codegraph-extract" }
 codegraph-mcp       = { path = "../codegraph-mcp", features = ["http"] }
 codegraph-graphql   = { path = "../codegraph-graphql" }
+codegraph-installer = { path = "../codegraph-installer" }
 clap = { workspace = true }
 tokio = { workspace = true }
 notify = { workspace = true }
@@ -41,3 +43,32 @@ fastembed = ["codegraph-graph/fastembed"]
 # feature này sẽ lỗi (ort coreml chỉ compile trên macOS). Metal EP chưa được
 # expose bởi bản ort hiện tại → "metal" config cũng map sang CoreML.
 apple-accel = ["codegraph-graph/apple-accel"]
+
+# --- Native Linux packaging manifests (cargo-deb / cargo-rpm) ---
+
+[package.metadata.deb]
+maintainer = "Cleboost <clement.balarot@gmail.com>"
+copyright = "2024, Cleboost <clement.balarot@gmail.com>"
+extended-description = """\
+codegraph is a local-first code intelligence engine: it builds a tree-sitter \
+knowledge graph of your workspace and exposes it through an MCP server and a \
+GraphQL API for AI agents (Claude Code, Cursor, Codex, …)."""
+section = "devel"
+priority = "optional"
+assets = [
+    ["../../README.md", "usr/share/doc/codegraph/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/codegraph/LICENSE", "644"],
+]
+
+[package.metadata.rpm]
+package = "codegraph"
+license = "MIT"
+summary = "Local-first code intelligence: tree-sitter knowledge graph + MCP server"
+description = """\
+codegraph is a local-first code intelligence engine: it builds a tree-sitter \
+knowledge graph of your workspace and exposes it through an MCP server and a \
+GraphQL API for AI agents (Claude Code, Cursor, Codex, …)."""
+assets = [
+    ["../../README.md", "/usr/share/doc/codegraph/README.md", "644"],
+    ["../../LICENSE", "/usr/share/doc/codegraph/LICENSE", "644"],
+]

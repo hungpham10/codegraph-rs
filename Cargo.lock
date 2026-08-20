@@ -719,6 +719,7 @@ dependencies = [
  "codegraph-extract",
  "codegraph-graph",
  "codegraph-graphql",
+ "codegraph-installer",
  "codegraph-mcp",
  "ignore",
  "indicatif",

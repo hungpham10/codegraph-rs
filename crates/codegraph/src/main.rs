@@ -4,6 +4,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use codegraph_extract::{ExtractStats, Orchestrator};
 use codegraph_graph::{GraphIndex, SharedGraphIndex};
 use codegraph_mcp::CodegraphServer;
+use std::sync::Arc;
 
 #[cfg(feature = "fastembed")]
 use codegraph_graph::embeddings::warm_model_cache;
@@ -49,6 +50,28 @@ enum Cmd {
     },
     /// Remove the .codegraph/ directory.
     Deinit,
+    /// Register codegraph as an MCP server for an AI agent (e.g. Claude Code),
+    /// so the agent can launch `codegraph serve --mcp`. Writes the agent's config
+    /// (e.g. `~/.claude/settings.json`). After a Homebrew install, this points
+    /// the agent at the brew-installed `codegraph`.
+    Install {
+        /// Target agent: claude (default), cursor, codex, opencode, hermes,
+        /// antigravity, or `all`.
+        #[arg(long, default_value = "claude")]
+        target: String,
+        /// Install globally (user home) instead of project-local.
+        #[arg(long, default_value_t = false)]
+        global: bool,
+    },
+    /// Remove codegraph's MCP server registration from an AI agent.
+    Uninstall {
+        /// Target agent (same values as `install`).
+        #[arg(long, default_value = "claude")]
+        target: String,
+        /// Remove the global (user-home) registration instead of project-local.
+        #[arg(long, default_value_t = false)]
+        global: bool,
+    },
     /// Diagnose the environment: OS, codegraph version, whether the workspace is
     /// initialized, index stats, and external tools (git/tar) on PATH.
     Doctor,
@@ -154,7 +177,7 @@ async fn main() -> Result<()> {
     match cmd {
         Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
         Cmd::Deinit => cmd_deinit(&root),
-        Cmd::Doctor => cmd_doctor(&root).await,
+
         #[cfg(feature = "fastembed")]
         Cmd::Embed { model, cache_dir } => cmd_embed(&model, cache_dir.as_deref()).await,
         Cmd::Serve {
@@ -278,109 +301,7 @@ fn cmd_deinit(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-/// `codegraph doctor`: kiểm tra môi trường cơ bản và in báo cáo human-readable
-/// với status `[OK]` / `[WARN]` / `[FAIL]`. Exit code ≠ 0 nếu có bất kỳ `[FAIL]`.
-async fn cmd_doctor(root: &Utf8Path) -> Result<()> {
-    let mut ok = 0u32;
-    let mut warn = 0u32;
-    let mut fail = 0u32;
 
-    // 1. Binary / version — luôn OK (đang chạy).
-    println!(
-        "[OK]   codegraph {} ({} / {})",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
-    ok += 1;
-
-    // 2. Workspace root.
-    println!("[OK]   workspace: {root}");
-    ok += 1;
-
-    // 3. Đã init chưa (thư mục `.codegraph/` tồn tại).
-    let initialized = is_initialized(root);
-    if initialized {
-        println!("[OK]   initialized: .codegraph/ present");
-        ok += 1;
-    } else {
-        println!("[WARN] not initialized: run `codegraph init`");
-        warn += 1;
-    }
-
-    // 4. Index stats (chỉ khi đã init) — đọc `sg_stats` từ đĩa O(1).
-    if initialized {
-        match codegraph_extract::ExtractConfig::load(root).storage_route(root) {
-            Some(route) => match SharedGraphIndex::open_route(Some(route)).await {
-                Ok(idx) => match idx.stats_cached().await {
-                    Some(s) => {
-                        println!(
-                            "[OK]   index: {} symbols, {} chains, {} edges, {} files",
-                            s.symbols, s.chains, s.edges, s.files
-                        );
-                        ok += 1;
-                    }
-                    None => {
-                        println!("[WARN] index empty: run `codegraph init`");
-                        warn += 1;
-                    }
-                },
-                Err(e) => {
-                    println!("[FAIL] cannot open index: {e}");
-                    fail += 1;
-                }
-            },
-            // Backend in-memory: không có index local để inspect.
-            None => {
-                println!("[OK]   index: in-memory backend (no local index to inspect)");
-                ok += 1;
-            }
-        }
-    }
-
-    // 5. External tools: git & tar (Windows: Git for Windows + tar.exe tích hợp).
-    for tool in ["git", "tar"] {
-        match check_tool_version(tool) {
-            Some(v) => {
-                println!("[OK]   {tool}: {v}");
-                ok += 1;
-            }
-            None => {
-                println!("[WARN] {tool} not found on PATH (needed for codegraph_diff_simulate)");
-                warn += 1;
-            }
-        }
-    }
-
-    println!("---");
-    println!("{ok} OK, {warn} WARN, {fail} FAIL");
-    if fail > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-/// Trả version string của external tool nếu chạy được `--version`, ngược lại
-/// `None` (tool không có trên PATH hoặc thoát lỗi).
-fn check_tool_version(tool: &str) -> Option<String> {
-    let out = std::process::Command::new(tool)
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if stdout.is_empty() {
-        // Một số bản tool in version ra stderr.
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if stderr.is_empty() {
-            return Some("(present)".to_string());
-        }
-        Some(stderr)
-    } else {
-        Some(stdout)
-    }
 }
 
 /// `codegraph embed --model <x>`: pre-download model vào global cache để
