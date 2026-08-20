@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 codegraph-core     = { path = "../codegraph-core" }
-codegraph-graph    = { path = "../codegraph-graph", features = ["sqlite", "lmdb","redis","postgres","mysql", "bloom-search","fastembed"] }
+codegraph-graph    = { path = "../codegraph-graph", features = ["sqlite", "lmdb","redis","postgres","mysql", "bloom-search"] }
 codegraph-context  = { path = "../codegraph-context" }
 codegraph-extract  = { path = "../codegraph-extract" }
 codegraph-sboxes   = { path = "../codegraph-sboxes" }
@@ -21,3 +21,15 @@ tokio = { workspace = true }
 tempfile = "3"
 camino = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[features]
+# fastembed (semantic search / ONNX embedding) LÀ OPT-IN — KHÔNG bật mặc định.
+# Trước đây dòng dep ở trên hardcode bật `fastembed` trên `codegraph-graph`,
+# khiến feature unification kéo `ort` (ONNX Runtime, C++) vào TOÀN BỘ build của
+# binary `codegraph` (qua codegraph-mcp -> codegraph-api). Điều đó gây lỗi link
+# cross-compile: musl thiếu OpenSSL (openssl-sys), gnu thiếu symbol
+# `__isoc23_*` (glibc 2.38+). Giữ OPT-IN để release build sạch mọi target; ai
+# cần semantic search build source `--features fastembed` trên hệ thống tương
+# thích (glibc >= 2.38 hoặc macOS).
+default = []
+fastembed = ["codegraph-graph/fastembed"]
