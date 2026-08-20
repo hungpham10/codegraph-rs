@@ -294,3 +294,73 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  # --- Post-release signing (folded in from the old release-sign.yml) ---
+  # Runs as part of the same Release workflow, right after `host` uploads the
+  # artifacts to the GitHub Release. Keyless cosign provides verifiable
+  # provenance (.sig/.crt); ad-hoc codesign removes one macOS friction point.
+  # NOTE: this does NOT make Gatekeeper/SmartScreen trust the binary — that
+  # needs a paid Apple/Authenticode cert.
+  codesign-macos:
+    name: Ad-hoc codesign macOS binaries
+    needs: [host]
+    if: ${{ needs.plan.outputs.tag != '' }}
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Re-codesign + re-upload macOS tarballs
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="${TAG#refs/tags/}"
+          for triple in x86_64-apple-darwin aarch64-apple-darwin; do
+            asset="codegraph-$triple.tar.xz"
+            echo "== $asset =="
+            rm -rf work && mkdir work && cd work
+            gh release download "$TAG" --repo "$REPO" --pattern "$asset" --dir .
+            tar -xJf "$asset"
+            bin=$(find . -name codegraph -type f | head -n1)
+            echo "codesign --force --deep --sign - $bin"
+            codesign --force --deep --sign - "$bin"
+            top=$(basename "$(dirname "$bin")")
+            tar -cJf "../$asset" "$top"
+            cd ..
+            sha=$(sha256sum "$asset" | awk '{print $1}')
+            echo "$sha" > "$asset.sha256"
+            gh release upload "$TAG" "$asset" "$asset.sha256" --repo "$REPO" --clobber
+          done
+
+  cosign:
+    name: Cosign (keyless) sign artifacts
+    needs: [codesign-macos]
+    if: ${{ needs.plan.outputs.tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # upload .sig / .crt / re-packed tarball
+      id-token: write        # keyless cosign (Sigstore OIDC)
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign every binary archive
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="${TAG#refs/tags/}"
+          mkdir -p dl
+          gh release download "$TAG" --repo "$REPO" --dir dl
+          shopt -s nullglob
+          for f in dl/codegraph-*.tar.xz dl/codegraph-*.zip; do
+            echo "cosign $f"
+            cosign sign-blob --yes "$f" \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.crt"
+          done
+          shopt -u nullglob
+          gh release upload "$TAG" dl/codegraph-*.sig dl/codegraph-*.crt \
+            --repo "$REPO" --clobber
