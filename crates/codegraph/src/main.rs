@@ -403,10 +403,7 @@ fn current_exe_path() -> Result<Utf8PathBuf> {
 
 /// Chọn target agent theo `--target` (`all` = mọi target trong registry tương
 /// ứng với scope global/project).
-fn select_targets(
-    target: &str,
-    global: bool,
-) -> Vec<Arc<dyn codegraph_installer::AgentTarget>> {
+fn select_targets(target: &str, global: bool) -> Vec<Arc<dyn codegraph_installer::AgentTarget>> {
     let all = if global {
         codegraph_installer::registry()
     } else {
@@ -446,7 +443,10 @@ fn cmd_install(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
     };
     let targets = select_targets(target, global);
     if targets.is_empty() {
-        anyhow::bail!("unknown target '{target}' (known: {})", known_targets(global));
+        anyhow::bail!(
+            "unknown target '{target}' (known: {})",
+            known_targets(global)
+        );
     }
     for t in targets {
         match t.install(&opts)? {
@@ -454,14 +454,22 @@ fn cmd_install(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
                 eprintln!(
                     "✓ {}: installed → {}",
                     t.label(),
-                    paths.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                    paths
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             codegraph_installer::InstallReport::Updated(paths) => {
                 eprintln!(
                     "✓ {}: updated → {}",
                     t.label(),
-                    paths.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                    paths
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             codegraph_installer::InstallReport::Unchanged => {
@@ -491,7 +499,10 @@ fn cmd_uninstall(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
     };
     let targets = select_targets(target, global);
     if targets.is_empty() {
-        anyhow::bail!("unknown target '{target}' (known: {})", known_targets(global));
+        anyhow::bail!(
+            "unknown target '{target}' (known: {})",
+            known_targets(global)
+        );
     }
     for t in targets {
         match t.uninstall(&opts)? {
@@ -499,7 +510,11 @@ fn cmd_uninstall(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
                 eprintln!(
                     "✓ {}: removed → {}",
                     t.label(),
-                    paths.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                    paths
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             codegraph_installer::InstallReport::Unchanged => {
