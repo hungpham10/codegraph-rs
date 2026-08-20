@@ -1,21 +1,21 @@
 # codegraph install script for Windows
 #
 # Usage (latest release, one-liner):
-#   irm https://raw.githubusercontent.com/Cleboost/codegraph-rs/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/hungpham10/codegraph-rs/main/scripts/install.ps1 | iex
 #
 # Usage (pin a version / download the script first):
-#   irm https://raw.githubusercontent.com/Cleboost/codegraph-rs/main/scripts/install.ps1 -OutFile install.ps1
-#   .\install.ps1 -Version 1.2.0
+#   irm https://raw.githubusercontent.com/hungpham10/codegraph-rs/main/scripts/install.ps1 -OutFile install.ps1
+#   .\install.ps1 -Version 2.0.0
 
 [CmdletBinding()]
 param(
-    # Pin a specific version, e.g. "1.2.0". Empty = latest release.
+    # Pin a specific version, e.g. "2.0.0". Empty = latest release.
     [string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
 
-$Repo       = 'Cleboost/codegraph-rs'
+$Repo       = 'hungpham10/codegraph-rs'
 $BinName    = 'codegraph.exe'
 $Target     = 'x86_64-pc-windows-msvc'
 $AssetName  = "codegraph-$Target.zip"
