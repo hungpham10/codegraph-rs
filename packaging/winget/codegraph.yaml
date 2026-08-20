@@ -5,20 +5,20 @@
 # The release workflow (`release.yml`) produces that zip; fill the hash at
 # release time (or automate it in the release pipeline before submitting to
 # microsoft/winget-pkgs).
-PackageIdentifier: Cleboost.codegraph
+PackageIdentifier: hungpham10.codegraph
 PackageVersion: 1.2.0
 PackageName: codegraph
-Publisher: Cleboost
-PublisherUrl: https://github.com/Cleboost/codegraph-rs
+Publisher: Hung Pham
+PublisherUrl: https://github.com/hungpham10/codegraph-rs
 License: MIT
-LicenseUrl: https://github.com/Cleboost/codegraph-rs/blob/main/LICENSE
+LicenseUrl: https://github.com/hungpham10/codegraph-rs/blob/main/LICENSE
 ShortDescription: Local-first code intelligence (tree-sitter knowledge graph + MCP server)
 Description: codegraph indexes a codebase into a local-first knowledge graph and exposes it over an MCP server and GraphQL API.
-PackageUrl: https://github.com/Cleboost/codegraph-rs
+PackageUrl: https://github.com/hungpham10/codegraph-rs
 InstallerType: zip
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/Cleboost/codegraph-rs/releases/download/v1.2.0/codegraph-x86_64-pc-windows-msvc.zip
+    InstallerUrl: https://github.com/hungpham10/codegraph-rs/releases/download/v1.2.0/codegraph-x86_64-pc-windows-msvc.zip
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
     InstallerType: zip
 ManifestType: singleton

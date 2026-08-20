@@ -47,8 +47,8 @@ apple-accel = ["codegraph-graph/apple-accel"]
 # --- Native Linux packaging manifests (cargo-deb / cargo-rpm) ---
 
 [package.metadata.deb]
-maintainer = "Cleboost <clement.balarot@gmail.com>"
-copyright = "2024, Cleboost <clement.balarot@gmail.com>"
+maintainer = "Hung Pham <hung0913208@icloud.com>"
+copyright = "2024, Hung Pham <hung0913208@icloud.com>"
 extended-description = """\
 codegraph is a local-first code intelligence engine: it builds a tree-sitter \
 knowledge graph of your workspace and exposes it through an MCP server and a \

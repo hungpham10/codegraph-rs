@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{ArgAction, Parser, Subcommand};
 use codegraph_extract::{ExtractStats, Orchestrator};
-use codegraph_graph::{GraphIndex, SharedGraphIndex};
+use codegraph_graph::GraphIndex;
 use codegraph_mcp::CodegraphServer;
 use std::sync::Arc;
 
@@ -177,6 +177,9 @@ async fn main() -> Result<()> {
     match cmd {
         Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
         Cmd::Deinit => cmd_deinit(&root),
+        Cmd::Doctor => cmd_doctor(&root).await,
+        Cmd::Install { target, global } => cmd_install(&root, &target, global),
+        Cmd::Uninstall { target, global } => cmd_uninstall(&root, &target, global),
 
         #[cfg(feature = "fastembed")]
         Cmd::Embed { model, cache_dir } => cmd_embed(&model, cache_dir.as_deref()).await,
@@ -301,7 +304,214 @@ fn cmd_deinit(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
+/// `codegraph doctor`: in báo cáo chẩn đoán môi trường để người dùng (và agent)
+/// biết trạng thái hiện tại — đặc biệt hữu ích sau khi merge hỗ trợ Windows, vì
+/// codegraph giờ chạy cross-platform và có thể register cho nhiều agent (Claude,
+/// Cursor, Codex, …) với config path khác nhau trên mỗi OS.
+async fn cmd_doctor(root: &Utf8Path) -> Result<()> {
+    use std::env::consts::{ARCH, OS};
 
+    let binary = current_exe_path().unwrap_or_else(|_| Utf8PathBuf::from("codegraph"));
+    let initialized = is_initialized(root);
+
+    println!("codegraph doctor");
+    println!("================");
+    println!("Platform      : {OS} / {ARCH}");
+    println!("Version       : {}", env!("CARGO_PKG_VERSION"));
+    println!("Executable    : {binary}");
+    println!(
+        "Workspace     : {}",
+        if initialized {
+            root.as_str().to_string()
+        } else {
+            "<not initialized>".to_string()
+        }
+    );
+
+    if initialized {
+        match open_index(root).await {
+            Ok(idx) => {
+                let s = idx.stats();
+                println!(
+                    "Index stats  : {} files, {} symbols, {} chains, {} edges",
+                    s.files, s.symbols, s.chains, s.edges
+                );
+            }
+            Err(e) => println!("Index stats  : <unavailable: {e}>"),
+        }
+    }
+
+    // External tools codegraph relies on. On Windows, native package managers
+    // matter for install paths, so surface them too.
+    #[cfg(target_os = "windows")]
+    let tools: Vec<&str> = vec!["git", "tar", "winget", "choco", "scoop"];
+    #[cfg(not(target_os = "windows"))]
+    let tools: Vec<&str> = vec!["git", "tar"];
+    println!("Tools on PATH :");
+    for t in tools {
+        let ok = std::process::Command::new(t)
+            .arg("--version")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        println!("  - {t:<8} : {}", if ok { "ok" } else { "missing" });
+    }
+
+    // MCP agent setup status: which agents are installed and whether they are
+    // already wired to discover codegraph's tools. This is the cross-platform
+    // "is my tool registered" check.
+    println!("MCP agents   :");
+    for t in codegraph_installer::registry() {
+        for (scope, global) in [("global", true), ("project", false)] {
+            let opts = codegraph_installer::InstallOpts {
+                project_root: if global {
+                    None
+                } else {
+                    Some(Utf8PathBuf::from(root))
+                },
+                global,
+                binary_path: binary.clone(),
+                home_dir: None,
+            };
+            match t.detect(&opts) {
+                codegraph_installer::DetectStatus::NotFound => continue,
+                codegraph_installer::DetectStatus::AlreadyConfigured => {
+                    println!("  - {} [{}]: configured ✓", t.label(), scope);
+                }
+                codegraph_installer::DetectStatus::Found => {
+                    println!(
+                        "  - {} [{}]: agent present, codegraph NOT registered (run: codegraph install --target {} {})",
+                        t.label(),
+                        scope,
+                        t.id(),
+                        if global { "--global" } else { "" }
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Đường dẫn tuyệt đối tới binary `codegraph` đang chạy — dùng làm `command`
+/// trong config MCP của agent (Claude/Cursor/…).
+fn current_exe_path() -> Result<Utf8PathBuf> {
+    Utf8PathBuf::from_path_buf(std::env::current_exe()?)
+        .map_err(|p| anyhow!("non-UTF8 exe path: {}", p.display()))
+}
+
+/// Chọn target agent theo `--target` (`all` = mọi target trong registry tương
+/// ứng với scope global/project).
+fn select_targets(
+    target: &str,
+    global: bool,
+) -> Vec<Arc<dyn codegraph_installer::AgentTarget>> {
+    let all = if global {
+        codegraph_installer::registry()
+    } else {
+        codegraph_installer::project_registry()
+    };
+    if target.eq_ignore_ascii_case("all") {
+        return all;
+    }
+    all.into_iter().filter(|t| t.id() == target).collect()
+}
+
+/// Danh sách id target hợp lệ (dùng trong thông báo lỗi).
+fn known_targets(global: bool) -> String {
+    let all = if global {
+        codegraph_installer::registry()
+    } else {
+        codegraph_installer::project_registry()
+    };
+    let mut ids: Vec<&str> = all.iter().map(|t| t.id()).collect();
+    ids.push("all");
+    ids.join(", ")
+}
+
+/// `codegraph install --target <agent> [--global]`: register codegraph làm MCP
+/// server cho agent đã chọn, trỏ `command` vào binary hiện tại.
+fn cmd_install(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
+    let binary_path = current_exe_path()?;
+    let opts = codegraph_installer::InstallOpts {
+        project_root: if global {
+            None
+        } else {
+            Some(Utf8PathBuf::from(root))
+        },
+        global,
+        binary_path,
+        home_dir: None,
+    };
+    let targets = select_targets(target, global);
+    if targets.is_empty() {
+        anyhow::bail!("unknown target '{target}' (known: {})", known_targets(global));
+    }
+    for t in targets {
+        match t.install(&opts)? {
+            codegraph_installer::InstallReport::Installed(paths) => {
+                eprintln!(
+                    "✓ {}: installed → {}",
+                    t.label(),
+                    paths.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                );
+            }
+            codegraph_installer::InstallReport::Updated(paths) => {
+                eprintln!(
+                    "✓ {}: updated → {}",
+                    t.label(),
+                    paths.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                );
+            }
+            codegraph_installer::InstallReport::Unchanged => {
+                eprintln!("• {}: already configured", t.label());
+            }
+            codegraph_installer::InstallReport::Skipped(reason) => {
+                eprintln!("• {}: skipped ({reason})", t.label());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `codegraph uninstall --target <agent> [--global]`: gỡ registration MCP của
+/// codegraph khỏi agent đã chọn.
+fn cmd_uninstall(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
+    let binary_path = current_exe_path()?;
+    let opts = codegraph_installer::InstallOpts {
+        project_root: if global {
+            None
+        } else {
+            Some(Utf8PathBuf::from(root))
+        },
+        global,
+        binary_path,
+        home_dir: None,
+    };
+    let targets = select_targets(target, global);
+    if targets.is_empty() {
+        anyhow::bail!("unknown target '{target}' (known: {})", known_targets(global));
+    }
+    for t in targets {
+        match t.uninstall(&opts)? {
+            codegraph_installer::InstallReport::Updated(paths) => {
+                eprintln!(
+                    "✓ {}: removed → {}",
+                    t.label(),
+                    paths.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                );
+            }
+            codegraph_installer::InstallReport::Unchanged => {
+                eprintln!("• {}: not configured", t.label());
+            }
+            codegraph_installer::InstallReport::Skipped(reason) => {
+                eprintln!("• {}: skipped ({reason})", t.label());
+            }
+            codegraph_installer::InstallReport::Installed(_) => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 /// `codegraph embed --model <x>`: pre-download model vào global cache để
