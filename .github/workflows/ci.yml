@@ -103,46 +103,35 @@ jobs:
         run: |
           mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/001-initial-schema.sql
           mysql -h 127.0.0.1 -P 3306 -u root -ppostgres codegraph < sql/mysql/002-add-repos-registry.sql
-      - name: Install grcov
-        uses: taiki-e/install-action@grcov
-      - name: Run tests with coverage instrumentation
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Clean coverage data
+        run: cargo llvm-cov clean --workspace
+      - name: Run tests with coverage
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
-          LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
-        run: cargo test --workspace --no-fail-fast
+        run: cargo llvm-cov test --workspace --no-fail-fast --no-report
       - name: Storage integration tests (postgres)
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
-          LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
           TEST_RDBMS_DSN: "postgres://postgres:postgres@127.0.0.1:5432/codegraph"
           TEST_RDBMS_REPO_ID: "1"
-        run: cargo test -p codegraph-graph --features postgres --test rdbms -- --ignored --nocapture --test-threads=1
+        run: cargo llvm-cov test -p codegraph-graph --features postgres --test rdbms --no-report -- --ignored --nocapture --test-threads=1
       - name: Storage integration tests (mysql)
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
-          LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
           TEST_RDBMS_DSN: "mysql://root:postgres@127.0.0.1:3306/codegraph"
           TEST_RDBMS_REPO_ID: "1"
-        run: cargo test -p codegraph-graph --features mysql --test rdbms -- --ignored --nocapture --test-threads=1
+        run: cargo llvm-cov test -p codegraph-graph --features mysql --test rdbms --no-report -- --ignored --nocapture --test-threads=1
       - name: Storage integration tests (redis)
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
-          LLVM_PROFILE_FILE: "codegraph-%p-%m.profraw"
           TEST_REDIS_DSN: "redis://127.0.0.1:6379"
-        run: cargo test -p codegraph-graph --features redis --test redis -- --ignored --nocapture
+        run: cargo llvm-cov test -p codegraph-graph --features redis --test redis --no-report -- --ignored --nocapture
       - name: Generate coverage report (lcov)
         run: |
           mkdir -p ./target/coverage
-          grcov . \
-            --binary-path ./target/debug/ \
-            --source-dir . \
-            --output-type lcov \
-            --branch \
-            --ignore-not-existing \
-            --ignore "/*" \
-            --ignore "*/tests/*" \
-            --ignore "*/benches/*" \
-            --output-path ./target/coverage/lcov.info
+          cargo llvm-cov report --lcov --output-path ./target/coverage/lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
