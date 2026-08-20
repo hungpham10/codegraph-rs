@@ -37,7 +37,12 @@ lmdb-rkv = { workspace = true, optional = true }
 # Bundled sqlite cho sqlx (giống rusqlite của codegraph-db) — feature
 # unification khiến sqlx dùng chung bản build bundled này, không cần system lib.
 libsqlite3-sys = { version = "0.30", features = ["bundled"], optional = true }
-fastembed = { version = "5.17.4", optional = true }
+# fastembed mặc định kéo `hf-hub-native-tls` + `ort/tls-native` → openssl-sys.
+# Khi cross-compile sang musl (AUR/static Linux) pkg-config không tìm được
+# OpenSSL hệ thống → build lỗi. Tắt default-features và dùng biến thể rustls
+# (hf-hub-rustls-tls, ort-download-binaries-rustls-tls) để toàn bộ chain
+# (hf-hub, reqwest, ureq, ort) dùng rustls — build sạch trên mọi target.
+fastembed = { version = "5.17.4", optional = true, default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls", "image-models"] }
 
 # macOS-only: ONNX Runtime compile với feature `coreml` để chạy embedding trên
 # Apple Neural Engine / GPU (Apple Silicon). Chỉ được pull vào khi feature
