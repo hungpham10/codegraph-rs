@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  code-quality: write
-  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -130,11 +128,10 @@ jobs:
           RUSTFLAGS: "-Cinstrument-coverage"
           TEST_REDIS_DSN: "redis://127.0.0.1:6379"
         run: cargo llvm-cov test -p codegraph-graph --features redis --test redis --no-report -- --ignored --nocapture
-      - name: Generate coverage reports
+      - name: Generate coverage report (lcov)
         run: |
           mkdir -p ./target/coverage
           cargo llvm-cov report --lcov --output-path ./target/coverage/lcov.info
-          cargo llvm-cov report --cobertura --output-path ./target/coverage/cobertura.xml
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
@@ -144,13 +141,6 @@ jobs:
           files: ./target/coverage/lcov.info
           verbose: true
           fail_ci_if_error: false
-
-      - name: Upload coverage to GitHub
-        uses: actions/upload-code-coverage@v1
-        with:
-          file: ./target/coverage/cobertura.xml
-          language: rust
-          label: rust
 
   slim:
     name: slim build (no visualize)
