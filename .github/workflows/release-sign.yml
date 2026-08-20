@@ -20,6 +20,14 @@ name: Sign & Verify Release
 on:
   release:
     types: [published]
+  # Allow manually signing an already-published release (e.g. v2.0.1) from the
+  # Actions tab — useful for backfilling signatures without a new release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sign (e.g. v2.0.1)"
+        required: true
+        default: ""
 
 permissions:
   contents: write        # upload release assets (.sig / .crt / re-packed tarball)
@@ -33,7 +41,7 @@ jobs:
       - name: Poll until macOS tarballs exist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
@@ -56,7 +64,7 @@ jobs:
       - name: Re-codesign + re-upload macOS tarballs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -86,7 +94,7 @@ jobs:
       - name: Sign every binary archive
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
