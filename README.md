@@ -136,10 +136,8 @@ You can buy me a coffee by sending me money by MOMO
   </a>
 </p>
 
-<p align="center">
-  <a href='https://ko-fi.com/E1E11KPR01' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
-</p>
----
+Or send to me through
+[![ko-fi](https://ko-fi.com)](https://ko-fi.com)
 
 ## License
 
