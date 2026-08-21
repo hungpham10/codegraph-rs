@@ -21,7 +21,10 @@ rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/hungpham10/codegraph-rs"
 homepage = "https://github.com/hungpham10/codegraph-rs"
-authors = ["Cleboost <clement.balarot@gmail.com>"]
+authors = [
+     "Cleboost <clement.balarot@gmail.com>",
+     "Hung <hung.pham10@icloud.com>",
+]
 
 [workspace.dependencies]
 # core
