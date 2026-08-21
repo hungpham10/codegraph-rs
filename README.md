@@ -4,6 +4,7 @@
 [![CodSpeed Badge](https://img.shields.io/endpoint?url=https://app.codspeed.io//badge.json)](https://app.codspeed.io//hungpham10/codegraph-rs?utm_source=badge)
 [![codecov](https://codecov.io/gh/hungpham10/codegraph-rs/graph/badge.svg?token=PUSMFF0CM8)](https://codecov.io/gh/hungpham10/codegraph-rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/E1E11KPR01)
 
 > **Local-first semantic code graph for AI agents** — tree-sitter parsing, global symbol IDs, call chains with control-flow markers, served over MCP. Single **~58 MB** static binary.
 
@@ -135,9 +136,6 @@ You can buy me a coffee by sending me money by MOMO
     <img src="assets/sponsor/MOMO.JPG" alt="MoMo Sponsor" width="200" />
   </a>
 </p>
-
-Or send to me through
-[![ko-fi](https://ko-fi.com)](https://ko-fi.com)
 
 ## License
 
