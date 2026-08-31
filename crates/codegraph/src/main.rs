@@ -9,8 +9,6 @@ use std::sync::Arc;
 #[cfg(feature = "fastembed")]
 use codegraph_graph::embeddings::warm_model_cache;
 
-mod watcher;
-
 /// CLI tối giản: chỉ còn lifecycle (`init`/`deinit`) + MCP server (`serve --mcp`).
 /// Mọi query/interact đi qua MCP tools (`codegraph_search`, `codegraph_context`,
 /// `codegraph_status`, …) — CLI không lặp lại các lệnh đọc index nữa.

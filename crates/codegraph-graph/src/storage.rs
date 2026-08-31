@@ -39,7 +39,7 @@ pub(crate) fn decode_vector(b: &[u8]) -> Option<Vec<f32>> {
         return None;
     }
     let mut out = Vec::with_capacity(b.len() / 4);
-    for chunk in b.chunks_exact(4) {
+    for chunk in b.as_chunks::<4>().0 {
         out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Some(out)
@@ -95,8 +95,8 @@ pub(crate) fn encode_chain(chain: &[u64]) -> Vec<u8> {
 #[allow(dead_code)] // chỉ dùng qua get_chain (test/sqlite builds)
 pub(crate) fn decode_chain(bytes: &[u8]) -> Vec<u64> {
     bytes
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>().0.iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect()
 }
 
