@@ -11,14 +11,6 @@ use std::time::Duration;
 /// Spawn a debounced watcher that full re-indexes the workspace on file changes.
 /// Runs on a background tokio task; cancellation when the runtime drops.
 /// `dsn = None` (in-memory backend) → không có file ngoài để theo dõi, bỏ qua.
-pub fn spawn(root: Utf8PathBuf, dsn: Option<String>) {
-    let Some(dsn) = dsn else { return };
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = run(root, dsn) {
-            tracing::error!("watcher error: {e}");
-        }
-    });
-}
 
 fn run(root: Utf8PathBuf, dsn: String) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DebouncedEvent>>();
