@@ -141,7 +141,9 @@ fn list_val(list: &[usize]) -> Vec<u8> {
 }
 
 fn de_list(v: &[u8]) -> Vec<usize> {
-    v.as_chunks::<8>().0.iter()
+    v.as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| u64::from_le_bytes(*c) as usize)
         .collect()
 }

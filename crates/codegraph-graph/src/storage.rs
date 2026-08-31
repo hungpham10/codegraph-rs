@@ -95,7 +95,9 @@ pub(crate) fn encode_chain(chain: &[u64]) -> Vec<u8> {
 #[allow(dead_code)] // chỉ dùng qua get_chain (test/sqlite builds)
 pub(crate) fn decode_chain(bytes: &[u8]) -> Vec<u64> {
     bytes
-        .as_chunks::<8>().0.iter()
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| u64::from_le_bytes(*c))
         .collect()
 }

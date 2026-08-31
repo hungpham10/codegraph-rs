@@ -205,7 +205,7 @@ impl BloomFilter {
     #[inline]
     pub fn popcount(&self) -> u64 {
         let (chunks, remainder) = self.bits.as_chunks::<4>();
-    
+
         let mut total = 0u64;
         for chunk in chunks {
             total += (chunk[0].count_ones()
@@ -213,11 +213,11 @@ impl BloomFilter {
                 + chunk[2].count_ones()
                 + chunk[3].count_ones()) as u64;
         }
-    
+
         for &word in remainder {
             total += word.count_ones() as u64;
         }
-    
+
         total
     }
 
