@@ -43,8 +43,9 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
 use super::{
-    CategoryStorage, ChainStorage, EMPTY, EdgeDataStorage, EntityStorage, IndexCounts, NodeMetaStorage,
-    Result, ShortcutsStorage, StorageError, Tx, TxOp, decode_vector, encode_vector,
+    CategoryStorage, ChainStorage, EMPTY, EdgeDataStorage, EntityStorage, IndexCounts,
+    NodeMetaStorage, Result, ShortcutsStorage, StorageError, Tx, TxOp, decode_vector,
+    encode_vector,
 };
 
 #[cfg(feature = "bloom-search")]

@@ -29,13 +29,13 @@ use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 
+#[cfg(feature = "bloom-search")]
+use super::BloomStorage;
 use super::{
     CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, FileInfo, NodeMetaStorage,
     Result, ShortcutsStorage, Storage, StorageError, Symbol, Tx, TxOp, decode_vector,
     encode_vector,
 };
-#[cfg(feature = "bloom-search")]
-use super::BloomStorage;
 
 // ==================== KeyBuilder ====================
 

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use super::{
-    CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, IndexCounts, NodeMetaStorage,
-    Result, ShortcutsStorage, Storage, StorageError, Tx, decode_chain, decode_vector,
-    encode_chain, encode_vector,
-};
 #[cfg(feature = "bloom-search")]
 use super::BloomStorage;
+use super::{
+    CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, IndexCounts, NodeMetaStorage,
+    Result, ShortcutsStorage, Storage, StorageError, Tx, decode_chain, decode_vector, encode_chain,
+    encode_vector,
+};
 use async_trait::async_trait;
 use codegraph_core::{Annotation, FileInfo, ScopeLevel, Symbol, SymbolKind};
 use sqlx::postgres::{PgPoolOptions, PgRow};

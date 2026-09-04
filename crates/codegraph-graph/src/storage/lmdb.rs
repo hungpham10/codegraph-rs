@@ -23,13 +23,13 @@ use codegraph_core::{FileInfo, Symbol};
 use lmdb::EnvironmentFlags;
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
 
-use super::{
-    CategoryStorage, ChainStorage, EMPTY, EdgeDataStorage, EntityStorage, IndexCounts, NodeMetaStorage,
-    Result, ShortcutsStorage, Storage, StorageError, Tx, TxOp, decode_chain, decode_vector,
-    encode_chain, encode_vector,
-};
 #[cfg(feature = "bloom-search")]
 use super::BloomStorage;
+use super::{
+    CategoryStorage, ChainStorage, EMPTY, EdgeDataStorage, EntityStorage, IndexCounts,
+    NodeMetaStorage, Result, ShortcutsStorage, Storage, StorageError, Tx, TxOp, decode_chain,
+    decode_vector, encode_chain, encode_vector,
+};
 
 /// Map lỗi LMDB → `StorageError`.
 fn e(err: impl std::fmt::Display) -> StorageError {
@@ -602,7 +602,9 @@ impl NodeMetaStorage for LmdbStorage {
 
     async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self.get_opt(&tx, self.meta, &k8(record))?.map(|v| v.to_vec()))
+        Ok(self
+            .get_opt(&tx, self.meta, &k8(record))?
+            .map(|v| v.to_vec()))
     }
 
     async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
@@ -615,7 +617,10 @@ impl NodeMetaStorage for LmdbStorage {
 
     async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self.get_opt(&tx, self.keylen, &k8(record))?.map(de_u64).map(|v| v as usize))
+        Ok(self
+            .get_opt(&tx, self.keylen, &k8(record))?
+            .map(de_u64)
+            .map(|v| v as usize))
     }
 }
 

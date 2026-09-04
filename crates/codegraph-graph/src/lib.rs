@@ -49,12 +49,12 @@ pub use crate::storage::sqlite::SqliteStorage;
 pub use crate::storage::{InMemoryStorage, IndexCounts, Storage, Tx};
 // Sub-traits of `Storage` — callers that need only one facet (e.g. a chain-engine
 // read path) can name it directly instead of taking the full umbrella.
+#[cfg(feature = "bloom-search")]
+pub use crate::storage::BloomStorage;
 pub use crate::storage::{
     CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, NodeMetaStorage,
     ShortcutsStorage,
 };
-#[cfg(feature = "bloom-search")]
-pub use crate::storage::BloomStorage;
 use crate::vector_index::VectorIndex;
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
@@ -1102,11 +1102,7 @@ impl GraphIndex {
         if candidates.is_empty() {
             // 3a. Go/Import alias: resolve "var.method" via field type to "TypeName.method".
             if let Some(qualified) = self.alias_qualified_name(caller_id, &call.call_name) {
-                let alias_ids = self
-                    .name_index
-                    .get(&qualified)
-                    .cloned()
-                    .unwrap_or_default();
+                let alias_ids = self.name_index.get(&qualified).cloned().unwrap_or_default();
                 candidates.extend(alias_ids);
             }
 
@@ -1118,11 +1114,7 @@ impl GraphIndex {
                 .unwrap_or("")
                 .to_lowercase();
             if !short.is_empty() {
-                let short_ids = self
-                    .name_index
-                    .get(&short)
-                    .cloned()
-                    .unwrap_or_default();
+                let short_ids = self.name_index.get(&short).cloned().unwrap_or_default();
                 candidates.extend(short_ids);
             }
         }
@@ -1237,7 +1229,10 @@ impl GraphIndex {
     fn field_declared_type(&self, caller_id: u64, call_name: &str) -> Option<String> {
         // Lấy tên field/receiver phía trước dấu `.` cuối.
         // VD: "legacyAdapter.doWork" → "legacyAdapter", "doWork" → None (không có receiver).
-        let field_name = call_name.rsplit('.').nth(1).or_else(|| call_name.rsplit('.').next())?;
+        let field_name = call_name
+            .rsplit('.')
+            .nth(1)
+            .or_else(|| call_name.rsplit('.').next())?;
         if field_name == call_name {
             // Không có dấu '.' → call_name chính là tên method, không phải dạng `var.method`.
             return None;
@@ -3683,7 +3678,9 @@ mod tests {
             ],
             chains: HashMap::new(),
             calls: vec![],
-        }]).await.unwrap();
+        }])
+        .await
+        .unwrap();
 
         // "legacyAdapter.doWork" → field_name = "legacyAdapter" → type_name = "LegacyAdapter" → "legacyadapter"
         assert_eq!(

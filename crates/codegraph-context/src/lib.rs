@@ -90,10 +90,17 @@ pub async fn build_response(
         .page;
     if candidates.is_empty() {
         // Fallback: query as filename (strip extension for symbol-name search).
-        let query_stripped = req.query.split('/').last()
+        let query_stripped = req
+            .query
+            .split('/')
+            .last()
             .and_then(|f| {
                 let without_ext = f.rsplitn(2, '.').nth(1)?;
-                if without_ext.is_empty() { None } else { Some(without_ext.to_string()) }
+                if without_ext.is_empty() {
+                    None
+                } else {
+                    Some(without_ext.to_string())
+                }
             })
             .unwrap_or_else(|| req.query.clone());
         candidates = idx

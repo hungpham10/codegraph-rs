@@ -7,8 +7,7 @@ use codegraph_core::{FileInfo, Symbol};
 
 use super::{
     CategoryStorage, ChainStorage, EMPTY, EdgeDataStorage, EntityStorage, IndexCounts,
-    NodeMetaStorage, Result, ShortcutsStorage, StorageError, Tx, TxOp, decode_chain,
-    encode_chain,
+    NodeMetaStorage, Result, ShortcutsStorage, StorageError, Tx, TxOp, decode_chain, encode_chain,
 };
 
 #[cfg(feature = "bloom-search")]

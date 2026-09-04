@@ -816,7 +816,11 @@ impl<T: Element> Radix<T> {
         tx.update_node(
             parent,
             Some(Self::from_vec(&root_prefix)),
-            Some(if inserting_at_parent { value } else { storage::EMPTY }),
+            Some(if inserting_at_parent {
+                value
+            } else {
+                storage::EMPTY
+            }),
         )
         .await?;
 
@@ -1032,7 +1036,10 @@ mod tests {
         let results = tree.search_prefix(storage::EMPTY, &k("hel")).await.unwrap();
         assert_eq!(results.len(), 3);
 
-        let results = tree.search_prefix(storage::EMPTY, &k("hello")).await.unwrap();
+        let results = tree
+            .search_prefix(storage::EMPTY, &k("hello"))
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], (k("hello"), 1));
 
@@ -1061,7 +1068,10 @@ mod tests {
         }
         assert_eq!(tree.r#match(storage::EMPTY, &k("aaaab")).await.unwrap(), 20);
 
-        let results = tree.search_prefix(storage::EMPTY, &k("aaaaaa")).await.unwrap();
+        let results = tree
+            .search_prefix(storage::EMPTY, &k("aaaaaa"))
+            .await
+            .unwrap();
         assert_eq!(results.len(), 10);
     }
 
