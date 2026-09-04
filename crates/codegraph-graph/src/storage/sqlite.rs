@@ -43,8 +43,13 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
 use super::{
-    EMPTY, IndexCounts, Result, Storage, StorageError, Tx, TxOp, decode_vector, encode_vector,
+    CategoryStorage, ChainStorage, EMPTY, EdgeDataStorage, EntityStorage, IndexCounts,
+    NodeMetaStorage, Result, ShortcutsStorage, StorageError, Tx, TxOp, decode_vector,
+    encode_vector,
 };
+
+#[cfg(feature = "bloom-search")]
+use super::BloomStorage;
 use crate::embeddings::resolve_vss_extensions;
 
 fn db_err(e: sqlx::Error) -> StorageError {
@@ -252,7 +257,7 @@ impl SqliteStorage {
 }
 
 #[async_trait]
-impl Storage for SqliteStorage {
+impl CategoryStorage for SqliteStorage {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         // `UPDATE ... RETURNING next - 1` cấp id atomic — không cần SELECT rồi
@@ -336,7 +341,42 @@ impl Storage for SqliteStorage {
         Ok(out)
     }
 
-    #[cfg(feature = "bloom-search")]
+    async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO rt_roots (shard, root) VALUES (?1, ?2)
+             ON CONFLICT(shard) DO UPDATE SET root = excluded.root",
+        )
+        .bind(shard as i64)
+        .bind(root as i64)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_root(&self, shard: usize) -> Result<usize> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let root: Option<i64> = sqlx::query_scalar("SELECT root FROM rt_roots WHERE shard = ?1")
+            .bind(shard as i64)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        Ok(root.unwrap_or(EMPTY as i64) as usize)
+    }
+
+    fn new_tx(&self) -> Box<dyn Tx> {
+        Box::new(SqliteTx {
+            pool: self.pool.clone(),
+            nodes: Vec::new(),
+            ops: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "bloom-search")]
+#[async_trait]
+impl BloomStorage for SqliteStorage {
     async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         sqlx::query(
@@ -351,7 +391,6 @@ impl Storage for SqliteStorage {
         Ok(())
     }
 
-    #[cfg(feature = "bloom-search")]
     async fn get_node_bloom(&self, id: usize) -> Result<Option<Vec<u8>>> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         let row = sqlx::query("SELECT bloom FROM rt_node_blooms WHERE id = ?1")
@@ -365,7 +404,10 @@ impl Storage for SqliteStorage {
         let bloom: Vec<u8> = row.try_get(0).map_err(db_err)?;
         Ok(Some(bloom))
     }
+}
 
+#[async_trait]
+impl EdgeDataStorage for SqliteStorage {
     async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         sqlx::query(
@@ -398,22 +440,10 @@ impl Storage for SqliteStorage {
             .map_err(db_err)?;
         Ok(())
     }
+}
 
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT id, data FROM rt_edges ORDER BY id")
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        for (id, data) in rows {
-            f(id as usize, &data)?;
-        }
-        Ok(())
-    }
-
+#[async_trait]
+impl NodeMetaStorage for SqliteStorage {
     async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         sqlx::query(
@@ -448,6 +478,103 @@ impl Storage for SqliteStorage {
         Ok(())
     }
 
+    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO rt_meta (record, meta) VALUES (?1, ?2)
+             ON CONFLICT(record) DO UPDATE SET meta = excluded.meta",
+        )
+        .bind(record as i64)
+        .bind(meta)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let meta: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT meta FROM rt_meta WHERE record = ?1")
+                .bind(record as i64)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        Ok(meta)
+    }
+
+    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO rt_keylen (record, len) VALUES (?1, ?2)
+             ON CONFLICT(record) DO UPDATE SET len = excluded.len",
+        )
+        .bind(record as i64)
+        .bind(len as i64)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let len: Option<i64> = sqlx::query_scalar("SELECT len FROM rt_keylen WHERE record = ?1")
+            .bind(record as i64)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        Ok(len.map(|x| x as usize))
+    }
+}
+
+#[async_trait]
+impl ShortcutsStorage for SqliteStorage {
+    async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO rt_shortcuts (shard, elem, node_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(shard as i64)
+        .bind(elem)
+        .bind(node_id as i64)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_shortcut_nodes(&self, shard: usize, elem: &[u8]) -> Result<Vec<usize>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let rows = sqlx::query(
+            "SELECT node_id FROM rt_shortcuts WHERE shard = ?1 AND elem = ?2 ORDER BY node_id",
+        )
+        .bind(shard as i64)
+        .bind(elem)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let c: i64 = r.try_get(0).map_err(db_err)?;
+            out.push(c as usize);
+        }
+        Ok(out)
+    }
+
+    async fn clear_shortcuts(&mut self) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query("DELETE FROM rt_shortcuts")
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ChainStorage for SqliteStorage {
     async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         sqlx::query(
@@ -481,7 +608,10 @@ impl Storage for SqliteStorage {
             .map_err(db_err)?;
         Ok(())
     }
+}
 
+#[async_trait]
+impl EntityStorage for SqliteStorage {
     async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         let data = serde_json::to_vec(sym).map_err(|e| StorageError::Internal(e.to_string()))?;
@@ -536,91 +666,6 @@ impl Storage for SqliteStorage {
             .await
             .map_err(db_err)?;
         Ok(next as u64)
-    }
-
-    async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        sqlx::query(
-            "INSERT INTO sg_embeddings (symbol_id, vector) VALUES (?1, ?2)
-             ON CONFLICT(symbol_id) DO UPDATE SET vector = excluded.vector",
-        )
-        .bind(symbol_id as i64)
-        .bind(encode_vector(vector))
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
-        // Mirror vào `vss0` (HNSW ANN) nếu extension khả dụng.
-        if self.vss_available.load(Ordering::SeqCst) {
-            sqlx::query("INSERT OR REPLACE INTO sg_vss(rowid, vec) VALUES (?1, ?2)")
-                .bind(symbol_id as i64)
-                .bind(encode_vector(vector))
-                .execute(&mut *conn)
-                .await
-                .map_err(db_err)?;
-        }
-        Ok(())
-    }
-
-    async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let data: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT vector FROM sg_embeddings WHERE symbol_id = ?1")
-                .bind(symbol_id as i64)
-                .fetch_optional(&mut *conn)
-                .await
-                .map_err(db_err)?;
-        Ok(data.and_then(|b| decode_vector(&b)))
-    }
-
-    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let rows: Vec<(i64, Vec<u8>)> =
-            sqlx::query_as("SELECT symbol_id, vector FROM sg_embeddings ORDER BY symbol_id")
-                .fetch_all(&mut *conn)
-                .await
-                .map_err(db_err)?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|(id, b)| decode_vector(&b).map(|v| (id as u64, v)))
-            .collect())
-    }
-
-    async fn clear_embeddings(&mut self) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        sqlx::query("DELETE FROM sg_embeddings")
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        if self.vss_available.load(Ordering::SeqCst) {
-            sqlx::query("DELETE FROM sg_vss")
-                .execute(&mut *conn)
-                .await
-                .map_err(db_err)?;
-        }
-        Ok(())
-    }
-
-    async fn knn(&self, query_vec: &[f32], k: usize) -> Result<Option<Vec<(u64, f32)>>> {
-        if !self.vss_available.load(Ordering::SeqCst) {
-            return Ok(None);
-        }
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        // `vss_search(vec, <query>)` trả các row gần nhất + `distance` (nhỏ = gần).
-        // Đảo dấu distance → `sim` (lớn = gần) đồng nhất với `VectorIndex::knn`.
-        let rows: Vec<(i64, f64)> = sqlx::query_as(
-            "SELECT rowid, distance FROM sg_vss
-             WHERE vss_search(vec, ?) ORDER BY distance LIMIT ?",
-        )
-        .bind(encode_vector(query_vec))
-        .bind(k as i64)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(db_err)?;
-        Ok(Some(
-            rows.into_iter()
-                .map(|(id, dist)| (id as u64, -dist as f32))
-                .collect(),
-        ))
     }
 
     async fn all_chains(&self) -> Result<Vec<(u64, Vec<u8>)>> {
@@ -817,129 +862,96 @@ impl Storage for SqliteStorage {
         Ok(())
     }
 
-    async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
+    async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         sqlx::query(
-            "INSERT INTO rt_roots (shard, root) VALUES (?1, ?2)
-             ON CONFLICT(shard) DO UPDATE SET root = excluded.root",
+            "INSERT INTO sg_embeddings (symbol_id, vector) VALUES (?1, ?2)
+             ON CONFLICT(symbol_id) DO UPDATE SET vector = excluded.vector",
         )
-        .bind(shard as i64)
-        .bind(root as i64)
+        .bind(symbol_id as i64)
+        .bind(encode_vector(vector))
         .execute(&mut *conn)
         .await
         .map_err(db_err)?;
+        // Mirror vào `vss0` (HNSW ANN) nếu extension khả dụng.
+        if self.vss_available.load(Ordering::SeqCst) {
+            sqlx::query("INSERT OR REPLACE INTO sg_vss(rowid, vec) VALUES (?1, ?2)")
+                .bind(symbol_id as i64)
+                .bind(encode_vector(vector))
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
         Ok(())
     }
 
-    async fn get_root(&self, shard: usize) -> Result<usize> {
+    async fn load_embedding(&self, symbol_id: u64) -> Result<Option<Vec<f32>>> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let root: Option<i64> = sqlx::query_scalar("SELECT root FROM rt_roots WHERE shard = ?1")
-            .bind(shard as i64)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        Ok(root.unwrap_or(EMPTY as i64) as usize)
-    }
-
-    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        sqlx::query(
-            "INSERT INTO rt_meta (record, meta) VALUES (?1, ?2)
-             ON CONFLICT(record) DO UPDATE SET meta = excluded.meta",
-        )
-        .bind(record as i64)
-        .bind(meta)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
-        Ok(())
-    }
-
-    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let meta: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT meta FROM rt_meta WHERE record = ?1")
-                .bind(record as i64)
+        let data: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT vector FROM sg_embeddings WHERE symbol_id = ?1")
+                .bind(symbol_id as i64)
                 .fetch_optional(&mut *conn)
                 .await
                 .map_err(db_err)?;
-        Ok(meta)
+        Ok(data.and_then(|b| decode_vector(&b)))
     }
 
-    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
+    async fn load_all_embeddings(&self) -> Result<HashMap<u64, Vec<f32>>> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        sqlx::query(
-            "INSERT INTO rt_keylen (record, len) VALUES (?1, ?2)
-             ON CONFLICT(record) DO UPDATE SET len = excluded.len",
-        )
-        .bind(record as i64)
-        .bind(len as i64)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
-        Ok(())
+        let rows: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT symbol_id, vector FROM sg_embeddings ORDER BY symbol_id")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, b)| decode_vector(&b).map(|v| (id as u64, v)))
+            .collect())
     }
 
-    async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
+    async fn clear_embeddings(&mut self) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let len: Option<i64> = sqlx::query_scalar("SELECT len FROM rt_keylen WHERE record = ?1")
-            .bind(record as i64)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        Ok(len.map(|x| x as usize))
-    }
-
-    async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        sqlx::query(
-            "INSERT INTO rt_shortcuts (shard, elem, node_id) VALUES (?1, ?2, ?3)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(shard as i64)
-        .bind(elem)
-        .bind(node_id as i64)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
-        Ok(())
-    }
-
-    async fn get_shortcut_nodes(&self, shard: usize, elem: &[u8]) -> Result<Vec<usize>> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let rows = sqlx::query(
-            "SELECT node_id FROM rt_shortcuts WHERE shard = ?1 AND elem = ?2 ORDER BY node_id",
-        )
-        .bind(shard as i64)
-        .bind(elem)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(db_err)?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let c: i64 = r.try_get(0).map_err(db_err)?;
-            out.push(c as usize);
-        }
-        Ok(out)
-    }
-
-    async fn clear_shortcuts(&mut self) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        sqlx::query("DELETE FROM rt_shortcuts")
+        sqlx::query("DELETE FROM sg_embeddings")
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
+        if self.vss_available.load(Ordering::SeqCst) {
+            sqlx::query("DELETE FROM sg_vss")
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
         Ok(())
     }
 
-    fn new_tx(&self) -> Box<dyn Tx> {
-        Box::new(SqliteTx {
-            pool: self.pool.clone(),
-            nodes: Vec::new(),
-            ops: Vec::new(),
-        })
+    async fn knn(&self, query_vec: &[f32], k: usize) -> Result<Option<Vec<(u64, f32)>>> {
+        if !self.vss_available.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        // `vss_search(vec, <query>)` trả các row gần nhất + `distance` (nhỏ = gần).
+        // Đảo dấu distance → `sim` (lớn = gần) đồng nhất với `VectorIndex::knn`.
+        let rows: Vec<(i64, f64)> = sqlx::query_as(
+            "SELECT rowid, distance FROM sg_vss
+             WHERE vss_search(vec, ?) ORDER BY distance LIMIT ?",
+        )
+        .bind(encode_vector(query_vec))
+        .bind(k as i64)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(Some(
+            rows.into_iter()
+                .map(|(id, dist)| (id as u64, -dist as f32))
+                .collect(),
+        ))
     }
 }
+
+use super::Storage;
+
+#[async_trait]
+impl Storage for SqliteStorage {}
 
 // ==================== SqliteTx ====================
 

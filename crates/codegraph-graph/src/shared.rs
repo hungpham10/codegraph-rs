@@ -238,20 +238,20 @@ impl SharedGraphIndex {
                 return Some(s.clone());
             }
         }
-        let st: Arc<dyn Storage> = match &self.route {
+        let st: Option<Arc<dyn Storage>> = match &self.route {
             #[cfg(feature = "sqlite")]
             Some(StorageRoute::Local(d)) if d.starts_with("sqlite://") => {
                 let s = crate::storage::sqlite::SqliteStorage::open(trim_scheme(d))
                     .await
                     .ok()?;
-                Arc::new(s)
+                Some(Arc::new(s))
             }
             #[cfg(feature = "lmdb")]
             Some(StorageRoute::Local(d)) if d.starts_with("lmdb://") => {
                 let s = crate::storage::lmdb::LmdbStorage::open(trim_scheme(d))
                     .await
                     .ok()?;
-                Arc::new(s)
+                Some(Arc::new(s))
             }
             #[cfg(any(feature = "postgres", feature = "mysql"))]
             Some(StorageRoute::Sharded { dsns, repo_id, .. }) => {
@@ -263,11 +263,11 @@ impl SharedGraphIndex {
                         let s = crate::storage::postgres::PostgresStorage::open(dsn, rid)
                             .await
                             .ok()?;
-                        Arc::new(s)
+                        Some(Arc::new(s))
                     }
                     #[cfg(not(feature = "postgres"))]
                     {
-                        return None;
+                        None
                     }
                 } else if dsn.starts_with("mysql://") {
                     #[cfg(feature = "mysql")]
@@ -275,18 +275,19 @@ impl SharedGraphIndex {
                         let s = crate::storage::mysql::MySqlStorage::open(dsn, rid)
                             .await
                             .ok()?;
-                        Arc::new(s)
+                        Some(Arc::new(s))
                     }
                     #[cfg(not(feature = "mysql"))]
                     {
-                        return None;
+                        None
                     }
                 } else {
-                    return None;
+                    None
                 }
             }
-            _ => return None,
+            _ => None,
         };
+        let st = st?;
         *self.stats_storage.write().await = Some(st.clone());
         Some(st)
     }

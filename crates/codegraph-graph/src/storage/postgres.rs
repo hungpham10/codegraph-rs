@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "bloom-search")]
+use super::BloomStorage;
 use super::{
-    IndexCounts, Result, Storage, StorageError, Tx, decode_chain, decode_vector, encode_chain,
+    CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, IndexCounts, NodeMetaStorage,
+    Result, ShortcutsStorage, Storage, StorageError, Tx, decode_chain, decode_vector, encode_chain,
     encode_vector,
 };
 use async_trait::async_trait;
@@ -137,7 +140,7 @@ impl PostgresStorage {
 }
 
 #[async_trait]
-impl Storage for PostgresStorage {
+impl CategoryStorage for PostgresStorage {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
         let id = self.reserve_node_id().await?;
         sqlx::query(
@@ -238,6 +241,18 @@ impl Storage for PostgresStorage {
         Ok(root as usize)
     }
 
+    fn new_tx(&self) -> Box<dyn Tx> {
+        Box::new(PostgresTx {
+            pool: self.pool.clone(),
+            repo_id: self.repo_id,
+            nodes: Vec::new(),
+            ops: Vec::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl NodeMetaStorage for PostgresStorage {
     async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
         sqlx::query(
             "INSERT INTO rt_meta (repo_id, record, meta) VALUES ($1, $2, $3) \
@@ -290,6 +305,44 @@ impl Storage for PostgresStorage {
         Ok(row.map(|(len,)| len as usize))
     }
 
+    async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO rt_node_meta (repo_id, elem, meta) VALUES ($1, $2, $3) \
+             ON CONFLICT (repo_id, elem) DO UPDATE SET meta = EXCLUDED.meta",
+        )
+        .bind(self.repo_id as i64)
+        .bind(elem as i64)
+        .bind(meta)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_node_meta(&self, elem: usize) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query_as::<_, (Vec<u8>,)>(
+            "SELECT meta FROM rt_node_meta WHERE repo_id = $1 AND elem = $2",
+        )
+        .bind(self.repo_id as i64)
+        .bind(elem as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.map(|(m,)| m))
+    }
+
+    async fn clear_node_meta(&mut self) -> Result<()> {
+        sqlx::query("DELETE FROM rt_node_meta WHERE repo_id = $1")
+            .bind(self.repo_id as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ShortcutsStorage for PostgresStorage {
     async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
         sqlx::query(
             "INSERT INTO rt_shortcuts (repo_id, shard, elem, node_id) VALUES ($1, $2, $3, $4) \
@@ -326,7 +379,10 @@ impl Storage for PostgresStorage {
             .map_err(db_err)?;
         Ok(())
     }
+}
 
+#[async_trait]
+impl EdgeDataStorage for PostgresStorage {
     async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
         sqlx::query(
             "INSERT INTO rt_edges (repo_id, id, data) VALUES ($1, $2, $3) \
@@ -361,59 +417,10 @@ impl Storage for PostgresStorage {
             .map_err(db_err)?;
         Ok(())
     }
+}
 
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let rows = sqlx::query("SELECT id, data FROM rt_edges WHERE repo_id = $1")
-            .bind(self.repo_id as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
-        for r in &rows {
-            let id: i64 = r.try_get("id").map_err(db_err)?;
-            let data: Vec<u8> = r.try_get("data").map_err(db_err)?;
-            f(id as usize, &data)?;
-        }
-        Ok(())
-    }
-
-    async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO rt_node_meta (repo_id, elem, meta) VALUES ($1, $2, $3) \
-             ON CONFLICT (repo_id, elem) DO UPDATE SET meta = EXCLUDED.meta",
-        )
-        .bind(self.repo_id as i64)
-        .bind(elem as i64)
-        .bind(meta)
-        .execute(&self.pool)
-        .await
-        .map_err(db_err)?;
-        Ok(())
-    }
-
-    async fn get_node_meta(&self, elem: usize) -> Result<Option<Vec<u8>>> {
-        let row = sqlx::query_as::<_, (Vec<u8>,)>(
-            "SELECT meta FROM rt_node_meta WHERE repo_id = $1 AND elem = $2",
-        )
-        .bind(self.repo_id as i64)
-        .bind(elem as i64)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db_err)?;
-        Ok(row.map(|(m,)| m))
-    }
-
-    async fn clear_node_meta(&mut self) -> Result<()> {
-        sqlx::query("DELETE FROM rt_node_meta WHERE repo_id = $1")
-            .bind(self.repo_id as i64)
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
-        Ok(())
-    }
-
+#[async_trait]
+impl ChainStorage for PostgresStorage {
     async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
         let bytes = encode_chain(chain);
         sqlx::query(
@@ -449,7 +456,10 @@ impl Storage for PostgresStorage {
             .map_err(db_err)?;
         Ok(())
     }
+}
 
+#[async_trait]
+impl EntityStorage for PostgresStorage {
     async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
         let annotations = serde_json::to_string(&sym.annotations).map_err(ser_err)?;
         sqlx::query(
@@ -828,8 +838,11 @@ impl Storage for PostgresStorage {
         tx.commit().await.map_err(db_err)?;
         Ok(())
     }
+}
 
-    #[cfg(feature = "bloom-search")]
+#[cfg(feature = "bloom-search")]
+#[async_trait]
+impl BloomStorage for PostgresStorage {
     async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
         sqlx::query(
             "INSERT INTO rt_node_blooms (repo_id, id, bloom) VALUES ($1, $2, $3) \
@@ -844,7 +857,6 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
-    #[cfg(feature = "bloom-search")]
     async fn get_node_bloom(&self, id: usize) -> Result<Option<Vec<u8>>> {
         let row = sqlx::query_as::<_, (Vec<u8>,)>(
             "SELECT bloom FROM rt_node_blooms WHERE repo_id = $1 AND id = $2",
@@ -856,16 +868,12 @@ impl Storage for PostgresStorage {
         .map_err(db_err)?;
         Ok(row.map(|(b,)| b))
     }
-
-    fn new_tx(&self) -> Box<dyn Tx> {
-        Box::new(PostgresTx {
-            pool: self.pool.clone(),
-            repo_id: self.repo_id,
-            nodes: Vec::new(),
-            ops: Vec::new(),
-        })
-    }
 }
+
+// Blanket marker — `Storage` is `CategoryStorage + 5 sub-traits + EntityStorage + Send + Sync`,
+// so this empty impl makes the Postgres backend satisfy `Storage` automatically.
+#[async_trait]
+impl Storage for PostgresStorage {}
 
 /// Probe version index trên đĩa (dùng cho `SharedGraphIndex::ensure_fresh`) —
 /// không mở toàn bộ index. `None`/lỗi → coi như version 0.
