@@ -6,7 +6,7 @@
 # release time (or automate it in the release pipeline before submitting to
 # microsoft/winget-pkgs).
 PackageIdentifier: hungpham10.codegraph
-PackageVersion: 2.0.5
+PackageVersion: 2.0.6
 PackageName: codegraph
 Publisher: Hung Pham
 PublisherUrl: https://github.com/hungpham10/codegraph-rs
@@ -18,7 +18,7 @@ PackageUrl: https://github.com/hungpham10/codegraph-rs
 InstallerType: zip
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/hungpham10/codegraph-rs/releases/download/v2.0.5/codegraph-x86_64-pc-windows-msvc.zip
+    InstallerUrl: https://github.com/hungpham10/codegraph-rs/releases/download/v2.0.6/codegraph-x86_64-pc-windows-msvc.zip
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
     InstallerType: zip
 ManifestType: singleton
