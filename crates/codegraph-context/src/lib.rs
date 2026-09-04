@@ -93,9 +93,9 @@ pub async fn build_response(
         let query_stripped = req
             .query
             .split('/')
-            .last()
+            .next_back()
             .and_then(|f| {
-                let without_ext = f.rsplitn(2, '.').nth(1)?;
+                let without_ext = f.rsplit_once('.')?.0;
                 if without_ext.is_empty() {
                     None
                 } else {

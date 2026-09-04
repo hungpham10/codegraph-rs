@@ -1239,7 +1239,7 @@ impl GraphIndex {
         }
         let caller_scope_id = self.symbols.get(&caller_id)?.scope_id;
 
-        for (_id, sym) in &self.symbols {
+        for sym in self.symbols.values() {
             if sym.scope_id == caller_scope_id
                 && sym.name == field_name
                 && matches!(
