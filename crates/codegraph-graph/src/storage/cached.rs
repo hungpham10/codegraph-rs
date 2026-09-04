@@ -11,6 +11,10 @@
 //!
 //! Decorator này trong suốt: mọi backend (InMemory/Sqlite/Lmdb/Redis/RDBMS)
 //! đều dùng được, behaviour đúng bằng inner (chỉ thêm lớp cache).
+//!
+//! Implementation chia 7 `impl` block (1 cho `CategoryStorage`, 5 cho trait phụ,
+//! 1 cho `EntityStorage`) — review từng phần độc lập được. `Storage` umbrella
+//! là marker rỗng (Rust tự cộng qua blanket bound).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +23,13 @@ use async_trait::async_trait;
 use codegraph_core::{FileInfo, Symbol};
 
 use crate::lru::LruCache;
-use crate::storage::{IndexCounts, Storage, StorageError, Tx};
+use crate::storage::{
+    CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, IndexCounts, NodeMetaStorage,
+    ShortcutsStorage, Storage, StorageError, Tx,
+};
+
+#[cfg(feature = "bloom-search")]
+use crate::storage::BloomStorage;
 
 /// Số shard của mỗi `LruCache` — phải lũy thừa của 2.
 const SHARDS: usize = 32;
@@ -104,8 +114,10 @@ impl CachedStorage {
     }
 }
 
+// ==================== CategoryStorage ====================
+
 #[async_trait]
-impl Storage for CachedStorage {
+impl CategoryStorage for CachedStorage {
     // ── Node management (cached) ──
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize, StorageError> {
         let id = self.inner.new_node(prefix, record).await?;
@@ -142,49 +154,51 @@ impl Storage for CachedStorage {
         Ok(v)
     }
 
-    // ── Bloom (không cache — dùng prune nhánh, sai = search sai) ──
-    #[cfg(feature = "bloom-search")]
+    // ── Shard roots (cached) ──
+    async fn set_root(&mut self, shard: usize, root: usize) -> Result<(), StorageError> {
+        self.inner.set_root(shard, root).await?;
+        self.caches.roots.remove(&shard);
+        Ok(())
+    }
+
+    async fn get_root(&self, shard: usize) -> Result<usize, StorageError> {
+        if let Some(v) = self.caches.roots.get(&shard) {
+            return Ok(v);
+        }
+        let v = self.inner.get_root(shard).await?;
+        self.caches.roots.put(shard, v);
+        Ok(v)
+    }
+
+    // ── Transaction: wrap để invalidate radix cache khi commit ──
+    fn new_tx(&self) -> Box<dyn Tx> {
+        Box::new(CachedTx {
+            inner: self.inner.new_tx(),
+            caches: self.caches.clone(),
+        })
+    }
+}
+
+// ==================== BloomStorage (feature-gated) ====================
+//
+// Không cache — bloom sai = search sai (over-prune). Pass-through.
+
+#[cfg(feature = "bloom-search")]
+#[async_trait]
+impl BloomStorage for CachedStorage {
     async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<(), StorageError> {
         self.inner.set_node_bloom(id, bloom).await
     }
 
-    #[cfg(feature = "bloom-search")]
     async fn get_node_bloom(&self, id: usize) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.get_node_bloom(id).await
     }
+}
 
-    // ── Edge data (cached) ──
-    async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<(), StorageError> {
-        self.inner.set_edge_data(edge, data).await?;
-        self.caches.edge_data.remove(&edge);
-        Ok(())
-    }
+// ==================== NodeMetaStorage ====================
 
-    async fn get_edge_data(&self, edge: usize) -> Result<Option<Vec<u8>>, StorageError> {
-        if let Some(v) = self.caches.edge_data.get(&edge) {
-            return Ok(Some(v));
-        }
-        let v = self.inner.get_edge_data(edge).await?;
-        if let Some(ref b) = v {
-            self.caches.edge_data.put(edge, b.clone());
-        }
-        Ok(v)
-    }
-
-    async fn clear_edges(&mut self) -> Result<(), StorageError> {
-        self.inner.clear_edges().await?;
-        self.caches.edge_data.clear();
-        Ok(())
-    }
-
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<(), StorageError> + Send),
-    ) -> Result<(), StorageError> {
-        self.inner.for_each_edge_data(f).await
-    }
-
-    // ── Node metadata (cached) ──
+#[async_trait]
+impl NodeMetaStorage for CachedStorage {
     async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<(), StorageError> {
         self.inner.set_node_meta(elem, meta).await?;
         self.caches.node_meta.remove(&elem);
@@ -208,47 +222,6 @@ impl Storage for CachedStorage {
         Ok(())
     }
 
-    // ── Chain (cached) ──
-    async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<(), StorageError> {
-        self.inner.set_chain(record, chain).await?;
-        self.caches.chains.remove(&record);
-        Ok(())
-    }
-
-    async fn get_chain(&self, record: usize) -> Result<Option<Vec<u64>>, StorageError> {
-        if let Some(v) = self.caches.chains.get(&record) {
-            return Ok(Some(v));
-        }
-        let v = self.inner.get_chain(record).await?;
-        if let Some(ref c) = v {
-            self.caches.chains.put(record, c.clone());
-        }
-        Ok(v)
-    }
-
-    async fn clear_chains(&mut self) -> Result<(), StorageError> {
-        self.inner.clear_chains().await?;
-        self.caches.chains.clear();
-        Ok(())
-    }
-
-    // ── Shard roots (cached) ──
-    async fn set_root(&mut self, shard: usize, root: usize) -> Result<(), StorageError> {
-        self.inner.set_root(shard, root).await?;
-        self.caches.roots.remove(&shard);
-        Ok(())
-    }
-
-    async fn get_root(&self, shard: usize) -> Result<usize, StorageError> {
-        if let Some(v) = self.caches.roots.get(&shard) {
-            return Ok(v);
-        }
-        let v = self.inner.get_root(shard).await?;
-        self.caches.roots.put(shard, v);
-        Ok(v)
-    }
-
-    // ── Meta / key_len (cached) ──
     async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<(), StorageError> {
         self.inner.set_meta(record, meta).await?;
         self.caches.metas.remove(&record);
@@ -282,8 +255,12 @@ impl Storage for CachedStorage {
         }
         Ok(v)
     }
+}
 
-    // ── Shortcuts (cached) ──
+// ==================== ShortcutsStorage ====================
+
+#[async_trait]
+impl ShortcutsStorage for CachedStorage {
     async fn add_shortcut_node(
         &mut self,
         shard: usize,
@@ -314,8 +291,73 @@ impl Storage for CachedStorage {
         self.caches.shortcuts.clear();
         Ok(())
     }
+}
 
-    // ── Entity store (symbols / calls / embeddings) ──
+// ==================== EdgeDataStorage ====================
+
+#[async_trait]
+impl EdgeDataStorage for CachedStorage {
+    async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<(), StorageError> {
+        self.inner.set_edge_data(edge, data).await?;
+        self.caches.edge_data.remove(&edge);
+        Ok(())
+    }
+
+    async fn get_edge_data(&self, edge: usize) -> Result<Option<Vec<u8>>, StorageError> {
+        if let Some(v) = self.caches.edge_data.get(&edge) {
+            return Ok(Some(v));
+        }
+        let v = self.inner.get_edge_data(edge).await?;
+        if let Some(ref b) = v {
+            self.caches.edge_data.put(edge, b.clone());
+        }
+        Ok(v)
+    }
+
+    async fn clear_edges(&mut self) -> Result<(), StorageError> {
+        self.inner.clear_edges().await?;
+        self.caches.edge_data.clear();
+        Ok(())
+    }
+}
+
+// ==================== ChainStorage ====================
+
+#[async_trait]
+impl ChainStorage for CachedStorage {
+    async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<(), StorageError> {
+        self.inner.set_chain(record, chain).await?;
+        self.caches.chains.remove(&record);
+        Ok(())
+    }
+
+    async fn get_chain(&self, record: usize) -> Result<Option<Vec<u64>>, StorageError> {
+        if let Some(v) = self.caches.chains.get(&record) {
+            return Ok(Some(v));
+        }
+        let v = self.inner.get_chain(record).await?;
+        if let Some(ref c) = v {
+            self.caches.chains.put(record, c.clone());
+        }
+        Ok(v)
+    }
+
+    async fn clear_chains(&mut self) -> Result<(), StorageError> {
+        self.inner.clear_chains().await?;
+        self.caches.chains.clear();
+        Ok(())
+    }
+}
+
+// ==================== EntityStorage ====================
+//
+// Phần lớn pass-through (không cache — ít được gọi lại nhiều lần). Một số
+// method nóng (`load_symbol`/`get_call_records`/`load_call_name_index`/
+// `load_embedding`) có cache. `clear_entities` clear_all.
+
+#[async_trait]
+impl EntityStorage for CachedStorage {
+    // ── Symbol registry ──
     async fn save_symbol(&mut self, sym: &Symbol) -> Result<(), StorageError> {
         self.inner.save_symbol(sym).await?;
         self.caches.symbols.remove(&sym.id);
@@ -349,6 +391,7 @@ impl Storage for CachedStorage {
         self.inner.all_chains().await
     }
 
+    // ── Call records ──
     async fn set_call_records(&mut self, func: u64, records: &[u8]) -> Result<(), StorageError> {
         self.inner.set_call_records(func, records).await?;
         self.caches.call_records.remove(&func);
@@ -370,6 +413,7 @@ impl Storage for CachedStorage {
         self.inner.all_call_records().await
     }
 
+    // ── Call-name index ──
     async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<(), StorageError> {
         self.inner.set_call_name_index(name, sites).await?;
         self.caches.call_name_index.remove(&name.to_string());
@@ -391,6 +435,7 @@ impl Storage for CachedStorage {
         self.inner.all_call_name_indexes().await
     }
 
+    // ── Files ──
     async fn upsert_file(&mut self, f: &FileInfo) -> Result<(), StorageError> {
         self.inner.upsert_file(f).await
     }
@@ -399,6 +444,7 @@ impl Storage for CachedStorage {
         self.inner.load_all_files().await
     }
 
+    // ── Version ──
     async fn version(&self) -> Result<u64, StorageError> {
         self.inner.version().await
     }
@@ -407,6 +453,7 @@ impl Storage for CachedStorage {
         self.inner.set_version(v).await
     }
 
+    // ── Stats ──
     async fn set_stats(&mut self, s: IndexCounts) -> Result<(), StorageError> {
         self.inner.set_stats(s).await
     }
@@ -456,15 +503,14 @@ impl Storage for CachedStorage {
     ) -> Result<Option<Vec<(u64, f32)>>, StorageError> {
         self.inner.knn(query_vec, k).await
     }
-
-    // ── Transaction: wrap để invalidate radix cache khi commit ──
-    fn new_tx(&self) -> Box<dyn Tx> {
-        Box::new(CachedTx {
-            inner: self.inner.new_tx(),
-            caches: self.caches.clone(),
-        })
-    }
 }
+
+// ==================== Storage umbrella ====================
+//
+// Rust tự cộng method qua blanket bound — không cần viết gì thêm.
+
+#[async_trait]
+impl Storage for CachedStorage {}
 
 /// Tx bọc: delegate mọi mutation, khi `commit` xong thì `clear_radix()`.
 struct CachedTx {

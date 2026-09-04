@@ -30,8 +30,12 @@ use tokio::sync::Mutex;
 use async_trait::async_trait;
 
 use super::{
-    FileInfo, Result, Storage, StorageError, Symbol, Tx, TxOp, decode_vector, encode_vector,
+    CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, FileInfo, NodeMetaStorage,
+    Result, ShortcutsStorage, Storage, StorageError, Symbol, Tx, TxOp, decode_vector,
+    encode_vector,
 };
+#[cfg(feature = "bloom-search")]
+use super::BloomStorage;
 
 // ==================== KeyBuilder ====================
 
@@ -177,7 +181,7 @@ impl RedisStorage {
 }
 
 #[async_trait]
-impl Storage for RedisStorage {
+impl CategoryStorage for RedisStorage {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
         let mut conn = self.lock().await;
         let result: redis::Value = redis::pipe()
@@ -255,31 +259,6 @@ impl Storage for RedisStorage {
         Ok(children.into_iter().map(|x| x as usize).collect())
     }
 
-    #[cfg(feature = "bloom-search")]
-    async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
-        let mut conn = self.lock().await;
-        cmd("HSET")
-            .arg(self.kb.key("node_bloom"))
-            .arg(id)
-            .arg(bloom)
-            .query_async::<()>(&mut *conn)
-            .await
-            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-        Ok(())
-    }
-
-    #[cfg(feature = "bloom-search")]
-    async fn get_node_bloom(&self, id: usize) -> Result<Option<Vec<u8>>> {
-        let mut conn = self.lock().await;
-        let bloom: Option<Vec<u8>> = cmd("HGET")
-            .arg(self.kb.key("node_bloom"))
-            .arg(id)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-        Ok(bloom)
-    }
-
     async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("HSET")
@@ -303,52 +282,45 @@ impl Storage for RedisStorage {
         Ok(root.unwrap_or(0) as usize)
     }
 
-    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
+    fn new_tx(&self) -> Box<dyn Tx> {
+        Box::new(RedisTx {
+            conn: self.conn.clone(),
+            kb: self.kb.clone(),
+            nodes: Vec::new(),
+            ops: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "bloom-search")]
+#[async_trait]
+impl BloomStorage for RedisStorage {
+    async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("HSET")
-            .arg(self.kb.key("meta"))
-            .arg(record as i64)
-            .arg(meta)
+            .arg(self.kb.key("node_bloom"))
+            .arg(id)
+            .arg(bloom)
             .query_async::<()>(&mut *conn)
             .await
             .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
         Ok(())
     }
 
-    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
+    async fn get_node_bloom(&self, id: usize) -> Result<Option<Vec<u8>>> {
         let mut conn = self.lock().await;
-        let meta: Option<Vec<u8>> = cmd("HGET")
-            .arg(self.kb.key("meta"))
-            .arg(record as i64)
+        let bloom: Option<Vec<u8>> = cmd("HGET")
+            .arg(self.kb.key("node_bloom"))
+            .arg(id)
             .query_async(&mut *conn)
             .await
             .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-        Ok(meta)
+        Ok(bloom)
     }
+}
 
-    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
-        let mut conn = self.lock().await;
-        cmd("HSET")
-            .arg(self.kb.key("keylen"))
-            .arg(record as i64)
-            .arg(len as i64)
-            .query_async::<()>(&mut *conn)
-            .await
-            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
-        let mut conn = self.lock().await;
-        let len: Option<i64> = cmd("HGET")
-            .arg(self.kb.key("keylen"))
-            .arg(record as i64)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-        Ok(len.map(|x| x as usize))
-    }
-
+#[async_trait]
+impl ShortcutsStorage for RedisStorage {
     async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("SADD")
@@ -398,7 +370,10 @@ impl Storage for RedisStorage {
         }
         Ok(())
     }
+}
 
+#[async_trait]
+impl EdgeDataStorage for RedisStorage {
     async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("HSET")
@@ -431,23 +406,10 @@ impl Storage for RedisStorage {
             .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
         Ok(())
     }
+}
 
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let mut conn = self.lock().await;
-        let items: Vec<(i64, Vec<u8>)> = cmd("HGETALL")
-            .arg(self.kb.key("edgedata"))
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-        for (id, data) in items {
-            f(id as usize, &data)?;
-        }
-        Ok(())
-    }
-
+#[async_trait]
+impl NodeMetaStorage for RedisStorage {
     async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("HSET")
@@ -481,6 +443,55 @@ impl Storage for RedisStorage {
         Ok(())
     }
 
+    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
+        let mut conn = self.lock().await;
+        cmd("HSET")
+            .arg(self.kb.key("meta"))
+            .arg(record as i64)
+            .arg(meta)
+            .query_async::<()>(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
+        let mut conn = self.lock().await;
+        let meta: Option<Vec<u8>> = cmd("HGET")
+            .arg(self.kb.key("meta"))
+            .arg(record as i64)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(meta)
+    }
+
+    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
+        let mut conn = self.lock().await;
+        cmd("HSET")
+            .arg(self.kb.key("keylen"))
+            .arg(record as i64)
+            .arg(len as i64)
+            .query_async::<()>(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
+        let mut conn = self.lock().await;
+        let len: Option<i64> = cmd("HGET")
+            .arg(self.kb.key("keylen"))
+            .arg(record as i64)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(len.map(|x| x as usize))
+    }
+}
+
+#[async_trait]
+impl ChainStorage for RedisStorage {
     async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("HSET")
@@ -513,7 +524,10 @@ impl Storage for RedisStorage {
             .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
         Ok(())
     }
+}
 
+#[async_trait]
+impl EntityStorage for RedisStorage {
     async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
         let mut conn = self.lock().await;
         let data = serde_json::to_vec(sym).map_err(|e| StorageError::Internal(e.to_string()))?;
@@ -777,16 +791,12 @@ impl Storage for RedisStorage {
             .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
         Ok(())
     }
-
-    fn new_tx(&self) -> Box<dyn Tx> {
-        Box::new(RedisTx {
-            conn: self.conn.clone(),
-            kb: self.kb.clone(),
-            nodes: Vec::new(),
-            ops: Vec::new(),
-        })
-    }
 }
+
+// Blanket marker — `Storage` is `CategoryStorage + 5 sub-traits + EntityStorage + Send + Sync`,
+// so this empty impl makes the Redis backend satisfy `Storage` automatically.
+#[async_trait]
+impl Storage for RedisStorage {}
 
 // ==================== Redis Transaction ====================
 
@@ -908,7 +918,6 @@ mod tests {
 
     use super::*;
     use crate::radix::EMPTY;
-    use crate::storage::Storage;
 
     static COUNTER: AtomicU16 = AtomicU16::new(0);
 

@@ -24,9 +24,12 @@ use lmdb::EnvironmentFlags;
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
 
 use super::{
-    EMPTY, IndexCounts, Result, Storage, StorageError, Tx, TxOp, decode_chain, decode_vector,
+    CategoryStorage, ChainStorage, EMPTY, EdgeDataStorage, EntityStorage, IndexCounts, NodeMetaStorage,
+    Result, ShortcutsStorage, Storage, StorageError, Tx, TxOp, decode_chain, decode_vector,
     encode_chain, encode_vector,
 };
+#[cfg(feature = "bloom-search")]
+use super::BloomStorage;
 
 /// Map lỗi LMDB → `StorageError`.
 fn e(err: impl std::fmt::Display) -> StorageError {
@@ -418,10 +421,10 @@ impl LmdbStorage {
     }
 }
 
-// ==================== Storage impl ====================
+// ==================== Storage impl (split into 7 sub-traits) ====================
 
 #[async_trait]
-impl Storage for LmdbStorage {
+impl CategoryStorage for LmdbStorage {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         // Không có RETURNING — đọc-rồi-ghi counter trong cùng write tx; an toàn
@@ -486,7 +489,42 @@ impl Storage for LmdbStorage {
         Ok(out)
     }
 
-    #[cfg(feature = "bloom-search")]
+    async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.put(self.roots, &k8(shard), &k8(root), WriteFlags::empty())
+            .map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
+    async fn get_root(&self, shard: usize) -> Result<usize> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        Ok(self
+            .get_opt(&tx, self.roots, &k8(shard))?
+            .map(de_u64)
+            .unwrap_or(EMPTY as u64) as usize)
+    }
+
+    fn new_tx(&self) -> Box<dyn Tx> {
+        Box::new(LmdbTx {
+            env: self.env.clone(),
+            nodes: self.nodes,
+            children: self.children,
+            counter: self.counter,
+            nodes_pending: Vec::new(),
+            ops: Vec::new(),
+        })
+    }
+}
+
+// Blanket marker — `Storage` is `CategoryStorage + 5 sub-traits + EntityStorage + Send + Sync`,
+// so this empty impl makes the LMDB backend satisfy `Storage` automatically.
+#[async_trait]
+impl Storage for LmdbStorage {}
+
+#[cfg(feature = "bloom-search")]
+#[async_trait]
+impl BloomStorage for LmdbStorage {
     async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         tx.put(self.blooms, &k8(id), &bloom, WriteFlags::empty())
@@ -495,12 +533,16 @@ impl Storage for LmdbStorage {
         Ok(())
     }
 
-    #[cfg(feature = "bloom-search")]
     async fn get_node_bloom(&self, id: usize) -> Result<Option<Vec<u8>>> {
         let tx = self.env.begin_ro_txn().map_err(e)?;
         Ok(self.get_opt(&tx, self.blooms, &k8(id))?.map(|b| b.to_vec()))
     }
+}
 
+// --- EdgeDataStorage ---
+
+#[async_trait]
+impl EdgeDataStorage for LmdbStorage {
     async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         tx.put(self.edges, &k8(edge), &data, WriteFlags::empty())
@@ -522,27 +564,12 @@ impl Storage for LmdbStorage {
         tx.commit().map_err(e)?;
         Ok(())
     }
+}
 
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let tx = self.env.begin_ro_txn().map_err(e)?;
-        let mut cur = tx.open_ro_cursor(self.edges).map_err(e)?;
-        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        for item in cur.iter() {
-            let (k, v) = item.map_err(e)?;
-            rows.push((k.to_vec(), v.to_vec()));
-        }
-        drop(cur);
-        drop(tx);
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
-        for (k, v) in rows {
-            f(de_u64(&k) as usize, &v)?;
-        }
-        Ok(())
-    }
+// --- NodeMetaStorage ---
 
+#[async_trait]
+impl NodeMetaStorage for LmdbStorage {
     async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         tx.put(self.node_meta, &k8(elem), &meta, WriteFlags::empty())
@@ -565,6 +592,37 @@ impl Storage for LmdbStorage {
         Ok(())
     }
 
+    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.put(self.meta, &k8(record), &meta, WriteFlags::empty())
+            .map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
+    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        Ok(self.get_opt(&tx, self.meta, &k8(record))?.map(|v| v.to_vec()))
+    }
+
+    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.put(self.keylen, &k8(record), &k8(len), WriteFlags::empty())
+            .map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
+    async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        Ok(self.get_opt(&tx, self.keylen, &k8(record))?.map(de_u64).map(|v| v as usize))
+    }
+}
+
+// --- ChainStorage ---
+
+#[async_trait]
+impl ChainStorage for LmdbStorage {
     async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         tx.put(
@@ -591,7 +649,12 @@ impl Storage for LmdbStorage {
         tx.commit().map_err(e)?;
         Ok(())
     }
+}
 
+// --- EntityStorage ---
+
+#[async_trait]
+impl EntityStorage for LmdbStorage {
     async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
         let data =
             serde_json::to_vec(sym).map_err(|err| StorageError::Internal(err.to_string()))?;
@@ -831,54 +894,12 @@ impl Storage for LmdbStorage {
         tx.commit().map_err(e)?;
         Ok(())
     }
+}
 
-    async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
-        tx.put(self.roots, &k8(shard), &k8(root), WriteFlags::empty())
-            .map_err(e)?;
-        tx.commit().map_err(e)?;
-        Ok(())
-    }
+// --- ShortcutsStorage ---
 
-    async fn get_root(&self, shard: usize) -> Result<usize> {
-        let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self
-            .get_opt(&tx, self.roots, &k8(shard))?
-            .map(de_u64)
-            .unwrap_or(EMPTY as u64) as usize)
-    }
-
-    async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
-        tx.put(self.meta, &k8(record), &meta, WriteFlags::empty())
-            .map_err(e)?;
-        tx.commit().map_err(e)?;
-        Ok(())
-    }
-
-    async fn get_meta(&self, record: usize) -> Result<Option<Vec<u8>>> {
-        let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self
-            .get_opt(&tx, self.meta, &k8(record))?
-            .map(|v| v.to_vec()))
-    }
-
-    async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
-        tx.put(self.keylen, &k8(record), &k8(len), WriteFlags::empty())
-            .map_err(e)?;
-        tx.commit().map_err(e)?;
-        Ok(())
-    }
-
-    async fn get_key_len(&self, record: usize) -> Result<Option<usize>> {
-        let tx = self.env.begin_ro_txn().map_err(e)?;
-        Ok(self
-            .get_opt(&tx, self.keylen, &k8(record))?
-            .map(de_u64)
-            .map(|v| v as usize))
-    }
-
+#[async_trait]
+impl ShortcutsStorage for LmdbStorage {
     async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
         let mut key = k8(shard).to_vec();
         key.extend_from_slice(elem);
@@ -911,17 +932,6 @@ impl Storage for LmdbStorage {
         tx.clear_db(self.shortcuts).map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
-    }
-
-    fn new_tx(&self) -> Box<dyn Tx> {
-        Box::new(LmdbTx {
-            env: self.env.clone(),
-            nodes: self.nodes,
-            children: self.children,
-            counter: self.counter,
-            nodes_pending: Vec::new(),
-            ops: Vec::new(),
-        })
     }
 }
 

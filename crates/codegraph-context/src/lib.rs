@@ -73,7 +73,8 @@ pub async fn build_response(
     req: &ContextRequest,
 ) -> Result<ContextResponse> {
     let idx = index.ensure_fresh().await;
-    let candidates = idx
+    // Try symbol-name search first, then fallback to file-path search.
+    let mut candidates = idx
         .search_symbol_paged_resumable(
             &req.query,
             None,
@@ -87,6 +88,29 @@ pub async fn build_response(
         )
         .await?
         .page;
+    if candidates.is_empty() {
+        // Fallback: query as filename (strip extension for symbol-name search).
+        let query_stripped = req.query.split('/').last()
+            .and_then(|f| {
+                let without_ext = f.rsplitn(2, '.').nth(1)?;
+                if without_ext.is_empty() { None } else { Some(without_ext.to_string()) }
+            })
+            .unwrap_or_else(|| req.query.clone());
+        candidates = idx
+            .search_symbol_paged_resumable(
+                &query_stripped,
+                None,
+                SymbolMatch::Contains,
+                Pagination {
+                    limit: req.limit as usize,
+                    offset: 0,
+                },
+                None,
+                None,
+            )
+            .await?
+            .page;
+    }
 
     // Pre-load mỗi file một lần khi cần source.
     let file_cache: HashMap<String, Vec<String>> = if req.include_source {
@@ -189,4 +213,77 @@ fn render_markdown(resp: &ContextResponse, strip: Option<&str>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph_graph::SharedGraphIndex;
+    use std::sync::Arc;
+
+    fn sym(name: &str, id: u64) -> codegraph_core::Symbol {
+        codegraph_core::Symbol {
+            id,
+            name: name.to_string(),
+            kind: codegraph_core::SymbolKind::Function,
+            scope: codegraph_core::ScopeLevel::Global,
+            scope_id: 0,
+            type_ref: 0,
+            type_name: None,
+            file: "RestEndpoint.java".into(),
+            line: 1,
+            end_line: 2,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "java".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn context_fallback_matches_filename() {
+        // Tạo index với symbol "RestEndpoint" trong file "RestEndpoint.java" dùng sqlite temp.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+
+        {
+            let mut idx = codegraph_graph::GraphIndex::open(&db_str).await.unwrap();
+            let r = codegraph_graph::ParseResult {
+                path: "RestEndpoint.java".into(),
+                language: "java".into(),
+                bytes: 0,
+                lines: 0,
+                symbols: vec![sym("RestEndpoint", 100)],
+                chains: std::collections::HashMap::new(),
+                calls: vec![],
+            };
+            idx.ingest(&[r]).await.unwrap();
+        }
+
+        let sgi = SharedGraphIndex::open(Some(db_str.clone())).await.unwrap();
+
+        // Query "RestEndpoint.java" → không match theo tên symbol → fallback tìm "RestEndpoint".
+        let req = ContextRequest {
+            query: "RestEndpoint.java".into(),
+            depth: 1,
+            include_source: false,
+            limit: 5,
+            format: Format::Markdown,
+            strip_prefix: None,
+        };
+        let sgi_arc: Arc<SharedGraphIndex> = Arc::new(sgi);
+        let resp = build_response(&sgi_arc, &req).await.unwrap();
+        assert!(!resp.hits.is_empty(), "phải match qua fallback filename");
+        assert_eq!(resp.hits[0].symbol.name, "RestEndpoint");
+
+        // Query "RestEndpoint" (không có extension) → match trực tiếp.
+        let req2 = ContextRequest {
+            query: "RestEndpoint".into(),
+            ..req
+        };
+        let resp2 = build_response(&sgi_arc, &req2).await.unwrap();
+        assert!(!resp2.hits.is_empty());
+        assert_eq!(resp2.hits[0].symbol.name, "RestEndpoint");
+    }
 }

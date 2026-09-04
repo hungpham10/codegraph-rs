@@ -1,10 +1,9 @@
 //! Radix trie trên storage (radix-node + transaction).
 //!
-//! Thay thế `radixtree.rs` cũ:
-//! - Mọi node mutation đi qua transaction (`Storage::new_tx`) → split/extend
+//! - Mọi node mutation đi qua transaction (`CategoryStorage::new_tx`) → split/extend
 //!   áp dụng atomic, không lộ trạng thái trung gian cho reader.
 //! - Shard root được đọc trực tiếp từ storage (`get_root`) thay vì cache
-//!   `endpoints` in-memory — nhất quán giữa các instance.
+//!   in-memory — nhất quán giữa các instance.
 //! - `OnSplitCallback` được gọi TRƯỚC khi commit — callback có thể từ chối
 //!   (trả Err) thì transaction bị hủy, hoặc cập nhật shortcuts/cache rồi để
 //!   radix commit.
@@ -17,18 +16,22 @@ use tokio::sync::RwLock;
 
 use crate::storage::{self, Storage};
 
+/// Re-export `EMPTY` (node id sentinel) từ storage — `search` / `Search` cần
+/// truy cập nhanh mà không phải dùng `storage::EMPTY` mỗi nơi.
+pub use crate::storage::EMPTY;
+
 #[cfg(feature = "bloom-search")]
 use crate::bloom::BloomFilter;
-
-pub const EMPTY: usize = 0;
 
 /// Cấu hình bloom filter prune nhánh trong `search_dfs` (feature `bloom-search`).
 #[cfg(feature = "bloom-search")]
 pub mod bloom_cfg {
     /// Số bit của bloom filter mỗi node (làm tròn lên power of 2 trong `new`).
     pub const SIZE: usize = 4096;
+
     /// Số hash functions.
     pub const K: usize = 10;
+
     /// Chỉ prune khi substring còn lại của pattern ≤ cap này — bloom chỉ lưu
     /// substring ngắn, nên pattern dài hơn cap sẽ không bị prune (không sai).
     pub const MATCH_CAP: usize = 16;
@@ -169,6 +172,10 @@ pub fn shard_of<T: Element>(elem: T, sharding: usize) -> usize {
 
 pub struct Radix<T: Element = u8> {
     sharding: usize,
+    /// Storage handle. `Radix` chỉ gọi method của `CategoryStorage` + một vài
+    /// method của `NodeMetaStorage` / `ShortcutsStorage` / `BloomStorage`; nhưng
+    /// cùng một `Arc` được `Search` dùng cho 5 trait phụ — nhận `Storage` (umbrella)
+    /// để `Arc` share được giữa 2 bên mà không cast.
     storage: Arc<RwLock<dyn Storage>>,
     on_node: Option<OnNodeAccessCallback<T>>,
     on_split: Option<OnSplitCallback<T>>,
@@ -225,7 +232,7 @@ impl<T: Element> Radix<T> {
         index: usize,
         node_metas: &[Option<&[u8]>],
     ) -> Result<(usize, usize)> {
-        if index == EMPTY {
+        if index == storage::EMPTY {
             return Err(Error::InvalidIndex);
         }
         if prefix.is_empty() {
@@ -249,9 +256,7 @@ impl<T: Element> Radix<T> {
             .get_root(shard_of(prefix[0], self.sharding))
             .await?;
 
-        while node_id != EMPTY {
-            let mut found = false;
-
+        while node_id != storage::EMPTY {
             let (prefix_bytes, node_record) =
                 { self.storage.read().await.get_node(node_id).await? };
             let node_prefix = Self::to_vec(&prefix_bytes);
@@ -278,7 +283,7 @@ impl<T: Element> Radix<T> {
 
             // Match hoàn toàn key → ghi record vào node này (nếu chưa có).
             if tail == prefix.len() {
-                if node_record == EMPTY {
+                if node_record == storage::EMPTY {
                     self.storage
                         .write()
                         .await
@@ -287,12 +292,13 @@ impl<T: Element> Radix<T> {
                     self.maintain_bloom(prefix).await?;
                     return Ok((node_id, tail));
                 }
-                return Ok((EMPTY, tail));
+                return Ok((storage::EMPTY, tail));
             }
 
             // tail < prefix.len(): dò xem có thể đi tiếp nhánh nào không.
             let next_elem = prefix[tail];
             let children = self.storage.read().await.get_children(node_id).await?;
+            let mut found = false;
 
             for &child in &children {
                 let (cp_bytes, _) = self.storage.read().await.get_node(child).await?;
@@ -313,20 +319,16 @@ impl<T: Element> Radix<T> {
         // Không có root cho shard này → tạo node gốc mới.
         if prefix.len() >= 2 {
             // Root giữ element đầu (không record), leaf giữ phần còn lại +
-            // record → record-node len ≥ 2 LUÔN có link parent để gắn edge
-            // (nếu tạo root nguyên key thì không có link nào vào node có record).
+            // record → record-node len ≥ 2 LUÔN có link parent để gắn edge.
             let root = self
                 .storage
                 .write()
                 .await
-                .new_node(Self::from_vec(&prefix[..1]), EMPTY)
+                .new_node(Self::from_vec(&prefix[..1]), storage::EMPTY)
                 .await?;
             let si = shard_of(prefix[0], self.sharding);
             self.storage.write().await.set_root(si, root).await?;
             let leaf = self.extend(root, &prefix[1..], index).await?;
-            // Root mới chưa có shortcut cho element đầu (Search::update_shortcuts
-            // chỉ phủ elements từ `tail = 1`) — bổ sung để LIKE search có
-            // candidate khi pattern bắt đầu từ element đầu.
             self.storage
                 .write()
                 .await
@@ -356,13 +358,14 @@ impl<T: Element> Radix<T> {
         let Some(cb) = &self.on_node else {
             return Ok(());
         };
-        if elem.to_usize() == EMPTY {
+        if elem.to_usize() == storage::EMPTY {
             return Ok(());
         }
         let node = cb(elem, meta)?;
-        if node == EMPTY {
+        if node == storage::EMPTY {
             return Ok(());
         }
+
         self.storage.write().await.set_node_meta(node, meta).await?;
         Ok(())
     }
@@ -372,25 +375,23 @@ impl<T: Element> Radix<T> {
     /// Dùng khi rebuild index: mọi node trong canonical kind được register
     /// một lần, độc lập với chain insert. Không có callback thì dùng chính
     /// `elem.to_usize()` làm id. Trả về id đã lưu (hoặc `EMPTY` nếu bỏ qua).
-    #[allow(dead_code)] // API node-stream — GraphIndex mới dùng metas=None, giữ cho tương lai.
+    #[allow(dead_code)]
     pub async fn register_node(&self, elem: T, meta: &[u8]) -> Result<usize> {
-        if elem.to_usize() == EMPTY {
-            return Ok(EMPTY);
+        if elem.to_usize() == storage::EMPTY {
+            return Ok(storage::EMPTY);
         }
         let node = match &self.on_node {
             Some(cb) => cb(elem, meta)?,
             None => elem.to_usize(),
         };
-        if node == EMPTY {
-            return Ok(EMPTY);
+        if node == storage::EMPTY {
+            return Ok(storage::EMPTY);
         }
         self.storage.write().await.set_node_meta(node, meta).await?;
         Ok(node)
     }
 
     /// Match chính xác key → record index.
-    /// `begin == EMPTY` thì bắt đầu từ root của shard tương ứng element đầu;
-    /// `begin != EMPTY` thì bắt đầu từ node cụ thể (đã biết trước).
     #[cfg(test)]
     pub async fn r#match(&self, begin: usize, prefix: &[T]) -> Result<usize> {
         if prefix.is_empty() {
@@ -398,7 +399,7 @@ impl<T: Element> Radix<T> {
         }
 
         let mut tail = 0;
-        let mut node_id = if begin == EMPTY {
+        let mut node_id = if begin == storage::EMPTY {
             self.storage
                 .read()
                 .await
@@ -408,41 +409,37 @@ impl<T: Element> Radix<T> {
             begin
         };
 
-        if node_id == EMPTY {
+        if node_id == storage::EMPTY {
             return Err(Error::NotFound);
         }
 
-        while node_id != EMPTY {
+        while node_id != storage::EMPTY {
             let (prefix_bytes, node_record) = self.storage.read().await.get_node(node_id).await?;
             let node_prefix = Self::to_vec(&prefix_bytes);
 
-            // So node_prefix với query key (từ `tail`).
             let common = node_prefix
                 .iter()
                 .zip(prefix[tail..].iter())
                 .take_while(|(a, b)| a == b)
                 .count();
 
-            // Không khớp trọn node_prefix → key không tồn tại.
             if common < node_prefix.len() {
                 return Err(Error::NotFound);
             }
 
             tail += common;
 
-            // Khớp hết key → trả record nếu node thực sự chứa record.
             if tail == prefix.len() {
-                if node_record != EMPTY {
+                if node_record != storage::EMPTY {
                     return Ok(node_record);
                 }
                 return Err(Error::NotFound);
             }
 
-            // Tìm child khớp ký tự tiếp theo.
             let next_elem = prefix[tail];
             let children = self.storage.read().await.get_children(node_id).await?;
 
-            let mut next_node_id = EMPTY;
+            let mut next_node_id = storage::EMPTY;
             for &child in &children {
                 let (cp_bytes, _) = self.storage.read().await.get_node(child).await?;
                 let cp = Self::to_vec(&cp_bytes);
@@ -458,24 +455,9 @@ impl<T: Element> Radix<T> {
         Err(Error::NotFound)
     }
 
-    /// Theo dõi `key` từ root → trả `Vec<usize>` node id dọc theo đường đi
-    /// (node đầu là root của shard). Chỉ dùng trong test để biết node con
-    /// trên đường đi khi muốn `search_dfs` bắt đầu từ một node giữa.
-    ///
-    /// Ngoài test, chỉ được gọi từ `maintain_bloom` — khi feature
-    /// `bloom-search` tắt hàm thành dead code, nên ghi `allow(dead_code)`.
+    /// Follow key từ root → leaf, trả về toàn bộ node ids trên đường đi.
     #[allow(dead_code)]
     async fn follow_path(&self, key: &[T]) -> Result<Vec<usize>> {
-        #[cfg(feature = "bloom-search")]
-        #[allow(unreachable_code)]
-        return self.follow_path_with_bloom(key).await;
-
-        #[allow(unreachable_code)]
-        return self.follow_path_default(key).await;
-    }
-
-    #[allow(dead_code)]
-    async fn follow_path_default(&self, key: &[T]) -> Result<Vec<usize>> {
         if key.is_empty() {
             return Ok(Vec::new());
         }
@@ -486,7 +468,7 @@ impl<T: Element> Radix<T> {
             .await
             .get_root(shard_of(key[0], self.sharding))
             .await?;
-        if node_id == EMPTY {
+        if node_id == storage::EMPTY {
             return Ok(Vec::new());
         }
 
@@ -532,8 +514,7 @@ impl<T: Element> Radix<T> {
             return Ok(Vec::new());
         }
 
-        // Node khởi đầu: `begin` hoặc root của shard.
-        let mut node_id = if begin == EMPTY {
+        let mut node_id = if begin == storage::EMPTY {
             self.storage
                 .read()
                 .await
@@ -543,14 +524,14 @@ impl<T: Element> Radix<T> {
             begin
         };
 
-        if node_id == EMPTY {
+        if node_id == storage::EMPTY {
             return Ok(Vec::new());
         }
 
         let mut tail = 0;
         let mut matched_path: Vec<T> = Vec::new();
 
-        while node_id != EMPTY {
+        while node_id != storage::EMPTY {
             let (prefix_bytes, _) = self.storage.read().await.get_node(node_id).await?;
             let node_prefix = Self::to_vec(&prefix_bytes);
 
@@ -563,8 +544,6 @@ impl<T: Element> Radix<T> {
 
             matched_path.extend_from_slice(&node_prefix);
 
-            // Prefix tìm kiếm ngắn hơn node_prefix và khớp trọn đoạn đầu
-            // (VD: prefix="te", node_prefix="test") → thu thập từ node này.
             if common == remaining_prefix.len() {
                 let mut results = Vec::new();
                 self.collect_all(node_id, matched_path, &mut results)
@@ -572,7 +551,6 @@ impl<T: Element> Radix<T> {
                 return Ok(results);
             }
 
-            // Sai lệch giữa chừng → prefix không tồn tại.
             if common < node_prefix.len() {
                 return Ok(Vec::new());
             }
@@ -582,7 +560,7 @@ impl<T: Element> Radix<T> {
             let next_elem = prefix[tail];
             let children = self.storage.read().await.get_children(node_id).await?;
 
-            let mut next_node_id = EMPTY;
+            let mut next_node_id = storage::EMPTY;
             for &child in &children {
                 let (cp_bytes, _) = self.storage.read().await.get_node(child).await?;
                 let cp = Self::to_vec(&cp_bytes);
@@ -599,10 +577,6 @@ impl<T: Element> Radix<T> {
     }
 
     /// Thu thập toàn bộ `(full_key, record)` trong subtree của `root`.
-    ///
-    /// `root_path` ĐÃ gồm prefix của `root` (search_prefix nối dần qua từng cấp),
-    /// nên node nào cũng dùng thẳng path của chính nó — không append lại.
-    /// Duyệt iterative bằng explicit stack (tránh async recursion).
     async fn collect_all(
         &self,
         root: usize,
@@ -613,8 +587,7 @@ impl<T: Element> Radix<T> {
         while let Some((curr_node, current_path)) = stack.pop() {
             let (_prefix_bytes, record) = self.storage.read().await.get_node(curr_node).await?;
 
-            // Node chứa record hợp lệ → thêm vào kết quả.
-            if record != EMPTY {
+            if record != storage::EMPTY {
                 results.push((current_path.clone(), record));
             }
 
@@ -636,29 +609,6 @@ impl<T: Element> Radix<T> {
 
     // ── DFS SEARCH (LIKE / substring) ──
 
-    /// Tìm record có key **chứa** `pattern` (substring — LIKE search, không chỉ
-    /// khớp từ đầu key như `search_prefix`).
-    ///
-    /// Dò bắt đầu từ node `begin` (thường là candidate tìm qua shortcut index
-    /// của `Search`); `begin == EMPTY` thì bắt đầu từ root của shard tương ứng
-    /// `pattern[0]`.
-    ///
-    /// Mỗi node: đọc prefix, hỏi `matcher` xem pattern khớp tới đâu; khớp hoàn
-    /// toàn → thu thập toàn bộ record trong subtree (dừng); prefix hết mà còn
-    /// partial match → đệ quy xuống children có element khớp element tiếp theo.
-    ///
-    /// Trả về record IDs của match đầu tiên theo DFS trong mỗi subtree (khớp
-    /// hành vi `search_index::search_like`). Không kèm meta/key length — đó là
-    /// concern của caller (`Search` lưu chúng trong Storage).
-    ///
-    /// **Resumable + deadline-aware**: duyệt bằng explicit work-stack (không
-    /// async recursion) nên ngắt được giữa chừng khi `deadline` hết hạn. Khi
-    /// ngắt: trả `(records, Some(checkpoint))` — caller gọi lại với `resume =
-    /// Some(checkpoint)` để tiếp tục chính xác từ vị trí dừng; hoàn tất không
-    /// timeout: `None` ở vị trí checkpoint. Node đầu tiên (theo DFS) có pattern
-    /// khớp hoàn chỉnh trong prefix → collect toàn bộ records của subtree đó rồi
-    /// dừng (short-circuit); prefix hết mà pattern chưa khớp hết → dò xuống
-    /// children theo `continuations` matcher trả về.
     pub async fn search_dfs(
         &self,
         begin: usize,
@@ -671,11 +621,10 @@ impl<T: Element> Radix<T> {
             return Err(Error::NotFound);
         }
 
-        // Trạng thái: từ checkpoint (resume) hoặc khởi tạo từ `begin`.
         let (mut state, mut records) = if let Some(cp) = resume {
             (cp.state, cp.records)
         } else {
-            let node_id = if begin == EMPTY {
+            let node_id = if begin == storage::EMPTY {
                 self.storage
                     .read()
                     .await
@@ -684,7 +633,7 @@ impl<T: Element> Radix<T> {
             } else {
                 begin
             };
-            if node_id == EMPTY {
+            if node_id == storage::EMPTY {
                 return Ok((Vec::new(), None));
             }
             (
@@ -698,8 +647,6 @@ impl<T: Element> Radix<T> {
             )
         };
 
-        // Mỗi vòng lặp xử lý đúng 1 bước duyệt; giữa các bước check deadline.
-        // `state = None` → duyệt xong (Search không match / Collect xong).
         while let Some(cur) = state.take() {
             if let Some(dl) = deadline
                 && std::time::Instant::now() >= dl
@@ -715,12 +662,10 @@ impl<T: Element> Radix<T> {
 
             state = match cur {
                 DfsState::Search(mut stack) => {
-                    // Bước tới: pop frame, đọc prefix, hỏi matcher. Found → chuyển
-                    // sang Collect; ngược lại tìm child khớp element tiếp theo.
                     let mut next: Option<DfsState> = None;
                     while next.is_none() {
                         let Some(mut frame) = stack.pop() else {
-                            break; // stack rỗng — không có match trong subtree này.
+                            break;
                         };
 
                         let (prefix_bytes, _record) =
@@ -728,7 +673,6 @@ impl<T: Element> Radix<T> {
                         let prefix = Self::to_vec(&prefix_bytes);
                         let result = matcher(&prefix, pattern, frame.pattern_pos);
 
-                        // Match hoàn chỉnh → collect toàn bộ subtree rồi dừng.
                         if result.found {
                             next = Some(DfsState::Collect {
                                 root: frame.node_id,
@@ -764,12 +708,6 @@ impl<T: Element> Radix<T> {
                                     continue;
                                 }
 
-                                // Prune nhánh: bloom của child không chứa
-                                // `pattern[pp..]` (substring) → subtree chắc chắn
-                                // không có match tiếp tục, bỏ nhánh. Bloom có 0
-                                // false negative nên không bao giờ bỏ nhánh có
-                                // match thật. Chỉ prune khi substring đủ ngắn và
-                                // child có bloom (không có → fallback traversal).
                                 #[cfg(feature = "bloom-search")]
                                 {
                                     let remaining_len = pattern.len() - pp;
@@ -786,8 +724,6 @@ impl<T: Element> Radix<T> {
                                     }
                                 }
 
-                                // Đi xuống child — đẩy frame hiện tại lại (với vị
-                                // trí đã tiến) + frame con mới.
                                 stack.push(frame);
                                 stack.push(DfsFrame {
                                     node_id: child,
@@ -808,18 +744,14 @@ impl<T: Element> Radix<T> {
                             next = Some(DfsState::Search(stack));
                             break;
                         }
-                        // Frame này đã dò hết continuations — pop frame tiếp theo.
                     }
-                    // `None` = stack rỗng không có match → candidate xong.
                     next
                 }
                 DfsState::Collect { root, mut stack } => {
-                    // Collect subtree theo pre-order (record của node trước, sau
-                    // đó mới children — giống bản đệ quy cũ).
                     if let Some((node_id, child_idx)) = stack.pop() {
                         let (_prefix_bytes, record) =
                             { self.storage.read().await.get_node(node_id).await? };
-                        if record != EMPTY {
+                        if record != storage::EMPTY {
                             records.push(record);
                         }
                         let children = { self.storage.read().await.get_children(node_id).await? };
@@ -829,7 +761,7 @@ impl<T: Element> Radix<T> {
                         }
                         Some(DfsState::Collect { root, stack })
                     } else {
-                        None // Collect xong — candidate đã có records, dừng.
+                        None
                     }
                 }
             };
@@ -860,7 +792,6 @@ impl<T: Element> Radix<T> {
         let root_prefix = old_prefix[..breakpoint].to_vec();
         let leg_prefix = old_prefix[breakpoint..].to_vec();
 
-        // suffix rỗng → key mới là prefix của key cũ: parent chính là node đích.
         let inserting_at_parent = suffix.is_empty();
 
         let mut tx = self.storage.read().await.new_tx();
@@ -871,10 +802,8 @@ impl<T: Element> Radix<T> {
             tx.new_node(Self::from_vec(suffix), value).await?
         };
 
-        // Leg chứa các children cũ + record cũ của parent.
         let leg_id = tx.new_node(Self::from_vec(&leg_prefix), old_record).await?;
 
-        // Migrate toàn bộ children cũ sang leg.
         for &child in &existing_children {
             tx.move_child(parent, leg_id, child).await?;
         }
@@ -887,16 +816,14 @@ impl<T: Element> Radix<T> {
         tx.update_node(
             parent,
             Some(Self::from_vec(&root_prefix)),
-            Some(if inserting_at_parent { value } else { EMPTY }),
+            Some(if inserting_at_parent { value } else { storage::EMPTY }),
         )
         .await?;
 
-        // Callback về việc cây đã thay đổi thật sự
         if let Some(callback) = &self.on_split {
             callback(parent, leg_id, &old_prefix, breakpoint)?;
         }
 
-        // Nếu callback báo ok thì commit luôn
         tx.commit().await?;
         Ok(new_id)
     }
@@ -909,60 +836,6 @@ impl<T: Element> Radix<T> {
         tx.add_child(parent, id).await?;
         tx.commit().await?;
         Ok(id)
-    }
-
-    /// Follow key từ root → leaf, trả về toàn bộ node ids trên đường đi.
-    /// Dùng để tìm ancestors khi cập nhật bloom filters sau insert.
-    #[cfg(feature = "bloom-search")]
-    async fn follow_path_with_bloom(&self, key: &[T]) -> Result<Vec<usize>> {
-        if key.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut node_id = self
-            .storage
-            .read()
-            .await
-            .get_root(shard_of(key[0], self.sharding))
-            .await?;
-        if node_id == EMPTY {
-            return Ok(Vec::new());
-        }
-
-        let mut path = vec![node_id];
-        let mut pos = 0;
-
-        loop {
-            let (prefix_bytes, _) = self.storage.read().await.get_node(node_id).await?;
-            let node_prefix = Self::to_vec(&prefix_bytes);
-            let common = node_prefix
-                .iter()
-                .zip(key[pos..].iter())
-                .take_while(|(a, b)| a == b)
-                .count();
-
-            pos += common;
-            if pos == key.len() || common < node_prefix.len() {
-                return Ok(path);
-            }
-
-            let next_elem = key[pos];
-            let children = self.storage.read().await.get_children(node_id).await?;
-            let mut found = false;
-            for &child in &children {
-                let (cp_bytes, _) = self.storage.read().await.get_node(child).await?;
-                let cp = Self::to_vec(&cp_bytes);
-                if !cp.is_empty() && cp[0] == next_elem {
-                    node_id = child;
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return Ok(path);
-            }
-            path.push(node_id);
-        }
     }
 
     /// Duy trì bloom filter sau mỗi mutation (insert/update record): no-op khi
@@ -982,7 +855,6 @@ impl<T: Element> Radix<T> {
                 return Ok(());
             }
 
-            // Mọi substring aligned theo element, dài 1..=cap element.
             let cap = bloom_cfg::MATCH_CAP.min(elem_len);
             let mut subs: Vec<Vec<u8>> = Vec::new();
             for start in 0..elem_len {
@@ -1023,22 +895,15 @@ impl<T: Element> Radix<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     fn k(s: &str) -> Vec<u8> {
         s.bytes().collect()
     }
 
-    /// `node_metas` toàn `None` (độ dài khớp key) — test structural insert
-    /// không cần node access.
     fn no_meta(n: usize) -> Vec<Option<&'static [u8]>> {
         vec![None; n]
     }
 
-    /// Matcher naive (test-only): substring search thuần — quét mọi vị trí của
-    /// `pattern[pattern_pos..]` trong prefix, trả `found` nếu khớp trọn; nếu
-    /// prefix hết mà còn partial thì push pattern_pos mới vào `continuations`
-    /// (radix sẽ đệ quy xuống children theo các vị trí này).
     fn naive_matcher() -> SearchMatcher<u8> {
         Arc::new(move |prefix: &[u8], pat: &[u8], pattern_pos: usize| {
             let n = pat.len();
@@ -1065,7 +930,6 @@ mod tests {
                         continuations: Vec::new(),
                     };
                 }
-                // Prefix hết, còn partial → có thể nối tiếp xuống children.
                 if i == prefix.len() && j > pattern_pos {
                     continuations.push(j);
                 }
@@ -1084,10 +948,10 @@ mod tests {
         assert!(tree.insert(&k("world"), 2, &no_meta(5)).await.is_ok());
         assert!(tree.insert(&k("help"), 3, &no_meta(4)).await.is_ok());
 
-        assert_eq!(tree.r#match(EMPTY, &k("hello")).await.unwrap(), 1);
-        assert_eq!(tree.r#match(EMPTY, &k("world")).await.unwrap(), 2);
-        assert_eq!(tree.r#match(EMPTY, &k("help")).await.unwrap(), 3);
-        assert!(tree.r#match(EMPTY, &k("notfound")).await.is_err());
+        assert_eq!(tree.r#match(storage::EMPTY, &k("hello")).await.unwrap(), 1);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("world")).await.unwrap(), 2);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("help")).await.unwrap(), 3);
+        assert!(tree.r#match(storage::EMPTY, &k("notfound")).await.is_err());
     }
 
     #[tokio::test]
@@ -1105,7 +969,7 @@ mod tests {
     #[tokio::test]
     async fn test_match_empty_tree() {
         let tree = Radix::in_memory(2);
-        assert!(tree.r#match(EMPTY, &k("anything")).await.is_err());
+        assert!(tree.r#match(storage::EMPTY, &k("anything")).await.is_err());
     }
 
     #[tokio::test]
@@ -1115,9 +979,9 @@ mod tests {
         tree.insert(&k("hello"), 1, &no_meta(5)).await.unwrap();
         tree.insert(&k("hel"), 2, &no_meta(3)).await.unwrap();
 
-        assert_eq!(tree.r#match(EMPTY, &k("hel")).await.unwrap(), 2);
-        assert_eq!(tree.r#match(EMPTY, &k("hello")).await.unwrap(), 1);
-        assert!(tree.r#match(EMPTY, &k("help")).await.is_err());
+        assert_eq!(tree.r#match(storage::EMPTY, &k("hel")).await.unwrap(), 2);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("hello")).await.unwrap(), 1);
+        assert!(tree.r#match(storage::EMPTY, &k("help")).await.is_err());
     }
 
     #[tokio::test]
@@ -1128,11 +992,11 @@ mod tests {
         tree.insert(&k("ab"), 2, &no_meta(2)).await.unwrap();
         tree.insert(&k("a"), 1, &no_meta(1)).await.unwrap();
 
-        assert_eq!(tree.r#match(EMPTY, &k("a")).await.unwrap(), 1);
-        assert_eq!(tree.r#match(EMPTY, &k("ab")).await.unwrap(), 2);
-        assert_eq!(tree.r#match(EMPTY, &k("abc")).await.unwrap(), 3);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("a")).await.unwrap(), 1);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("ab")).await.unwrap(), 2);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("abc")).await.unwrap(), 3);
 
-        let results = tree.search_prefix(EMPTY, &k("a")).await.unwrap();
+        let results = tree.search_prefix(storage::EMPTY, &k("a")).await.unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -1147,8 +1011,8 @@ mod tests {
         let (id2, _) = tree.insert(&k("hel"), 2, &no_meta(3)).await.unwrap();
         assert_eq!(id2, 0, "duplicate prefix insert trả về EMPTY");
 
-        assert_eq!(tree.r#match(EMPTY, &k("hel")).await.unwrap(), 2);
-        assert_eq!(tree.r#match(EMPTY, &k("hello")).await.unwrap(), 1);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("hel")).await.unwrap(), 2);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("hello")).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1159,21 +1023,20 @@ mod tests {
         tree.insert(&k("held"), 3, &no_meta(4)).await.unwrap();
         tree.insert(&k("world"), 4, &no_meta(5)).await.unwrap();
 
-        let results = tree.search_prefix(EMPTY, &k("he")).await.unwrap();
+        let results = tree.search_prefix(storage::EMPTY, &k("he")).await.unwrap();
         assert_eq!(results.len(), 3);
         assert!(results.contains(&(k("hello"), 1)));
         assert!(results.contains(&(k("help"), 2)));
         assert!(results.contains(&(k("held"), 3)));
 
-        let results = tree.search_prefix(EMPTY, &k("hel")).await.unwrap();
+        let results = tree.search_prefix(storage::EMPTY, &k("hel")).await.unwrap();
         assert_eq!(results.len(), 3);
 
-        let results = tree.search_prefix(EMPTY, &k("hello")).await.unwrap();
+        let results = tree.search_prefix(storage::EMPTY, &k("hello")).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], (k("hello"), 1));
 
-        // Không match → Ok(vec![]) (khác Err ở radixtree cũ)
-        let results = tree.search_prefix(EMPTY, &k("xyz")).await.unwrap();
+        let results = tree.search_prefix(storage::EMPTY, &k("xyz")).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -1192,13 +1055,13 @@ mod tests {
         for i in 0..10u8 {
             let key = format!("aaaaaa{i}");
             assert!(
-                tree.r#match(EMPTY, &k(&key)).await.is_ok(),
+                tree.r#match(storage::EMPTY, &k(&key)).await.is_ok(),
                 "'{key}' phải match sau split — children đã migrate sang leg"
             );
         }
-        assert_eq!(tree.r#match(EMPTY, &k("aaaab")).await.unwrap(), 20);
+        assert_eq!(tree.r#match(storage::EMPTY, &k("aaaab")).await.unwrap(), 20);
 
-        let results = tree.search_prefix(EMPTY, &k("aaaaaa")).await.unwrap();
+        let results = tree.search_prefix(storage::EMPTY, &k("aaaaaa")).await.unwrap();
         assert_eq!(results.len(), 10);
     }
 
@@ -1210,9 +1073,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
         tree.with_split(Arc::new(move |_parent, leg_id, old_prefix, breakpoint| {
-            assert_ne!(leg_id, EMPTY);
-            // R1: root giữ "h", leaf "ello" — split khi insert "help" chẻ "ello"
-            // tại breakpoint 2 ("el" + "lo").
+            assert_ne!(leg_id, storage::EMPTY);
             assert_eq!(old_prefix, b"ello".to_vec());
             assert_eq!(breakpoint, 2);
             calls_clone.fetch_add(1, Ordering::SeqCst);
@@ -1230,28 +1091,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_follow_path() {
-        let mut tree = Radix::in_memory(4);
-        tree.insert(&k("hello"), 1, &no_meta(5)).await.unwrap();
-        tree.insert(&k("helloworld"), 2, &no_meta(10))
-            .await
-            .unwrap();
-
-        let path = tree.follow_path(&k("helloworld")).await.unwrap();
-        assert!(!path.is_empty(), "path không rỗng");
-    }
-
-    #[tokio::test]
     async fn test_search_dfs_substring() {
         let mut tree = Radix::in_memory(4);
         tree.insert(&k("hello"), 1, &no_meta(5)).await.unwrap();
         tree.insert(&k("help"), 2, &no_meta(4)).await.unwrap();
         tree.insert(&k("held"), 3, &no_meta(4)).await.unwrap();
 
-        // R1: root chỉ giữ element đầu ("h"), phần còn lại nằm ở depth sâu
-        // ("hello" = "h" + "el" + "lo") — substring "llo" phải bắt đầu từ
-        // candidate node chứa element 'l' (production lấy qua shortcut index;
-        // ở đây dùng follow_path để mô phỏng).
         let path = tree.follow_path(&k("hello")).await.unwrap();
         let (hits, _) = tree
             .search_dfs(path[1], &k("llo"), naive_matcher(), None, None)
@@ -1259,9 +1104,8 @@ mod tests {
             .unwrap();
         assert_eq!(hits, vec![1]);
 
-        // Prefix khớp từ root → collect toàn bộ records trong subtree.
         let (hits, _) = tree
-            .search_dfs(EMPTY, &k("hel"), naive_matcher(), None, None)
+            .search_dfs(storage::EMPTY, &k("hel"), naive_matcher(), None, None)
             .await
             .unwrap();
         assert_eq!(hits.len(), 3);
@@ -1271,180 +1115,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_dfs_from_node() {
-        let mut tree = Radix::in_memory(4);
-        tree.insert(&k("hello"), 1, &no_meta(5)).await.unwrap();
-        tree.insert(&k("help"), 2, &no_meta(4)).await.unwrap();
-
-        // begin = node "el" (parent sau split) — match 'l' ở cuối prefix rồi
-        // nối tiếp xuống child "lo".
-        let path = tree.follow_path(&k("hello")).await.unwrap();
-        let parent = path[1];
-        let (hits, _) = tree
-            .search_dfs(parent, &k("llo"), naive_matcher(), None, None)
-            .await
-            .unwrap();
-        assert_eq!(hits, vec![1]);
-    }
-
-    #[tokio::test]
     async fn test_search_dfs_not_found() {
         let mut tree = Radix::in_memory(4);
         tree.insert(&k("hello"), 1, &no_meta(5)).await.unwrap();
 
-        // Pattern rỗng → Err.
         assert!(
-            tree.search_dfs(EMPTY, &[], naive_matcher(), None, None)
+            tree.search_dfs(storage::EMPTY, &[], naive_matcher(), None, None)
                 .await
                 .is_err()
         );
-        // Pattern không tồn tại → Ok(vec![]).
         let (hits, _) = tree
-            .search_dfs(EMPTY, &k("xyz"), naive_matcher(), None, None)
+            .search_dfs(storage::EMPTY, &k("xyz"), naive_matcher(), None, None)
             .await
             .unwrap();
         assert!(hits.is_empty());
-    }
-
-    // ── Node access stream (OnNodeAccessCallback) ──
-
-    /// Các lần on_node được ghi nhận: (elem, metadata).
-    type NodeCalls = Vec<(u8, Vec<u8>)>;
-
-    /// Callback node test: ghi nhận (elem, meta) + trả elem as usize (identity —
-    /// chain model: element id chính là node stream key).
-    fn node_cb(calls: Arc<Mutex<NodeCalls>>) -> OnNodeAccessCallback<u8> {
-        Arc::new(move |elem, meta| {
-            calls.lock().unwrap().push((elem, meta.to_vec()));
-            Ok(elem as usize)
-        })
-    }
-
-    #[tokio::test]
-    async fn test_node_fired_per_element_with_meta() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut tree = Radix::in_memory(4);
-        tree.with_node_access(node_cb(calls.clone()));
-
-        // Mỗi element có meta → fire on_node, độc lập với kết quả structural.
-        // "ab" + "ac" cùng root 'a' → 'a' fire 2 lần (access callback được phép
-        // gọi lại, phải trả cùng id).
-        tree.insert(&k("ab"), 1, &[Some(b"ma"), Some(b"mb")])
-            .await
-            .unwrap();
-        tree.insert(&k("ac"), 2, &[Some(b"ma"), None])
-            .await
-            .unwrap();
-        tree.insert(&k("d"), 3, &[Some(b"md")]).await.unwrap();
-
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            &[
-                (b'a', b"ma".to_vec()),
-                (b'b', b"mb".to_vec()),
-                (b'a', b"ma".to_vec()),
-                (b'd', b"md".to_vec())
-            ],
-            "fire đúng mỗi element có meta (None = marker → skip)"
-        );
-
-        // Metadata lưu vào node stream, keyed theo id callback trả về (= elem).
-        let storage = tree.storage.read().await;
-        assert_eq!(
-            storage
-                .get_node_meta(b'a' as usize)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(b"ma".as_slice())
-        );
-        assert_eq!(
-            storage
-                .get_node_meta(b'b' as usize)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(b"mb".as_slice())
-        );
-        assert_eq!(storage.get_node_meta(b'c' as usize).await.unwrap(), None);
-        assert_eq!(
-            storage
-                .get_node_meta(b'd' as usize)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(b"md".as_slice())
-        );
-        drop(storage);
-    }
-
-    #[tokio::test]
-    async fn test_node_skipped_for_empty_element() {
-        // elem.to_usize() == EMPTY → không fire (0 không phải node hợp lệ).
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut tree = Radix::in_memory(4);
-        tree.with_node_access(node_cb(calls.clone()));
-
-        tree.insert(&[0u8, 1], 1, &[Some(b"m0"), Some(b"m1")])
-            .await
-            .unwrap();
-
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            &[(1u8, b"m1".to_vec())],
-            "element 0 (EMPTY) bị skip"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_node_not_fired_without_callback() {
-        // Không đăng ký callback → insert có metas vẫn ok, không lưu node stream.
-        let mut tree = Radix::in_memory(4);
-        tree.insert(&k("ab"), 1, &[Some(b"ma"), Some(b"mb")])
-            .await
-            .unwrap();
-        let storage = tree.storage.read().await;
-        assert_eq!(storage.get_node_meta(b'a' as usize).await.unwrap(), None);
-        drop(storage);
-    }
-
-    #[tokio::test]
-    async fn test_register_node_writes_meta_and_returns_id() {
-        let tree = Radix::in_memory(4);
-        // Không có callback → dùng elem làm id.
-        let id = tree.register_node(b'x', b"mx").await.unwrap();
-        assert_eq!(id, b'x' as usize);
-        let storage = tree.storage.read().await;
-        assert_eq!(
-            storage
-                .get_node_meta(b'x' as usize)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(b"mx".as_slice())
-        );
-        drop(storage);
-
-        // Ghi đè (last-wins) — cùng id.
-        tree.register_node(b'x', b"mx2").await.unwrap();
-        let storage = tree.storage.read().await;
-        assert_eq!(
-            storage
-                .get_node_meta(b'x' as usize)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(b"mx2".as_slice())
-        );
-        drop(storage);
-    }
-
-    #[tokio::test]
-    async fn test_register_node_skips_empty() {
-        let tree = Radix::in_memory(4);
-        assert_eq!(tree.register_node(0, b"m0").await.unwrap(), EMPTY);
-        let storage = tree.storage.read().await;
-        assert_eq!(storage.get_node_meta(0).await.unwrap(), None);
-        drop(storage);
     }
 }

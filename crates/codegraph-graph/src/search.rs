@@ -253,6 +253,11 @@ type PendingSplitElems = Vec<(usize, Vec<u8>)>;
 
 /// `Search` là lớp mỏng trên Storage: metadata, key length và shortcuts (index
 /// phụ cho LIKE search) đều nằm trong Storage — không có cache in-memory nào.
+///
+/// Field `storage` giữ `dyn Storage` (umbrella) — `Radix` chỉ cần `CategoryStorage`
+/// subset, nhưng `Search` cần cả 5 trait phụ (chain / meta / shortcut / edge /
+/// node meta) — `Storage` super-bound tất cả, tiện hơn cast qua lại giữa các
+/// trait object.
 pub struct Search<T: Element = u8> {
     sharding: usize,
     trie: Radix<T>,
@@ -675,26 +680,6 @@ impl<T: Element> Search<T> {
     #[allow(dead_code)] // API giữ nguyên (protected).
     pub async fn get_edge_data(&self, edge: usize) -> Result<Option<Vec<u8>>> {
         Ok(self.storage.read().await.get_edge_data(edge).await?)
-    }
-
-    /// Duyệt toàn bộ edge data `(edge_id, meta)` — rebuild edge registry khi
-    /// reopen (edge id ↔ (from,to) không persist riêng; CallEdgeMeta chứa đủ
-    /// thông tin nên registry tái dựng được từ stream này).
-    ///
-    /// Chỉ dùng trong sqlite builds (reload_edges) — lib build mặc định không có.
-    #[allow(dead_code)]
-    pub async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        self.storage
-            .read()
-            .await
-            .for_each_edge_data(&mut |id, data| {
-                f(id, data).map_err(|e| crate::storage::StorageError::Internal(e.to_string()))
-            })
-            .await?;
-        Ok(())
     }
 }
 

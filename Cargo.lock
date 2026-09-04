@@ -773,6 +773,8 @@ dependencies = [
  "codegraph-graph",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

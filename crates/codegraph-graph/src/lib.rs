@@ -47,6 +47,14 @@ pub use crate::storage::postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use crate::storage::sqlite::SqliteStorage;
 pub use crate::storage::{InMemoryStorage, IndexCounts, Storage, Tx};
+// Sub-traits of `Storage` — callers that need only one facet (e.g. a chain-engine
+// read path) can name it directly instead of taking the full umbrella.
+pub use crate::storage::{
+    CategoryStorage, ChainStorage, EdgeDataStorage, EntityStorage, NodeMetaStorage,
+    ShortcutsStorage,
+};
+#[cfg(feature = "bloom-search")]
+pub use crate::storage::BloomStorage;
 use crate::vector_index::VectorIndex;
 use codegraph_core::{
     CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
@@ -1089,8 +1097,20 @@ impl GraphIndex {
             .cloned()
             .unwrap_or_default();
 
-        // 3. Short name fallback (after last dot).
+        // 3. Independent lookup paths: alias ("var.method" → "TypeName.method")
+        //    AND short name fallback — merge results instead of sequential fallback.
         if candidates.is_empty() {
+            // 3a. Go/Import alias: resolve "var.method" via field type to "TypeName.method".
+            if let Some(qualified) = self.alias_qualified_name(caller_id, &call.call_name) {
+                let alias_ids = self
+                    .name_index
+                    .get(&qualified)
+                    .cloned()
+                    .unwrap_or_default();
+                candidates.extend(alias_ids);
+            }
+
+            // 3b. Short name fallback (after last dot).
             let short = call
                 .call_name
                 .rsplit('.')
@@ -1098,39 +1118,35 @@ impl GraphIndex {
                 .unwrap_or("")
                 .to_lowercase();
             if !short.is_empty() {
-                // Chỉ nhận callee-thực-sự (Function/Method) — KHÔNG fallback vào
-                // biến / field / param trùng tên (VD `WrapResponse.ok(...)` với
-                // receiver external không resolve được dễ link nhầm vào `boolean ok`
-                // trong file khác — bug C).
-                candidates = self
+                let short_ids = self
                     .name_index
                     .get(&short)
                     .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|&id| {
-                        self.symbols.get(&id).is_some_and(|s| {
-                            matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
-                        })
-                    })
-                    .collect();
+                    .unwrap_or_default();
+                candidates.extend(short_ids);
             }
-        }
-
-        // 4. Go/Import alias handling: try to resolve using the caller's variable type
-        //    information. `alias_qualified_name` produces a fully qualified name like
-        //    "myservice.validate" based on a variable's type_name. If that name
-        //    exists in the index, use it as an additional candidate set.
-        if candidates.is_empty()
-            && let Some(qualified) = self.alias_qualified_name(caller_id, &call.call_name)
-        {
-            candidates = self.name_index.get(&qualified).cloned().unwrap_or_default();
         }
 
         if candidates.is_empty() {
             return None;
         }
-        Some(self.pick_best_candidate(&candidates, caller_id))
+
+        // 4. Filter to Function/Method kinds AND exclude the caller itself.
+        //    The short name fallback can return the caller's own id (e.g. both
+        //    LegacyAdapter.doWork and Service.doWork match "dowork"), so we must
+        //    eliminate the caller before scoring.
+        candidates.retain(|&id| {
+            id != caller_id
+                && self
+                    .symbols
+                    .get(&id)
+                    .is_some_and(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
+        });
+
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(self.pick_best_candidate(&candidates, caller_id, &call.call_name))
     }
 
     /// Tìm method của class theo tên (scope_id == class id).
@@ -1154,10 +1170,22 @@ impl GraphIndex {
     }
 
     /// Chọn ứng viên tốt nhất trong danh sách trùng tên.
-    fn pick_best_candidate(&self, candidates: &[u64], caller_id: u64) -> u64 {
+    ///
+    /// Khi nhiều method cùng tên, dùng typed-proximity tie-breaker: nếu call_name
+    /// dạng `var.method` và `var` là field khai báo kiểu `TypeName` trong caller
+    /// scope, ưu tiên method thuộc class `TypeName` (bug của Router.route:
+    /// `legacyAdapter.doWork` từng bị resolve nhầm sang `Service.doWork` vì cả
+    /// hai cùng score +9).
+    fn pick_best_candidate(&self, candidates: &[u64], caller_id: u64, call_name: &str) -> u64 {
         if candidates.len() == 1 {
             return candidates[0];
         }
+
+        // Trích declared type của field từ call_name (nếu call_name dạng "var.method").
+        // VD: "legacyAdapter.doWork" → field `legacyAdapter` trong caller scope
+        //     → type_name = "LegacyAdapter" → trả "legacyadapter" (lower).
+        let field_type = self.field_declared_type(caller_id, call_name);
+
         let caller_file = self.symbols.get(&caller_id).map(|s| s.file.clone());
         let mut best = candidates[0];
         let mut best_score = i32::MIN;
@@ -1182,12 +1210,52 @@ impl GraphIndex {
             {
                 score += 3;
             }
+            // Typed proximity: +8 nếu enclosing class của candidate khớp với
+            // declared type của field gọi (cao hơn same-file +3 để thắng).
+            if let Some(ref ft) = field_type
+                && let Some(class_sym) = self
+                    .symbols
+                    .get(&sym.scope_id)
+                    .filter(|cs| matches!(cs.kind, SymbolKind::Class | SymbolKind::Interface))
+                && class_sym.name.to_lowercase() == *ft
+            {
+                score += 8;
+            }
             if score > best_score {
                 best_score = score;
                 best = id;
             }
         }
         best
+    }
+
+    /// Tìm declared type của field từ call_name dạng `var.method`.
+    ///
+    /// Trả về `Some("legacyadapter")` nếu caller scope có field `legacyAdapter`
+    /// với `type_name = "LegacyAdapter"`. Trả `None` nếu call_name không có dấu
+    /// chấm, field chưa được index, hoặc field không có type_name.
+    fn field_declared_type(&self, caller_id: u64, call_name: &str) -> Option<String> {
+        // Lấy tên field/receiver phía trước dấu `.` cuối.
+        // VD: "legacyAdapter.doWork" → "legacyAdapter", "doWork" → None (không có receiver).
+        let field_name = call_name.rsplit('.').nth(1).or_else(|| call_name.rsplit('.').next())?;
+        if field_name == call_name {
+            // Không có dấu '.' → call_name chính là tên method, không phải dạng `var.method`.
+            return None;
+        }
+        let caller_scope_id = self.symbols.get(&caller_id)?.scope_id;
+
+        for (_id, sym) in &self.symbols {
+            if sym.scope_id == caller_scope_id
+                && sym.name == field_name
+                && matches!(
+                    sym.kind,
+                    SymbolKind::Field | SymbolKind::Variable | SymbolKind::Parameter
+                )
+            {
+                return sym.type_name.as_ref().map(|t| t.to_lowercase());
+            }
+        }
+        None
     }
 
     /// Build edges từ chains (đã resolve) + call records; persist call records +
@@ -3491,5 +3559,140 @@ mod tests {
             .page;
         assert!(!hyb.is_empty());
         assert!(hyb.iter().any(|s| s.name == "authenticate_user"));
+    }
+
+    #[tokio::test]
+    async fn field_declared_type_extracts_receiver_not_method() {
+        // field_declared_type("legacyAdapter.doWork") phải trả "legacyadapter"
+        // không phải "doWork".
+        let mut idx = GraphIndex::in_memory();
+        // Tạo class LegacyAdapter (id=100) với field legacyAdapter (id=101, type_name="LegacyAdapter")
+        // và method doWork (id=102).
+        // Tạo class Service (id=103) với method doWork (id=104).
+        let legacy_adapter = Symbol {
+            id: 100,
+            name: "LegacyAdapter".to_string(),
+            kind: SymbolKind::Class,
+            scope: ScopeLevel::Global,
+            scope_id: 0,
+            type_ref: 0,
+            type_name: None,
+            file: "LegacyAdapter.java".into(),
+            line: 3,
+            end_line: 8,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "java".into(),
+        };
+        let legacy_field = Symbol {
+            id: 101,
+            name: "legacyAdapter".to_string(),
+            kind: SymbolKind::Field,
+            scope: ScopeLevel::ObjectField,
+            scope_id: 100,
+            type_ref: 0,
+            type_name: Some("LegacyAdapter".to_string()),
+            file: "Router.java".into(),
+            line: 5,
+            end_line: 5,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "java".into(),
+        };
+        let legacy_do_work = Symbol {
+            id: 102,
+            name: "doWork".to_string(),
+            kind: SymbolKind::Method,
+            scope: ScopeLevel::ObjectField,
+            scope_id: 100,
+            type_ref: 0,
+            type_name: None,
+            file: "LegacyAdapter.java".into(),
+            line: 5,
+            end_line: 7,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "java".into(),
+        };
+        let service = Symbol {
+            id: 103,
+            name: "Service".to_string(),
+            kind: SymbolKind::Class,
+            scope: ScopeLevel::Global,
+            scope_id: 0,
+            type_ref: 0,
+            type_name: None,
+            file: "Service.java".into(),
+            line: 3,
+            end_line: 8,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "java".into(),
+        };
+        let service_do_work = Symbol {
+            id: 104,
+            name: "doWork".to_string(),
+            kind: SymbolKind::Method,
+            scope: ScopeLevel::ObjectField,
+            scope_id: 103,
+            type_ref: 0,
+            type_name: None,
+            file: "Service.java".into(),
+            line: 5,
+            end_line: 7,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "java".into(),
+        };
+        // Tạo router method với scope_id = 200 (không phải class scope)
+        // Để field_declared_type tìm trong scope_id=200 sẽ fail → return None.
+        // Thay vào đó tạo router method với scope_id=100 để field legacyAdapter match.
+        let router_method = Symbol {
+            id: 105,
+            name: "route".to_string(),
+            kind: SymbolKind::Method,
+            scope: ScopeLevel::Local,
+            scope_id: 100, // scope_id = LegacyAdapter class id để field legacyAdapter match
+            type_ref: 0,
+            type_name: None,
+            file: "Router.java".into(),
+            line: 7,
+            end_line: 9,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "java".into(),
+        };
+        idx.ingest(&[ParseResult {
+            path: "dummy.java".into(),
+            language: "java".into(),
+            bytes: 0,
+            lines: 0,
+            symbols: vec![
+                legacy_adapter,
+                legacy_field,
+                legacy_do_work,
+                service,
+                service_do_work,
+                router_method,
+            ],
+            chains: HashMap::new(),
+            calls: vec![],
+        }]).await.unwrap();
+
+        // "legacyAdapter.doWork" → field_name = "legacyAdapter" → type_name = "LegacyAdapter" → "legacyadapter"
+        assert_eq!(
+            idx.field_declared_type(105, "legacyAdapter.doWork"),
+            Some("legacyadapter".to_string())
+        );
+        // "doWork" (không có '.') → None (không phải dạng var.method)
+        assert_eq!(idx.field_declared_type(105, "doWork"), None);
+        // "svc.doWork" với field svc không tồn tại trong scope → None
+        assert_eq!(idx.field_declared_type(105, "svc.doWork"), None);
     }
 }
