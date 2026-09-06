@@ -89,6 +89,8 @@ pub static SPEC: LangSpec = LangSpec {
     name_type_fallback: false,
 
     link_impl_methods: false,
+    anonymous_name_fn: None,
+    value_func_kinds: &[],
     calls: &[
         CallRule {
             kind: "method_invocation",

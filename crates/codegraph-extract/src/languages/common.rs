@@ -33,6 +33,10 @@ pub type TargetFn = fn(&Node, &[u8]) -> (Option<String>, Option<String>);
 /// Post-process class symbol: `(class node, src) -> type_name` (VD TS heritage).
 pub type ClassTypeFn = fn(&Node, &[u8]) -> Option<String>;
 
+/// Tìm name node cho hàm anonymous theo ngữ cảnh gán (`var a = function(){}`,
+/// `f = lambda: ...`) — node trả về làm cả name lẫn line để 2 pass khớp nhau.
+pub type ContextNameFn = for<'a> fn(&Node<'a>) -> Option<Node<'a>>;
+
 /// Một call-site rule: node kind nào là call + callee field + cách lấy tên.
 #[derive(Clone, Copy)]
 pub struct CallRule {
@@ -73,6 +77,13 @@ pub struct LangSpec {
     /// cùng tên, methods scoped vào impl. Bật flag để re-parent methods từ impl
     /// về symbol def cùng tên (xem `link_impl_methods_to_def`). Chỉ bật cho Rust.
     pub link_impl_methods: bool,
+    /// Hàm anonymous (lambda/function expression) gán qua biến/property: mượn
+    /// tên theo ngữ cảnh (JS `var a = function(){}`, Py `f = lambda: ...`,
+    /// Go `f := func(){}`, PHP `$f = function(){}`).
+    pub anonymous_name_fn: Option<ContextNameFn>,
+    /// Node kind của giá trị gán là hàm anonymous — decl Variable/Constant chứa
+    /// nó bị bỏ để tránh trùng tên với Function sinh từ `anonymous_name_fn`.
+    pub value_func_kinds: &'static [&'static str],
     // ── marker rules ──
     pub if_kinds: &'static [&'static str],
     pub elif_kinds: &'static [&'static str],
@@ -224,6 +235,13 @@ fn push_symbol(
     kind: SymbolKind,
     node_kind: &str,
 ) -> Option<u64> {
+    // Declarator gán hàm anonymous (`const a = () => {}`, `var h = func(){}`):
+    // bỏ symbol Variable — hàm bên trong sẽ được đặt tên qua anonymous_name_fn,
+    // tránh 2 symbol trùng tên (Variable + Function).
+    if matches!(kind, SymbolKind::Variable | SymbolKind::Constant) && decl_value_is_func(node, spec)
+    {
+        return None;
+    }
     // C/C++: macro attribute trước qualified ctor (`_CUSTOM_ATTRIBUTE
     // CustomWidget<T>::CustomWidget(...)`) làm tree-sitter đánh ERROR — field
     // `declarator` chỉ vào init_declarator sai; tên ctor nằm trong function_declarator
@@ -244,8 +262,10 @@ fn push_symbol(
             .or_else(|| {
                 // Anonymous function/class (JS `export default function() {}`,
                 // C anonymous struct) — first_identifier trong body là nhiễu, bỏ qua.
+                // Hàm anonymous gán qua biến/property thì mượn tên theo ngữ cảnh
+                // (JS `var a = function(){}`, Py `f = lambda: ...`).
                 if spec.func_kinds.contains(&node_kind) || spec.class_kinds.contains(&node_kind) {
-                    None
+                    spec.anonymous_name_fn.and_then(|f| f(node))
                 } else {
                     first_identifier(node)
                 }
@@ -513,7 +533,7 @@ fn collect_chains(
     calls: &mut Vec<CallRecord>,
 ) {
     if spec.func_kinds.contains(&root.kind()) {
-        if let Some(id) = func_id_of(root, src, func_index) {
+        if let Some(id) = func_id_of(root, src, spec, func_index) {
             let (chain, mut cs) = build_chain(root, src, spec, id);
             chains.insert(id, chain);
             calls.append(&mut cs);
@@ -531,10 +551,18 @@ fn collect_chains(
     }
 }
 
-fn func_id_of(node: &Node, src: &[u8], func_index: &HashMap<(String, u32), u64>) -> Option<u64> {
+fn func_id_of<'a>(
+    node: &Node<'a>,
+    src: &[u8],
+    spec: &'static LangSpec,
+    func_index: &HashMap<(String, u32), u64>,
+) -> Option<u64> {
+    // Phải khớp push_symbol về (name, line): name field → declarator →
+    // anonymous_name_fn (hàm gán qua biến) → first_identifier.
     let name_node = node
         .child_by_field_name("name")
         .or_else(|| name_from_declarator(node))
+        .or_else(|| spec.anonymous_name_fn.and_then(|f| f(node)))
         .or_else(|| first_identifier(node))?;
     let name = text(&name_node, src)?;
     let line = name_node.start_position().row as u32 + 1;
@@ -1155,8 +1183,31 @@ fn is_conversion_declarator(n: &Node) -> bool {
         .unwrap_or(false)
 }
 
+/// Decl Variable/Constant có giá trị là hàm anonymous? Chỉ đi qua các wrapper
+/// trung gian của phép gán (expression_list/assignment_statement/variable_list —
+/// Go/Lua bọc value) — không vào object/block để khỏi ăn nhầm hàm lồng sâu.
+fn decl_value_is_func(node: &Node, spec: &LangSpec) -> bool {
+    if spec.value_func_kinds.is_empty() {
+        return false;
+    }
+    decl_value_is_func_at(node, spec, 0)
+}
+
+fn decl_value_is_func_at(node: &Node, spec: &LangSpec, depth: u32) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    named_children(node).into_iter().any(|ch| {
+        spec.value_func_kinds.contains(&ch.kind())
+            || (matches!(
+                ch.kind(),
+                "expression_list" | "assignment_statement" | "variable_list"
+            ) && decl_value_is_func_at(&ch, spec, depth + 1))
+    })
+}
+
 /// DFS tìm identifier đầu tiên trong subtree.
-fn first_identifier<'a>(n: &Node<'a>) -> Option<Node<'a>> {
+pub fn first_identifier<'a>(n: &Node<'a>) -> Option<Node<'a>> {
     let mut stack = vec![*n];
     while let Some(node) = stack.pop() {
         if matches!(

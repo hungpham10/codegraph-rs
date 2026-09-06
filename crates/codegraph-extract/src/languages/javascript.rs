@@ -20,6 +20,24 @@ pub fn class_type_name(node: &Node, src: &[u8]) -> Option<String> {
     None
 }
 
+/// Hàm anonymous gán qua ngữ cảnh — mượn tên từ nơi gán:
+/// `var a = function(){}` / `const f = () => {}` (declarator name),
+/// `obj.foo = function(){}` (left), `{ foo: function(){} }` (pair key).
+pub fn anonymous_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let p = node.parent()?;
+    let (value_field, name_field) = match p.kind() {
+        "variable_declarator" => ("value", "name"),
+        "assignment_expression" => ("right", "left"),
+        "pair" | "property" => ("value", "key"),
+        _ => return None,
+    };
+    let value = p.child_by_field_name(value_field)?;
+    if value.id() != node.id() {
+        return None;
+    }
+    p.child_by_field_name(name_field)
+}
+
 pub static SPEC: LangSpec = LangSpec {
     language_name: "javascript",
     extensions: &["js", "jsx", "mjs", "cjs"],
@@ -47,6 +65,8 @@ pub static SPEC: LangSpec = LangSpec {
     name_type_fallback: false,
 
     link_impl_methods: false,
+    anonymous_name_fn: Some(anonymous_name_node),
+    value_func_kinds: &["function_expression", "arrow_function"],
     calls: &[
         CallRule {
             kind: "call_expression",

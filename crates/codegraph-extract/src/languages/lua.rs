@@ -1,8 +1,26 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{named_children, CallRule, LangSpec};
 use codegraph_core::SymbolKind;
+use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_lua::LANGUAGE.into()
+}
+
+/// `f = function() end` / `local f = function() end` — function_definition
+/// anonymous mượn tên từ variable_list của assignment_statement.
+fn anonymous_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let el = node.parent()?;
+    if el.kind() != "expression_list" {
+        return None;
+    }
+    let stmt = el.parent()?;
+    if stmt.kind() != "assignment_statement" {
+        return None;
+    }
+    named_children(&stmt)
+        .into_iter()
+        .find(|c| c.kind() == "variable_list")
+        .and_then(|vl| vl.child_by_field_name("name"))
 }
 
 pub static SPEC: LangSpec = LangSpec {
@@ -27,6 +45,8 @@ pub static SPEC: LangSpec = LangSpec {
     name_type_fallback: false,
 
     link_impl_methods: false,
+    anonymous_name_fn: Some(anonymous_name_node),
+    value_func_kinds: &["function_definition"],
     calls: &[CallRule {
         kind: "function_call",
         callee_field: "name",

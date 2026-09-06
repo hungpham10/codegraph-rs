@@ -1,8 +1,23 @@
 use crate::languages::common::{CallRule, LangSpec};
 use codegraph_core::SymbolKind;
+use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_python::LANGUAGE.into()
+}
+
+/// `f = lambda: ...` — lambda mượn tên biến ở vế trái assignment.
+/// Lambda truyền thẳng (vd `map(lambda: 1, ...)`) không được đặt tên.
+fn anonymous_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let p = node.parent()?;
+    if p.kind() != "assignment" {
+        return None;
+    }
+    let right = p.child_by_field_name("right")?;
+    if right.id() != node.id() {
+        return None;
+    }
+    p.child_by_field_name("left")
 }
 
 pub static SPEC: LangSpec = LangSpec {
@@ -12,14 +27,17 @@ pub static SPEC: LangSpec = LangSpec {
     decls: &[
         ("function_definition", SymbolKind::Function),
         ("class_definition", SymbolKind::Class),
+        ("lambda", SymbolKind::Function),
     ],
-    func_kinds: &["function_definition"],
+    func_kinds: &["function_definition", "lambda"],
     class_kinds: &["class_definition"],
     param_kinds: &[],
     annotation_kinds: &[],
     name_type_fallback: false,
 
     link_impl_methods: false,
+    anonymous_name_fn: Some(anonymous_name_node),
+    value_func_kinds: &[],
     calls: &[CallRule {
         kind: "call",
         callee_field: "function",

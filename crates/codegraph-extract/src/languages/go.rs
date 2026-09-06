@@ -1,8 +1,29 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{first_identifier, CallRule, LangSpec};
 use codegraph_core::SymbolKind;
+use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_go::LANGUAGE.into()
+}
+
+/// `f := func(){}` / `var h = func(){}` — func_literal mượn tên biến.
+/// func_literal truyền thẳng (`go func(){ }()`) không được đặt tên.
+fn anonymous_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let el = node.parent()?;
+    if el.kind() != "expression_list" {
+        return None;
+    }
+    let p = el.parent()?;
+    match p.kind() {
+        // `var h = func(){ }` — tên ở field `name` của var_spec.
+        "var_spec" => p.child_by_field_name("name"),
+        // `f := func(){ }` — tên là identifier đầu của expression_list left.
+        "short_var_declaration" => {
+            let left = p.child_by_field_name("left")?;
+            first_identifier(&left)
+        }
+        _ => None,
+    }
 }
 
 pub static SPEC: LangSpec = LangSpec {
@@ -16,14 +37,17 @@ pub static SPEC: LangSpec = LangSpec {
         ("var_spec", SymbolKind::Variable),
         ("const_spec", SymbolKind::Constant),
         ("parameter_declaration", SymbolKind::Parameter),
+        ("func_literal", SymbolKind::Function),
     ],
-    func_kinds: &["function_declaration", "method_declaration"],
+    func_kinds: &["function_declaration", "method_declaration", "func_literal"],
     class_kinds: &[],
     param_kinds: &["parameter_declaration"],
     annotation_kinds: &[],
     name_type_fallback: false,
 
     link_impl_methods: false,
+    anonymous_name_fn: Some(anonymous_name_node),
+    value_func_kinds: &["func_literal"],
     calls: &[CallRule {
         kind: "call_expression",
         callee_field: "function",
