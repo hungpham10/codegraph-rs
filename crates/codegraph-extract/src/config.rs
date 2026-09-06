@@ -1,6 +1,8 @@
 use crate::languages::effects::EffectClassifier;
 use crate::project::{project_db_path, project_dir};
 use camino::Utf8Path;
+#[cfg(feature = "binary")]
+pub use codegraph_binary::BinaryConfig;
 use codegraph_core::{EffectCallPattern, EffectRule, EffectType, StorageRoute};
 use serde::Deserialize;
 use std::fs;
@@ -64,6 +66,10 @@ struct ConfigFile {
     /// Embedding backend cho semantic search (fastembed / hashing) + cache model.
     #[serde(default)]
     embedding: EmbeddingSection,
+    /// Phân tích binary (radare2) — feature `binary`.
+    #[cfg(feature = "binary")]
+    #[serde(default)]
+    binary: Option<codegraph_binary::BinaryConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -133,6 +139,9 @@ pub struct ExtractConfig {
     pub storage: StorageConfig,
     /// Cấu hình embedding backend (semantic search) — đọc từ `[embedding]`.
     pub embedding: codegraph_graph::embeddings::EmbeddingConfig,
+    /// Cấu hình phân tích binary (radare2).
+    #[cfg(feature = "binary")]
+    pub binary: BinaryConfig,
 }
 
 /// Storage backend đã parse từ `[storage]` trong config.
@@ -182,6 +191,8 @@ impl ExtractConfig {
                 repo_id: file.storage.repo_id,
                 dsns: file.storage.dsns,
             },
+            #[cfg(feature = "binary")]
+            binary: file.binary.unwrap_or_default(),
         }
     }
 
@@ -353,6 +364,25 @@ type = "sqlite"
 #   "metal"   → Metal EP (GPU)
 # Build thiếu `apple-accel`, hoặc platform khác macOS → bỏ qua, chạy CPU.
 # execution_provider = "cpu"
+
+[binary]
+# Phân tích binary (ELF/Mach-O/PE) bằng radare2 — yêu cầu `r2` trong PATH.
+# `codegraph doctor` kiểm tra sự có mặt của r2.
+# enabled = true        # bỏ comment để bật
+# depth = "aaa"         # "aaa" (full) hoặc "fast" (af; aar; aac — nhanh hơn cho binary lớn)
+# cfg_markers = true    # xây marker IF/LOOP/SWITCH từ CFG của mỗi function
+# cache = true          # cache kết quả phân tích theo (path, mtime, size)
+"#;
+
+/// Default `config.toml` section `[binary]` (ghi chú, thêm bởi `codegraph init`).
+pub const BINARY_CONFIG_NOTE: &str = r#"
+[binary]
+# Phân tích binary (ELF/Mach-O/PE) bằng radare2 — yêu cầu `r2` trong PATH.
+# `codegraph doctor` kiểm tra sự có mặt của r2.
+# enabled = true        # bỏ comment để bật
+# depth = "aaa"         # "aaa" (full) hoặc "fast" (af; aar; aac — nhanh hơn cho binary lớn)
+# cfg_markers = true    # xây marker IF/LOOP/SWITCH từ CFG của mỗi function
+# cache = true          # cache kết quả phân tích theo (path, mtime, size)
 "#;
 
 /// Quick project scan: returns a hint when the tree is clearly C-only or C++-only.

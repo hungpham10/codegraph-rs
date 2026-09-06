@@ -95,6 +95,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install DB clients
         run: sudo apt-get update && sudo apt-get install -y postgresql-client mysql-client
+      - name: Install radare2 (binary analysis integration tests)
+        run: sudo apt-get install -y radare2
       - name: Apply schema (postgres)
         run: |
           psql "postgres://postgres:postgres@127.0.0.1:5432/codegraph" -f sql/postgres/001-initial-schema.sql
@@ -128,6 +130,8 @@ jobs:
           RUSTFLAGS: "-Cinstrument-coverage"
           TEST_REDIS_DSN: "redis://127.0.0.1:6379"
         run: cargo llvm-cov test -p codegraph-graph --features redis --test redis --no-report -- --ignored --nocapture
+      - name: Binary integration tests (radare2)
+        run: cargo llvm-cov test -p codegraph-binary --test extract --no-report -- --ignored --nocapture
       - name: Generate coverage report (lcov)
         run: |
           mkdir -p ./target/coverage

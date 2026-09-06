@@ -43,7 +43,14 @@ impl Orchestrator {
     pub fn parse_project(&self, root: &Utf8Path) -> Result<(Vec<ParseResult>, ExtractStats)> {
         let config = ExtractConfig::load(root);
         let files = walker::walk(root, &self.parsers, &config);
-        let (parsed, skipped) = self.parse_files(&files, None, config.effect_classifier.clone());
+        let (mut parsed, mut skipped) =
+            self.parse_files(&files, None, config.effect_classifier.clone());
+        #[cfg(feature = "binary")]
+        {
+            let (bin, bin_skipped) = codegraph_binary::collect_binaries(root, &config.binary);
+            parsed.extend(bin);
+            skipped += bin_skipped;
+        }
         let stats = stats_of(&parsed, skipped);
         Ok((parsed, stats))
     }
@@ -74,8 +81,15 @@ impl Orchestrator {
             );
         }
 
-        let (parsed, skipped) =
+        let (mut parsed, mut skipped) =
             self.parse_files(&files, progress.clone(), config.effect_classifier.clone());
+
+        #[cfg(feature = "binary")]
+        {
+            let (bin, bin_skipped) = codegraph_binary::collect_binaries(root, &config.binary);
+            parsed.extend(bin);
+            skipped += bin_skipped;
+        }
 
         // Đưa ProgressBar vào ingest (register → edges → files → engines) — phase
         // index chiếm phần lớn thời gian, không thể để im trong lúc `GraphIndex`

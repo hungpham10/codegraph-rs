@@ -1,0 +1,23 @@
+[package]
+name = "codegraph-binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints.rust]
+warnings = "deny"
+
+[dependencies]
+codegraph-core = { path = "../codegraph-core" }
+codegraph-graph = { path = "../codegraph-graph" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+r2pipe = "0.8"
+tracing = { workspace = true }
+camino = { workspace = true }
+ignore = { workspace = true }
+sha2 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
