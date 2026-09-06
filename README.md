@@ -18,6 +18,7 @@ Agents that consult the semantic graph instead of grepping the filesystem make *
 - **Local & fast** — full re-index 139 files in ~190 ms, nothing leaves your machine
 - **Works everywhere** — 14 languages, 6 storage backends, 24 MCP tools, one binary
 - **Semantic, not syntactic** — symbols have global IDs; edges derived from call chains with markers (`LOOP`, `IF_TRUE`, `RETURN`, …)
+- **Binary analysis** — builds call graphs directly from ELF/PE/Mach-O binaries via [radare2](docs/binary-analysis.md), no source needed
 
 ## ⚡ Quick Start
 
@@ -58,6 +59,7 @@ The agent binds the workspace with `codegraph_init {"path": ...}` and gets tools
 - **6 storage backends** — SQLite (default), LMDB, Redis, Postgres, MySQL, Memory
 - **Semantic search** — opt-in fastembed (BGE-small) for hybrid KNN + keyword search
 - **Behavior sandbox** — JIT compile function groups + run against Rhai mocks
+- **Binary analysis via radare2** — extracts functions, imports, strings and call chains (with IF/LOOP/RETURN/THROW markers) from ELF, PE and Mach-O binaries; requires `radare2` on `PATH` (skipped with a warning if missing, check `codegraph doctor`)
 - **Full re-index always** — watcher debounces changes, re-indexes completely (simpler, no stale state)
 
 ## 📦 Install
@@ -85,14 +87,20 @@ type = "sqlite"  # or lmdb, redis, postgres, mysql, memory
 
 [embedding]
 # backend = "fastembed"  # enable semantic/hybrid search
+
+[binary]
+# enabled = true         # analyze binaries with radare2 (requires r2 on PATH)
+# depth = "aaa"          # "aaa" (full) | "fast" (af + aar + aac)
 ```
 
-[Full config reference →](docs/configuration.md) | [Storage backends →](docs/storage-backends.md) | [Semantic search →](docs/semantic-search.md)
+[Full config reference →](docs/configuration.md) | [Storage backends →](docs/storage-backends.md) | [Semantic search →](docs/semantic-search.md) | [Binary analysis →](docs/binary-analysis.md)
 
 ## 🏗️ Architecture
 
 ```
-files → tree-sitter (rayon) → semgraph (global IDs + chains)
+files → tree-sitter (rayon) ──┐
+                              ├→ semgraph (global IDs + chains)
+binaries → radare2 (r2pipe) ──┘
   → GraphIndex (2 engines + pluggable storage)
   → MCP server (24 tools) → AI Agent
 ```
@@ -114,6 +122,7 @@ files → tree-sitter (rayon) → semgraph (global IDs + chains)
 | Configuration Reference | `docs/configuration.md` |
 | Storage Backends | `docs/storage-backends.md` |
 | Semantic Search | `docs/semantic-search.md` |
+| Binary Analysis (radare2) | `docs/binary-analysis.md` |
 | Why Rust (Rewrite Story) | `docs/why-rust.md` |
 | Development Guide | `docs/development.md` |
 
