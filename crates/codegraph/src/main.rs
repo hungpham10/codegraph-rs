@@ -342,9 +342,9 @@ async fn cmd_doctor(root: &Utf8Path) -> Result<()> {
     // External tools codegraph relies on. On Windows, native package managers
     // matter for install paths, so surface them too.
     #[cfg(target_os = "windows")]
-    let tools: Vec<&str> = vec!["git", "tar", "winget", "choco", "scoop"];
+    let tools: Vec<&str> = vec!["git", "tar", "r2"];
     #[cfg(not(target_os = "windows"))]
-    let tools: Vec<&str> = vec!["git", "tar"];
+    let tools: Vec<&str> = vec!["git", "tar", "r2"];
     println!("Tools on PATH :");
     for t in tools {
         let ok = std::process::Command::new(t)

@@ -28,6 +28,7 @@ tree-sitter-swift     = { workspace = true, optional = true }
 # tree-sitter-kotlin uses tree-sitter 0.20 — incompatible. Re-enable when upstream upgrades.
 # tree-sitter-kotlin    = { workspace = true, optional = true }
 tree-sitter-lua       = { workspace = true, optional = true }
+codegraph-binary = { path = "../codegraph-binary", optional = true }
 ignore = { workspace = true }
 rayon = { workspace = true }
 camino = { workspace = true }
@@ -45,7 +46,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [features]
-default = ["all-langs"]
+default = ["all-langs", "binary"]
 all-langs = [
     "lang-typescript", "lang-javascript", "lang-python", "lang-rust", "lang-go",
     "lang-java", "lang-c", "lang-cpp", "lang-csharp", "lang-ruby", "lang-php",
@@ -66,3 +67,4 @@ lang-scala      = ["dep:tree-sitter-scala"]
 lang-swift      = ["dep:tree-sitter-swift"]
 # lang-kotlin     = ["dep:tree-sitter-kotlin"]
 lang-lua        = ["dep:tree-sitter-lua"]
+binary         = ["dep:codegraph-binary"]

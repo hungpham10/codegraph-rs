@@ -11,6 +11,7 @@ members = [
     "crates/codegraph-mcp",
     "crates/codegraph-bench",
     "crates/codegraph-installer",
+    "crates/codegraph-binary",
     "crates/codegraph",
 ]
 
@@ -77,6 +78,9 @@ notify-debouncer-full = "0.4"
 ignore = "0.4"
 globset = "0.4"
 walkdir = "2"
+
+# radare2 integration
+r2pipe = "0.8"
 
 # misc
 camino = { version = "1", features = ["serde1"] }
