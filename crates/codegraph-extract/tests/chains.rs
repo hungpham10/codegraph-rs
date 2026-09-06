@@ -917,3 +917,210 @@ function runStorage(op: string, s: Store): void {
         ]
     );
 }
+
+// ==================== Hàm anonymous gán qua biến (lambda) ====================
+
+fn parse(lang: &str, src: &str) -> codegraph_graph::ParseResult {
+    let parser = registry()
+        .into_iter()
+        .find(|p| p.name() == lang)
+        .unwrap_or_else(|| panic!("no parser {lang}"));
+    parser.parse_file("anon.test", src).expect("parse")
+}
+
+fn find<'a>(res: &'a codegraph_graph::ParseResult, name: &str) -> &'a codegraph_core::Symbol {
+    res.symbols
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("symbol `{name}` không tồn tại"))
+}
+
+#[test]
+fn js_var_assigned_function_expression() {
+    let res = parse(
+        "javascript",
+        r#"
+var a = function(){ b(); };
+function b(){ c(); }
+a();
+"#,
+    );
+    let a = find(&res, "a");
+    assert!(
+        matches!(a.kind, SymbolKind::Function),
+        "kind = {:?}",
+        a.kind
+    );
+    // Declarator không còn push Variable `a` trùng tên với Function.
+    assert!(res
+        .symbols
+        .iter()
+        .all(|s| s.name != "a" || s.kind == SymbolKind::Function));
+    // Chain của `a` chứa call `b`.
+    assert!(res
+        .calls
+        .iter()
+        .any(|c| c.caller_id == a.id && c.call_name == "b"));
+}
+
+#[test]
+fn js_const_arrow_chain() {
+    let c = walk("javascript", "const f = () => g();\n");
+    assert_eq!(c, ["g"]);
+}
+
+#[test]
+fn ts_const_arrow_chain() {
+    let c = walk("typescript", "const f = (): void => g();\n");
+    assert_eq!(c, ["g"]);
+}
+
+#[test]
+fn js_assignment_and_object_literal_functions() {
+    let res = parse(
+        "javascript",
+        r#"
+obj.foo = function(){ helper(); };
+const conf = { setup: function(){ init(); } };
+"#,
+    );
+    for name in ["obj.foo", "setup"] {
+        let s = find(&res, name);
+        assert!(
+            matches!(s.kind, SymbolKind::Function),
+            "{name}: kind = {:?}",
+            s.kind
+        );
+    }
+    // Object literal không phải hàm — `conf` vẫn là Variable.
+    assert!(matches!(find(&res, "conf").kind, SymbolKind::Variable));
+}
+
+#[test]
+fn js_regression_plain_variable_and_inline_arrow() {
+    let res = parse("javascript", "const x = 5;\nsetTimeout(() => {});\n");
+    // `x` vẫn là Variable.
+    assert!(matches!(find(&res, "x").kind, SymbolKind::Variable));
+    // Lambda truyền thẳng không sinh symbol Function rác.
+    assert!(!res
+        .symbols
+        .iter()
+        .any(|s| matches!(s.kind, SymbolKind::Function)));
+}
+
+#[tokio::test]
+async fn js_var_assigned_function_resolves_through_ingest() {
+    let res = parse(
+        "javascript",
+        r#"
+var a = function(){ b(); };
+function b(){ c(); }
+a();
+"#,
+    );
+    let a_id = find(&res, "a").id;
+    let mut idx = codegraph_graph::GraphIndex::in_memory();
+    idx.ingest(&[res]).await.unwrap();
+    let callees = idx.callees(a_id).await.unwrap();
+    assert!(
+        callees.iter().any(|s| s.name == "b"),
+        "call `a()` phải resolve tới `b`"
+    );
+}
+
+#[test]
+fn python_assigned_lambda() {
+    let res = parse("python", "f = lambda: g()\n");
+    let f = find(&res, "f");
+    assert!(
+        matches!(f.kind, SymbolKind::Function),
+        "kind = {:?}",
+        f.kind
+    );
+    assert!(res
+        .calls
+        .iter()
+        .any(|c| c.caller_id == f.id && c.call_name == "g"));
+}
+
+#[test]
+fn python_regression_inline_lambda_and_plain_assign() {
+    let res = parse("python", "x = 5\nmap(lambda: 1, [])\n");
+    // Không có decl → không symbol nào; lambda inline không được đặt tên.
+    assert!(res.symbols.is_empty());
+}
+
+#[test]
+fn go_func_literal_assigned() {
+    let res = parse(
+        "go",
+        r#"
+package main
+var h = func(){ }
+func main() {
+	f := func(){ g() }
+	go func(){ }()
+}
+"#,
+    );
+    // h (var) + f (:=) + main — func_literal goroutine inline không được đặt tên.
+    let funcs: Vec<&str> = res
+        .symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Function))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(funcs, ["h", "main", "f"]);
+    // `var h` không còn Variable trùng tên.
+    assert!(!res
+        .symbols
+        .iter()
+        .any(|s| s.name == "h" && s.kind == SymbolKind::Variable));
+    let f = find(&res, "f");
+    assert!(res
+        .calls
+        .iter()
+        .any(|c| c.caller_id == f.id && c.call_name == "g"));
+}
+
+#[test]
+fn lua_assigned_anonymous_function() {
+    let res = parse("lua", "local f = function() g() end\nh = function() end\n");
+    for name in ["f", "h"] {
+        let s = find(&res, name);
+        assert!(
+            matches!(s.kind, SymbolKind::Function),
+            "{name}: kind = {:?}",
+            s.kind
+        );
+    }
+    let f = find(&res, "f");
+    assert!(res
+        .calls
+        .iter()
+        .any(|c| c.caller_id == f.id && c.call_name == "g"));
+    assert!(!res
+        .symbols
+        .iter()
+        .any(|s| s.name == "f" && s.kind == SymbolKind::Variable));
+}
+
+#[test]
+fn php_assigned_anonymous_and_arrow() {
+    let res = parse(
+        "php",
+        "<?php\n$f = function() { g(); };\n$h = fn() => h2();\n",
+    );
+    let f = find(&res, "f");
+    let h = find(&res, "h");
+    assert!(matches!(f.kind, SymbolKind::Function));
+    assert!(matches!(h.kind, SymbolKind::Function));
+    assert!(res
+        .calls
+        .iter()
+        .any(|c| c.caller_id == f.id && c.call_name == "g"));
+    assert!(res
+        .calls
+        .iter()
+        .any(|c| c.caller_id == h.id && c.call_name == "h2"));
+}

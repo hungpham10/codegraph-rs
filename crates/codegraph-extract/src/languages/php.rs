@@ -37,6 +37,23 @@ fn member_call_name(node: &Node, src: &[u8]) -> Option<String> {
     Some(name)
 }
 
+/// `$f = function() {}` / `$h = fn() => ...` — hàm anonymous mượn tên biến
+/// (node `name` bên trong variable_name, bỏ `$` prefix).
+fn anonymous_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let p = node.parent()?;
+    if p.kind() != "assignment_expression" {
+        return None;
+    }
+    let right = p.child_by_field_name("right")?;
+    if right.id() != node.id() {
+        return None;
+    }
+    let left = p.child_by_field_name("left")?;
+    let mut cursor = left.walk();
+    let name_node = left.children(&mut cursor).find(|c| c.kind() == "name");
+    name_node.or(Some(left))
+}
+
 pub static SPEC: LangSpec = LangSpec {
     language_name: "php",
     extensions: &["php"],
@@ -54,8 +71,15 @@ pub static SPEC: LangSpec = LangSpec {
         ("const_declaration", SymbolKind::Constant),
         ("simple_parameter", SymbolKind::Parameter),
         ("property_promotion_parameter", SymbolKind::Parameter),
+        ("anonymous_function", SymbolKind::Function),
+        ("arrow_function", SymbolKind::Function),
     ],
-    func_kinds: &["function_definition", "method_declaration"],
+    func_kinds: &[
+        "function_definition",
+        "method_declaration",
+        "anonymous_function",
+        "arrow_function",
+    ],
     class_kinds: &[
         "class_declaration",
         "interface_declaration",
@@ -67,6 +91,8 @@ pub static SPEC: LangSpec = LangSpec {
     name_type_fallback: false,
 
     link_impl_methods: false,
+    anonymous_name_fn: Some(anonymous_name_node),
+    value_func_kinds: &["anonymous_function", "arrow_function"],
     calls: &[
         CallRule {
             kind: "function_call_expression",

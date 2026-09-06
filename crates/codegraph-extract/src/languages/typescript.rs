@@ -72,6 +72,8 @@ pub static SPEC: LangSpec = LangSpec {
     name_type_fallback: false,
 
     link_impl_methods: false,
+    anonymous_name_fn: Some(crate::languages::javascript::anonymous_name_node),
+    value_func_kinds: &["function_expression", "arrow_function"],
     calls: &[
         CallRule {
             kind: "call_expression",

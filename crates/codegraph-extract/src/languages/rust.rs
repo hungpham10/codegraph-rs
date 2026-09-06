@@ -34,6 +34,8 @@ pub static SPEC: LangSpec = LangSpec {
     name_type_fallback: true,
     // Rust: impl_item cũng là Class → re-parent methods về struct def cùng tên.
     link_impl_methods: true,
+    anonymous_name_fn: None,
+    value_func_kinds: &[],
     calls: &[CallRule {
         kind: "call_expression",
         callee_field: "function",
