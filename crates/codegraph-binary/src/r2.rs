@@ -21,7 +21,18 @@ impl R2Session {
             .ok_or_else(|| Error::Parse(format!("path không phải UTF-8: {}", path.display())))?;
         let opts = R2PipeSpawnOptions {
             exepath: "r2".to_string(),
-            args: vec!["-N", "-e", "scr.color=0", "-e", "scr.utf8=0"],
+            // bin.relocs.apply=true: với shared lib (ELF .so), relocations phải
+            // được apply trước khi phân tích, nếu không nhiều function resolve
+            // về địa chỉ 0 và `pdfj @ 0` fail ("Cannot find function at 0x0").
+            args: vec![
+                "-N",
+                "-e",
+                "scr.color=0",
+                "-e",
+                "scr.utf8=0",
+                "-e",
+                "bin.relocs.apply=true",
+            ],
         };
         let inner = R2Pipe::spawn(path_str, Some(opts))
             .map_err(|e| Error::Parse(format!("không thể spawn r2 cho {}: {e}. Hãy cài radare2: brew install radare2 / apt install radare2", path.display())))?;

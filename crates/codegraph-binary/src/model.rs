@@ -36,7 +36,9 @@ pub struct BinMeta {
 /// Danh sách function từ `aflj`.
 #[derive(Debug, Deserialize)]
 pub struct FnEntry {
-    pub offset: Option<u64>,
+    /// r2 6.x trả `addr`; bản cũ trả `offset`.
+    #[serde(alias = "offset")]
+    pub addr: Option<u64>,
     pub name: Option<String>,
     pub size: Option<u64>,
     pub realsz: Option<u64>,
@@ -68,6 +70,8 @@ pub struct Xref {
 /// Entry import từ `iij`.
 #[derive(Debug, Deserialize)]
 pub struct ImportEntry {
+    /// r2 6.x trả `name`; bản cũ trả `import`.
+    #[serde(default, rename = "name", alias = "import")]
     pub import: Option<String>,
     pub ordinal: Option<u64>,
     pub bind: Option<String>,
@@ -104,17 +108,19 @@ pub struct StrEntry {
     pub string: Option<String>,
 }
 
-/// Call graph edge từ `agCj`.
+/// Node call graph từ `agCj` (r2 6.x): mỗi function kèm danh sách callee theo tên.
 #[derive(Debug, Deserialize)]
-pub struct CallGraphEdge {
-    pub from: Option<u64>,
-    pub to: Option<u64>,
+pub struct CallGraphNode {
+    pub name: Option<String>,
+    pub imports: Option<Vec<String>>,
 }
 
 /// Một lệnh disasm trong `pdfj.ops`.
 #[derive(Debug, Deserialize)]
 pub struct DisasmOp {
-    pub offset: Option<u64>,
+    /// r2 6.x trả `addr`; bản cũ trả `offset`.
+    #[serde(alias = "offset")]
+    pub addr: Option<u64>,
     pub size: Option<u64>,
     pub esil: Option<String>,
     pub bytes: Option<String>,

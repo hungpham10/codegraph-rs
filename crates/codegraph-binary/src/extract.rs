@@ -77,7 +77,7 @@ fn do_extract(
     let mut next_id = SYMBOL_BASE + 1;
 
     for entry in &functions {
-        let addr = entry.offset.unwrap_or(0);
+        let addr = entry.addr.unwrap_or(0);
         let raw_name = entry
             .name
             .clone()
@@ -188,7 +188,7 @@ fn do_extract(
     if cfg_markers {
         build_chains_with_cfg(session, &functions, &maps, &mut chains, &mut calls)?;
     } else {
-        build_chains_from_graph(session, &functions, &maps, &mut chains, &mut calls)?;
+        build_chains_from_graph(session, &maps, &mut chains, &mut calls)?;
     }
 
     // Chain cho symbol không có call (import/string)
@@ -267,12 +267,25 @@ fn build_chains_with_cfg(
     calls: &mut Vec<CallRecord>,
 ) -> Result<(), Error> {
     for entry in functions {
-        let addr = entry.offset.unwrap_or(0);
+        let addr = entry.addr.unwrap_or(0);
         let Some(&func_id) = maps.fn_by_addr.get(&addr) else {
             continue;
         };
-        let ops: Vec<DisasmOp> = session
-            .cmdj(&format!("pdfj @ {addr}"))?
+        // addr 0 = entry rác (import/reloc chưa resolve) — pdfj không bao giờ
+        // trả ops cho địa chỉ này, bỏ qua sớm thay để r2 bắn ERROR ra stderr.
+        if addr == 0 {
+            continue;
+        }
+        // Một function r2 không disasm được (addr 0, corrupt, stripped…) không
+        // được làm fail cả binary — bỏ qua nó và chạy tiếp các function còn lại.
+        let ops_json = match session.cmdj(&format!("pdfj @ {addr}")) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("r2 pdfj @ {addr:#x} failed: {e}; bỏ qua function này");
+                continue;
+            }
+        };
+        let ops: Vec<DisasmOp> = ops_json
             .get("ops")
             .and_then(|o| o.as_array())
             .cloned()
@@ -285,7 +298,7 @@ fn build_chains_with_cfg(
         let mut seen = HashSet::new();
 
         for op in &ops {
-            let off = op.offset.unwrap_or(0);
+            let off = op.addr.unwrap_or(0);
             seen.insert(off);
             if let Some(t) = &op.type_ {
                 match t.as_str() {
@@ -334,47 +347,53 @@ fn build_chains_with_cfg(
     Ok(())
 }
 
-/// Xây chain nhẹ từ `agCj` (call graph edges) — không có marker CFG.
+/// Xây chain nhẹ từ `agCj` (call graph) — không có marker CFG.
+/// r2 6.x trả danh sách `{name, imports: [callee names]}` thay vì edges có địa chỉ.
 fn build_chains_from_graph(
     session: &mut dyn R2Client,
-    functions: &[FnEntry],
     maps: &FnMaps,
     chains: &mut HashMap<u64, Vec<u64>>,
     calls: &mut Vec<CallRecord>,
 ) -> Result<(), Error> {
-    let edges: Vec<CallGraphEdge> = session
-        .cmdj("agCj")?
-        .get("edges")
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| serde_json::from_value::<CallGraphEdge>(v).ok())
-        .collect();
+    let nodes: Vec<CallGraphNode> = parse_array(session.cmdj("agCj")?)?;
 
-    let mut by_caller: HashMap<u64, Vec<u64>> = HashMap::new();
-    for edge in &edges {
-        let from = edge.from.unwrap_or(0);
-        let to = edge.to.unwrap_or(0);
-        by_caller.entry(from).or_default().push(to);
+    // Map tên symbol (đã strip prefix "sym.") → id, cho cả function lẫn import.
+    let mut name_to_id: HashMap<String, u64> = HashMap::new();
+    for (&id, name) in maps.fn_id_to_name.iter() {
+        name_to_id.entry(name.clone()).or_insert(id);
+    }
+    for (clean, &id) in maps.import_name_to_id.iter() {
+        name_to_id.entry(clean.clone()).or_insert(id);
     }
 
-    for entry in functions {
-        let addr = entry.offset.unwrap_or(0);
-        let Some(&func_id) = maps.fn_by_addr.get(&addr) else {
+    let resolve_id = |raw: &str| -> Option<u64> {
+        let clean = strip_r2_prefix(raw);
+        let clean = clean.strip_prefix("imp.").unwrap_or(&clean);
+        name_to_id.get(clean).copied()
+    };
+
+    for node in &nodes {
+        let Some(raw) = node.name.as_deref() else {
             continue;
         };
-        let mut chain = vec![func_id];
-        for &to in by_caller.get(&addr).into_iter().flat_map(|v| v.iter()) {
-            let call_name = resolve_call_name(to, maps);
+        let Some(caller_id) = resolve_id(raw) else {
+            continue;
+        };
+        if caller_id == 0 {
+            continue;
+        }
+        let mut chain = vec![caller_id];
+        for callee in node.imports.iter().flatten() {
+            let clean = strip_r2_prefix(callee);
+            let clean = clean.strip_prefix("imp.").unwrap_or(&clean).to_string();
             let pos = chain.len();
             chain.push(0);
             calls.push(CallRecord {
-                caller_id: func_id,
-                call_name,
+                caller_id,
+                call_name: clean,
                 position: pos,
                 arg_exprs: Vec::new(),
-                line: addr.try_into().unwrap_or(0),
+                line: 0,
                 condition: None,
                 is_loop_body: false,
                 effect: EffectType::None,
@@ -383,7 +402,7 @@ fn build_chains_from_graph(
                 target_method: None,
             });
         }
-        chains.insert(func_id, chain);
+        chains.insert(caller_id, chain);
     }
     Ok(())
 }
@@ -407,18 +426,4 @@ fn resolve_call_target(target: Option<u64>, maps: &FnMaps) -> (u64, String) {
         return (fid, name);
     }
     (0, format!("sub_{addr:x}"))
-}
-
-fn resolve_call_name(addr: u64, maps: &FnMaps) -> String {
-    if let Some(name) = maps.plt_by_addr.get(&addr) {
-        return name.clone();
-    }
-    if let Some(&fid) = maps.fn_by_addr.get(&addr) {
-        return maps
-            .fn_id_to_name
-            .get(&fid)
-            .cloned()
-            .unwrap_or_else(|| format!("sub_{addr:x}"));
-    }
-    format!("sub_{addr:x}")
 }

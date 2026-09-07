@@ -347,8 +347,11 @@ async fn cmd_doctor(root: &Utf8Path) -> Result<()> {
     let tools: Vec<&str> = vec!["git", "tar", "r2"];
     println!("Tools on PATH :");
     for t in tools {
+        // radare2 doesn't support `--version` (it parses it as a file to open);
+        // fall back to `-v` when `--version` fails.
+        let version_flag = if t == "r2" { "-v" } else { "--version" };
         let ok = std::process::Command::new(t)
-            .arg("--version")
+            .arg(version_flag)
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
