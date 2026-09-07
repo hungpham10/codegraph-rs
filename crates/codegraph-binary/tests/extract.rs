@@ -19,9 +19,9 @@ impl MockR2 {
         responses.insert(
             "aflj".to_string(),
             json!([
-                {"offset": 4198496, "name": "main", "size": 64, "cc": 1.0, "calltype": "cdecl"},
-                {"offset": 4198560, "name": "fcn.00401160", "size": 32, "cc": 2.0},
-                {"offset": 4196112, "name": "sym.imp.LIBC.so.6_puts", "size": 16}
+                {"addr": 4198496, "name": "main", "size": 64, "cc": 1.0, "calltype": "cdecl"},
+                {"addr": 4198560, "name": "fcn.00401160", "size": 32, "cc": 2.0},
+                {"addr": 4196112, "name": "sym.imp.LIBC.so.6_puts", "size": 16}
             ]),
         );
         // iij: 1 import puts
@@ -41,22 +41,21 @@ impl MockR2 {
         // agCj: main → helper, main → puts(plt)
         responses.insert(
             "agCj".to_string(),
-            json!({"edges": [
-                {"from": 4198496, "to": 4198560},
-                {"from": 4198496, "to": 4196112}
-            ]}),
+            json!([
+                {"name": "main", "size": 64, "imports": ["fcn.00401160", "sym.imp.puts"]}
+            ]),
         );
         // pdfj main: call + return + branch
         responses.insert(
             "pdfj @ 4198496".to_string(),
             json!({
-                "name": "main", "offset": 4198496, "size": 64,
+                "name": "main", "addr": 4198496, "size": 64,
                 "ops": [
-                    {"offset": 4198496, "type": "push", "disasm": "push rbp"},
-                    {"offset": 4198500, "type": "cjmp", "jump": 4198520, "fail": 4198512, "disasm": "je 0x401018"},
-                    {"offset": 4198504, "type": "call", "jump": 4196112, "disasm": "call sym.imp.LIBC.so.6_puts"},
-                    {"offset": 4198510, "type": "jmp", "jump": 4198496, "disasm": "jmp 0x401000"},
-                    {"offset": 4198560, "type": "ret", "disasm": "ret"}
+                    {"addr": 4198496, "type": "push", "disasm": "push rbp"},
+                    {"addr": 4198500, "type": "cjmp", "jump": 4198520, "fail": 4198512, "disasm": "je 0x401018"},
+                    {"addr": 4198504, "type": "call", "jump": 4196112, "disasm": "call sym.imp.LIBC.so.6_puts"},
+                    {"addr": 4198510, "type": "jmp", "jump": 4198496, "disasm": "jmp 0x401000"},
+                    {"addr": 4198560, "type": "ret", "disasm": "ret"}
                 ]
             }),
         );
