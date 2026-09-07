@@ -466,3 +466,113 @@ fn resolve_call_target(target: Option<u64>, maps: &FnMaps) -> (u64, String) {
     }
     (0, format!("sub_{addr:x}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph_core::SymbolKind;
+
+    #[test]
+    fn test_classify_symbol_class() {
+        let raw = "class.MyClass";
+        let name = "MyClass";
+        let (kind, cleaned_name) = classify_symbol(raw, name);
+        assert_eq!(kind, SymbolKind::Class);
+        assert_eq!(cleaned_name, name);
+    }
+
+    #[test]
+    fn test_classify_symbol_method() {
+        let raw = "method.MyClass.my_method";
+        let name = "MyClass.my_method";
+        let (kind, cleaned_name) = classify_symbol(raw, name);
+        assert_eq!(kind, SymbolKind::Method);
+        assert_eq!(cleaned_name, name);
+    }
+
+    #[test]
+    fn test_classify_symbol_namespace() {
+        let raw = "namespace.std";
+        let name = "std";
+        let (kind, cleaned_name) = classify_symbol(raw, name);
+        assert_eq!(kind, SymbolKind::Module);
+        assert_eq!(cleaned_name, name);
+    }
+
+    #[test]
+    fn test_classify_symbol_enum() {
+        let raw = "enum.Color";
+        let name = "Color";
+        let (kind, cleaned_name) = classify_symbol(raw, name);
+        assert_eq!(kind, SymbolKind::Enum);
+        assert_eq!(cleaned_name, name);
+    }
+
+    #[test]
+    fn test_classify_symbol_function_default() {
+        let raw = "fcn.00401000";
+        let name = "fcn.00401000";
+        let (kind, cleaned_name) = classify_symbol(raw, name);
+        assert_eq!(kind, SymbolKind::Function);
+        assert_eq!(cleaned_name, name);
+    }
+
+#[test]
+fn test_classify_symbol_stripped_name_fallback() {
+    // Test when raw_name doesn't match but stripped name does
+    let raw = "sym.class.MyClass"; // r2 adds sym. prefix
+    let name = "class.MyClass"; // after strip_r2_prefix
+    let (kind, cleaned_name) = classify_symbol(raw, name);
+    assert_eq!(kind, SymbolKind::Class);
+    assert_eq!(cleaned_name, "class.MyClass");
+}
+
+#[test]
+fn test_classify_symbol_name_starts_with_class() {
+    // Test when name (not raw_name) starts with prefix
+    let raw = "something.class.MyClass"; // raw_name doesn't start with class.
+    let name = "class.MyClass"; // but name does
+    let (kind, cleaned_name) = classify_symbol(raw, name);
+    assert_eq!(kind, SymbolKind::Class);
+    assert_eq!(cleaned_name, name);
+}
+
+#[test]
+fn test_classify_symbol_name_starts_with_method() {
+    // Test when name (not raw_name) starts with prefix
+    let raw = "something.method.MyClass.my_method"; // raw_name doesn't start with method.
+    let name = "method.MyClass.my_method"; // but name does
+    let (kind, cleaned_name) = classify_symbol(raw, name);
+    assert_eq!(kind, SymbolKind::Method);
+    assert_eq!(cleaned_name, name);
+}
+
+#[test]
+fn test_classify_symbol_name_starts_with_namespace() {
+    // Test when name (not raw_name) starts with prefix
+    let raw = "something.namespace.std"; // raw_name doesn't start with namespace.
+    let name = "namespace.std"; // but name does
+    let (kind, cleaned_name) = classify_symbol(raw, name);
+    assert_eq!(kind, SymbolKind::Module);
+    assert_eq!(cleaned_name, name);
+}
+
+#[test]
+fn test_classify_symbol_name_starts_with_enum() {
+    // Test when name (not raw_name) starts with prefix
+    let raw = "something.enum.Color"; // raw_name doesn't start with enum.
+    let name = "enum.Color"; // but name does
+    let (kind, cleaned_name) = classify_symbol(raw, name);
+    assert_eq!(kind, SymbolKind::Enum);
+    assert_eq!(cleaned_name, name);
+}
+
+#[test]
+fn test_classify_symbol_no_match() {
+    let raw = "some.other.symbol";
+    let name = "some.other.symbol";
+    let (kind, cleaned_name) = classify_symbol(raw, name);
+    assert_eq!(kind, SymbolKind::Function);
+    assert_eq!(cleaned_name, name);
+}
+}
