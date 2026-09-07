@@ -427,4 +427,3 @@ fn resolve_call_target(target: Option<u64>, maps: &FnMaps) -> (u64, String) {
     }
     (0, format!("sub_{addr:x}"))
 }
-
