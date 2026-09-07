@@ -6,8 +6,17 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
+/// Bump khi format output extract thay đổi (vd: sửa mapping field r2) để
+/// cache cũ từ bản binary trước tự vô hiệu thay vì được nạp lại nguyên si.
+pub const EXTRACT_VERSION: &str = "2";
+
 pub fn cache_path(root: &Utf8Path, path: &Path) -> camino::Utf8PathBuf {
-    let key = format!("{}|{}|{}", path.display(), mtime(path), size(path));
+    let key = format!(
+        "{EXTRACT_VERSION}|{}|{}|{}",
+        path.display(),
+        mtime(path),
+        size(path)
+    );
     let hash = Sha256::digest(key.as_bytes());
     let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
     root.join(".codegraph")

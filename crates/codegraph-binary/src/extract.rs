@@ -5,6 +5,7 @@ use crate::model::*;
 use crate::r2::R2Session;
 use codegraph_core::{Annotation, CallRecord, EffectType, Error, Symbol, SymbolKind, SYMBOL_BASE};
 use codegraph_graph::ParseResult;
+use cpp_demangle::Symbol as CppSymbol;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -86,17 +87,19 @@ fn do_extract(
         if raw_name.starts_with("sym.imp.") {
             continue;
         }
-        let name = strip_r2_prefix(&raw_name);
+        let name = demangle(&strip_r2_prefix(&raw_name));
         let size = entry.size.unwrap_or(0);
         let sig = build_signature(addr, size, entry);
         let id = next_id;
         next_id += 1;
         fn_by_addr.insert(addr, id);
         fn_id_to_name.insert(id, name.clone());
+        // r2 6.x tự sinh symbol C++: class.X, method.Class.foo, namespace.X, enum.X
+        let (kind, name) = classify_symbol(&raw_name, &name);
         symbols.push(Symbol {
             id,
             name,
-            kind: SymbolKind::Function,
+            kind,
             scope: codegraph_core::ScopeLevel::Global,
             scope_id: 0,
             type_ref: 0,
@@ -248,6 +251,42 @@ fn build_signature(addr: u64, size: u64, entry: &FnEntry) -> String {
 
 fn strip_r2_prefix(name: &str) -> String {
     name.strip_prefix("sym.").unwrap_or(name).to_string()
+}
+
+/// Demangle tên C++ Itanium (_ZN...) để readable hơn khi search/index.
+/// Giữ nguyên tên không phải C++ (bao gồm cả `sub_`, `fcn.`).
+fn demangle(name: &str) -> String {
+    if name.starts_with("_ZN") || name.starts_with("_TS") || name.starts_with("_Z") {
+        match CppSymbol::new(name) {
+            Ok(s) => match s.demangle() {
+                Ok(d) => d,
+                Err(_) => name.to_string(),
+            },
+            Err(_) => name.to_string(),
+        }
+    } else {
+        name.to_string()
+    }
+}
+
+/// Phân loại symbol từ tên thô do r2 trả về.
+/// r2 6.x tự sinh symbol C++: `class.X`, `method.Class.foo`,
+/// `namespace.X`, `enum.X`. Trả về `(kind, name)` — name đã được làm sạch.
+fn classify_symbol(raw_name: &str, name: &str) -> (SymbolKind, String) {
+    // Dùng raw_name vì nó giữ nguyên tên gốc từ r2 (chưa strip sym. prefix).
+    if raw_name.starts_with("class.") || name.starts_with("class.") {
+        return (SymbolKind::Class, name.to_string());
+    }
+    if raw_name.starts_with("method.") || name.starts_with("method.") {
+        return (SymbolKind::Method, name.to_string());
+    }
+    if raw_name.starts_with("namespace.") || name.starts_with("namespace.") {
+        return (SymbolKind::Module, name.to_string());
+    }
+    if raw_name.starts_with("enum.") || name.starts_with("enum.") {
+        return (SymbolKind::Enum, name.to_string());
+    }
+    (SymbolKind::Function, name.to_string())
 }
 
 /// Bản đồ tra cứu từ address/name sang symbol id — gom parameter cho chain builder.
