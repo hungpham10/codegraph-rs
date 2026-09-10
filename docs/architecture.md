@@ -36,3 +36,31 @@ files → ignore::WalkBuilder → rayon parse pool (tree‑sitter, 14 langs)
            ↓
       MCP server / CLI lifecycle
 ```
+
+## 📄 Supported Formats
+
+CodeGraph-docs now supports parsing the following configuration file formats:
+
+| Format | Parser | Status |
+|--------|--------|--------|
+| YAML | YamlParser | ✅ Implemented |
+| JSON | JsonParser | ✅ Implemented |
+| TOML | TomlParser | ✅ Implemented |
+| **HCL** (HashiCorp Configuration Language) | **HclParser** | **✅ New** |
+| **Terraform (.tf)** | **HclParser** | **✅ New** |
+
+HCL and Terraform files can now be indexed and analyzed through the codegraph CLI, enabling semantic understanding of HashiCorp configuration files.
+
+## 📄 Supported Formats (in crates/codegraph-docs/src/parsers/mod.rs):
+
+Format    Parser        Status
+━━━━━━━━  ━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━
+   YAML      YamlParser    ✅ Implemented
+ ────────  ────────────  ────────────────
+   JSON      JsonParser    ✅ Implemented
+ ────────  ────────────  ────────────────
+   TOML      TomlParser    ✅ Implemented
+ ────────  ────────────  ────────────────
+   HCL      HclParser    ✅ New
+ ────────  ────────────  ────────────────
+   Terraform (.tf)      HclParser    ✅ New

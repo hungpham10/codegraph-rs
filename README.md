@@ -52,6 +52,20 @@ The agent binds the workspace with `codegraph_init {"path": ...}` and gets tools
 
 → [Full comparison with decision matrix](docs/comparison.md)
 
+## 📄 Supported Formats
+
+CodeGraph-docs now supports parsing the following configuration file formats:
+
+| Format | Parser | Status |
+|--------|--------|--------|
+| YAML | YamlParser | ✅ Implemented |
+| JSON | JsonParser | ✅ Implemented |
+| TOML | TomlParser | ✅ Implemented |
+| **HCL** (HashiCorp Configuration Language) | **HclParser** | **✅ New** |
+| **Terraform (.tf)** | **HclParser** | **✅ New** |
+
+HCL and Terraform files can now be indexed and analyzed through the codegraph CLI, enabling semantic understanding of HashiCorp configuration files.
+
 ## 🎯 Key Features
 
 - **24 MCP tools** — `search_symbol`, `flow`, `callers`, `callees`, `impact`, `search_flow`, `context`, `references`, `diff`, `sandbox`, `mermaid`, and more
