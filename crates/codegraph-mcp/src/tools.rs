@@ -1097,7 +1097,7 @@ pub async fn dispatch_doc_search(
             results.push(json!({ "id": payload.id, "path": payload.path, "kind": format!("{:?}", payload.kind), "value": payload.value }));
         }
     }
-    Ok(serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))?)
+    serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
 }
 
 pub async fn dispatch_doc_hydrate(

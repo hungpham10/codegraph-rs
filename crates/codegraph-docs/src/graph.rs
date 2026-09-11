@@ -81,7 +81,7 @@ impl DocumentGraph {
         let node_ids = {
             let guard = self.storage.read().await;
             if let Some(chain) = guard.get_chain(DOC_NODE_LIST_RECORD as usize).await? {
-                chain.iter().map(|&x| x as u64).collect()
+                chain.to_vec()
             } else {
                 Vec::new()
             }
@@ -90,7 +90,7 @@ impl DocumentGraph {
         let doc_ids = {
             let guard = self.storage.read().await;
             if let Some(chain) = guard.get_chain(DOC_LIST_RECORD as usize).await? {
-                chain.iter().map(|&x| x as u64).collect()
+                chain.to_vec()
             } else {
                 Vec::new()
             }
@@ -101,11 +101,10 @@ impl DocumentGraph {
                 let guard = self.storage.read().await;
                 guard.get_node_meta(*id as usize).await?
             };
-            if let Some(bytes) = bytes {
-                if let Ok(node) = serde_json::from_slice::<Node>(&bytes) {
+            if let Some(bytes) = bytes
+                && let Ok(node) = serde_json::from_slice::<Node>(&bytes) {
                     self.nodes.insert(node.id, node);
                 }
-            }
         }
         // Load docs.
         for id in &doc_ids {
@@ -114,11 +113,10 @@ impl DocumentGraph {
                 let guard = self.storage.read().await;
                 guard.get_node_meta(meta_id as usize).await?
             };
-            if let Some(bytes) = bytes {
-                if let Ok(doc) = serde_json::from_slice::<Document>(&bytes) {
+            if let Some(bytes) = bytes
+                && let Ok(doc) = serde_json::from_slice::<Document>(&bytes) {
                     self.docs.insert(doc.id, doc);
                 }
-            }
         }
         // Rebuild tries.
         self.path_trie.clear().await?;
@@ -279,7 +277,7 @@ impl DocumentGraph {
                 .await
                 .set_chain(
                     DOC_LIST_RECORD as usize,
-                    &list.iter().map(|&x| x as u64).collect::<Vec<_>>(),
+                    &list.to_vec(),
                 )
                 .await?;
         }
@@ -291,7 +289,7 @@ impl DocumentGraph {
             guard.get_chain(DOC_LIST_RECORD as usize).await?
         };
         if let Some(chain) = chain {
-            Ok(chain.iter().map(|&x| x as u64).collect())
+            Ok(chain.to_vec())
         } else {
             Ok(Vec::new())
         }

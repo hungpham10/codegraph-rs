@@ -43,4 +43,8 @@ impl Interner {
     pub fn len(&self) -> usize {
         self.strings.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
