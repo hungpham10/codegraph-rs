@@ -3,10 +3,12 @@ use camino::Utf8Path;
 use codegraph_api::{GraphApi, Pagination};
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
+use codegraph_docs::{tokenize::DocToken, DocumentGraph};
 use rmcp::model::Tool;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
 
 /// Định nghĩa một MCP tool — single source of truth cho `tools/list`.
 struct ToolDef {
@@ -275,6 +277,40 @@ fn tool_defs() -> Vec<ToolDef> {
                 "branch_policy": { "type": "string", "enum": ["if_true", "if_false"], "description": "Override config branch_policy." },
                 "loop_cap": { "type": "integer", "description": "Override config loop_cap." }
             }, "required": ["entry"] }),
+        ),
+        // ── Document tools ──
+        tool(
+            "codegraph_doc_ingest",
+            "Parse and ingest a document file (HCL/Terraform, YAML, JSON, TOML). The file is read, parsed by the appropriate format parser, and added to the document graph.",
+            json!({ "type": "object", "properties": {
+                "path": { "type": "string", "description": "Path to the document file." },
+                "format": { "type": "string", "enum": ["hcl", "yaml", "json", "toml"], "description": "Override auto-detected format. If omitted, format is inferred from file extension (.tf/.hcl → hcl, .yaml/.yml → yaml, .json → json, .toml → toml)." }
+            }, "required": ["path"] }),
+        ),
+        tool(
+            "codegraph_doc_search",
+            "Search document nodes by path pattern. Returns matching node IDs and their hydrated payloads.",
+            json!({ "type": "object", "properties": {
+                "pattern": { "type": "string", "description": "Search pattern (substring match on path tokens)." },
+                "depth": { "type": "integer", "default": 1, "description": "Search depth." }
+            }, "required": ["pattern"] }),
+        ),
+        tool(
+            "codegraph_doc_hydrate",
+            "Hydrate a document node into a small payload suitable for LLM reasoning (path, kind, value, key, children).",
+            json!({ "type": "object", "properties": {
+                "node_id": { "type": "integer", "description": "Node id to hydrate." }
+            }, "required": ["node_id"] }),
+        ),
+        tool(
+            "codegraph_doc_list",
+            "List all ingested documents with their paths and formats.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "codegraph_doc_stats",
+            "Show document graph statistics (number of documents and nodes).",
+            json!({ "type": "object", "properties": {} }),
         ),
     ]
 }
@@ -990,4 +1026,100 @@ pub(crate) fn omit_defaults(v: &mut Value) {
         }
         _ => {}
     }
+}
+
+// ── Document tool dispatch ──
+
+pub async fn dispatch_doc_ingest(
+    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    path: &str,
+    format: Option<String>,
+) -> Result<String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| Error::Invalid(format!("failed to read {path}: {e}")))?;
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    let fmt: String = match format {
+        Some(f) => f,
+        None => match ext.as_str() {
+            "tf" | "hcl" => "hcl".to_string(),
+            "yaml" | "yml" => "yaml".to_string(),
+            "json" => "json".to_string(),
+            "toml" => "toml".to_string(),
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "unknown format for extension .{ext}"
+                )))
+            }
+        },
+    };
+    let parser: Box<dyn codegraph_docs::DocParser> = match fmt.as_str() {
+        "hcl" => Box::new(codegraph_docs::parsers::HclParser),
+        "yaml" => Box::new(codegraph_docs::parsers::YamlParser),
+        "json" => Box::new(codegraph_docs::parsers::JsonParser),
+        "toml" => Box::new(codegraph_docs::parsers::TomlParser),
+        _ => return Err(Error::Invalid(format!("unsupported format: {fmt}"))),
+    };
+    let doc_id = doc_graph.read().await.stats().docs as u64 + 1;
+    let doc = parser
+        .parse(path, &source, doc_id)
+        .map_err(|e| Error::Other(e.to_string()))?;
+    let inserted = doc_graph
+        .write()
+        .await
+        .upsert_document(doc)
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
+    Ok(format!("ingested {path} → doc_id={inserted}"))
+}
+
+pub async fn dispatch_doc_search(
+    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    _pattern: &str,
+    depth: usize,
+) -> Result<String> {
+    let tokens = vec![DocToken::root()];
+    let ids = doc_graph
+        .read()
+        .await
+        .search_path(&tokens, Some(depth))
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
+    if ids.is_empty() {
+        return Ok("no nodes matched".to_string());
+    }
+    let mut results = Vec::new();
+    for id in &ids {
+        if let Some(payload) = doc_graph.read().await.hydrate(*id) {
+            results.push(json!({ "id": payload.id, "path": payload.path, "kind": format!("{:?}", payload.kind), "value": payload.value }));
+        }
+    }
+    serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
+}
+
+pub async fn dispatch_doc_hydrate(
+    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    node_id: u64,
+) -> Result<String> {
+    let payload = doc_graph.read().await.hydrate(node_id);
+    match payload {
+        Some(p) => {
+            let json = serde_json::to_string_pretty(&p).map_err(|e| Error::Other(e.to_string()))?;
+            Ok(json)
+        }
+        None => Ok(format!("node {node_id} not found")),
+    }
+}
+
+pub async fn dispatch_doc_list(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Result<String> {
+    let stats = doc_graph.read().await.stats();
+    Ok(format!("documents: {}, nodes: {}", stats.docs, stats.nodes))
+}
+
+pub async fn dispatch_doc_stats(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Result<String> {
+    let stats = doc_graph.read().await.stats();
+    Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
 }

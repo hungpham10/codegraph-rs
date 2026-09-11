@@ -24,8 +24,11 @@ use axum::{
 use camino::Utf8PathBuf;
 use codegraph_api::session::{OutputStyle, Session};
 use codegraph_api::SearchSessionStore;
+use codegraph_docs::{DocConfig, DocumentGraph};
+use codegraph_graph::InMemoryStorage;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
 use tower_http::cors::{Any, CorsLayer};
 
 pub use types::*;
@@ -39,6 +42,8 @@ pub struct AppState {
     /// Bật output Mermaid cho các query diagram (`*_meraid`). Tắt → những
     /// resolver này trả lỗi rõ ràng. Đây là config mức server (`--mermaid`).
     pub mermaid: bool,
+    /// Document graph cho structured document operations (HCL, YAML, JSON, TOML).
+    pub doc_graph: Arc<TokioRwLock<DocumentGraph>>,
 }
 
 /// Cấu hình cho [`serve`].
@@ -65,10 +70,17 @@ pub async fn serve(cfg: ServeConfig) -> anyhow::Result<()> {
         Some(ref r) => Session::with_root_and_format(r.clone(), cfg.format).await?,
         None => Session::new_with_format(cfg.format),
     };
+    let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
+        Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+    let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
+        storage,
+        DocConfig::default(),
+    )));
     let state = Arc::new(AppState {
         session: Arc::new(session),
         search_sessions: Arc::new(SearchSessionStore::new()),
         mermaid: cfg.mermaid,
+        doc_graph,
     });
     let app = build_app(&cfg, state);
 
@@ -149,12 +161,22 @@ mod tests {
     use codegraph_api::SearchSessionStore;
     use tower::ServiceExt;
 
+    use codegraph_graph::InMemoryStorage;
+    use tokio::sync::RwLock as TokioRwLock;
+
     fn make_state(mermaid: bool) -> Arc<AppState> {
         let session = Session::new_with_format(OutputStyle::Minimize);
+        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
+            Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
+            storage,
+            DocConfig::default(),
+        )));
         Arc::new(AppState {
             session: Arc::new(session),
             search_sessions: Arc::new(SearchSessionStore::new()),
             mermaid,
+            doc_graph,
         })
     }
 

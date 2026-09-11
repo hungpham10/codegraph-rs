@@ -35,8 +35,9 @@
 //! var-type alias, gom SaveCallRecords) → files → rebuild engines → bump version.
 
 use crate::embeddings::{EmbeddingBackend, default_backend, embedding_enabled, make_backend};
+pub use crate::radix::Element;
 pub use crate::search::Search;
-use crate::search::SearchResume;
+pub use crate::search::SearchResume;
 use crate::storage::cached::CachedStorage;
 #[cfg(feature = "lmdb")]
 pub use crate::storage::lmdb::LmdbStorage;

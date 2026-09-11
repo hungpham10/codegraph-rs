@@ -32,7 +32,14 @@ pub fn build_document(path: String, format: String, id: u64, root: RecursiveNode
         next_id: 2, // root = 1
     };
     let root_id = 1;
-    builder.walk(root_id, None, None, None, &root, ByteSpan { start: 0, end: 0 });
+    builder.walk(
+        root_id,
+        None,
+        None,
+        None,
+        &root,
+        ByteSpan { start: 0, end: 0 },
+    );
     let nodes = builder.order;
     Document {
         id,
@@ -82,10 +89,10 @@ impl DocBuilder {
         self.order.push(built_node.clone());
         self.nodes.insert(id, built_node.clone());
         // Link parent → child.
-        if let Some(pid) = parent {
-            if let Some(p) = self.nodes.get_mut(&pid) {
-                p.children.push(id);
-            }
+        if let Some(pid) = parent
+            && let Some(p) = self.nodes.get_mut(&pid)
+        {
+            p.children.push(id);
         }
         // Recurse.
         match node {
@@ -108,14 +115,8 @@ impl DocBuilder {
                 for (i, (child, child_span)) in items.iter().enumerate() {
                     let child_id = self.next_id;
                     self.next_id += 1;
-                    let child_node = self.walk(
-                        child_id,
-                        Some(id),
-                        None,
-                        Some(i as u32),
-                        child,
-                        *child_span,
-                    );
+                    let child_node =
+                        self.walk(child_id, Some(id), None, Some(i as u32), child, *child_span);
                     self.nodes.insert(child_id, child_node);
                 }
             }
@@ -131,12 +132,25 @@ impl DocBuilder {
 pub struct YamlParser;
 
 impl DocParser for YamlParser {
-    fn format(&self) -> &'static str { "yaml" }
+    fn format(&self) -> &'static str {
+        "yaml"
+    }
 
     fn parse(&self, path: &str, source: &str, id: u64) -> Result<Document> {
         let value: serde_yaml::Value = serde_yaml::from_str(source)?;
-        let root = convert_yaml_value(&value, ByteSpan { start: 0, end: source.len() as u64 });
-        Ok(build_document(path.to_string(), self.format().to_string(), id, root))
+        let root = convert_yaml_value(
+            &value,
+            ByteSpan {
+                start: 0,
+                end: source.len() as u64,
+            },
+        );
+        Ok(build_document(
+            path.to_string(),
+            self.format().to_string(),
+            id,
+            root,
+        ))
     }
 }
 
@@ -156,7 +170,12 @@ fn convert_yaml_value(value: &serde_yaml::Value, span: ByteSpan) -> RecursiveNod
         serde_yaml::Value::Sequence(seq) => {
             let items = seq
                 .iter()
-                .map(|v| (convert_yaml_value(v, ByteSpan { start: 0, end: 0 }), ByteSpan { start: 0, end: 0 }))
+                .map(|v| {
+                    (
+                        convert_yaml_value(v, ByteSpan { start: 0, end: 0 }),
+                        ByteSpan { start: 0, end: 0 },
+                    )
+                })
                 .collect();
             RecursiveNode::Array(items)
         }
@@ -176,12 +195,25 @@ fn convert_yaml_value(value: &serde_yaml::Value, span: ByteSpan) -> RecursiveNod
 pub struct JsonParser;
 
 impl DocParser for JsonParser {
-    fn format(&self) -> &'static str { "json" }
+    fn format(&self) -> &'static str {
+        "json"
+    }
 
     fn parse(&self, path: &str, source: &str, id: u64) -> Result<Document> {
         let value: serde_json::Value = serde_json::from_str(source)?;
-        let root = convert_json_value(&value, ByteSpan { start: 0, end: source.len() as u64 });
-        Ok(build_document(path.to_string(), self.format().to_string(), id, root))
+        let root = convert_json_value(
+            &value,
+            ByteSpan {
+                start: 0,
+                end: source.len() as u64,
+            },
+        );
+        Ok(build_document(
+            path.to_string(),
+            self.format().to_string(),
+            id,
+            root,
+        ))
     }
 }
 
@@ -201,7 +233,12 @@ fn convert_json_value(value: &serde_json::Value, span: ByteSpan) -> RecursiveNod
         serde_json::Value::Array(seq) => {
             let items = seq
                 .iter()
-                .map(|v| (convert_json_value(v, ByteSpan { start: 0, end: 0 }), ByteSpan { start: 0, end: 0 }))
+                .map(|v| {
+                    (
+                        convert_json_value(v, ByteSpan { start: 0, end: 0 }),
+                        ByteSpan { start: 0, end: 0 },
+                    )
+                })
                 .collect();
             RecursiveNode::Array(items)
         }
@@ -220,12 +257,25 @@ fn convert_json_value(value: &serde_json::Value, span: ByteSpan) -> RecursiveNod
 pub struct TomlParser;
 
 impl DocParser for TomlParser {
-    fn format(&self) -> &'static str { "toml" }
+    fn format(&self) -> &'static str {
+        "toml"
+    }
 
     fn parse(&self, path: &str, source: &str, id: u64) -> Result<Document> {
         let doc: toml::Value = toml::from_str(source)?;
-        let root = convert_toml_value(&doc, ByteSpan { start: 0, end: source.len() as u64 });
-        Ok(build_document(path.to_string(), self.format().to_string(), id, root))
+        let root = convert_toml_value(
+            &doc,
+            ByteSpan {
+                start: 0,
+                end: source.len() as u64,
+            },
+        );
+        Ok(build_document(
+            path.to_string(),
+            self.format().to_string(),
+            id,
+            root,
+        ))
     }
 }
 
@@ -245,7 +295,12 @@ fn convert_toml_value(value: &toml::Value, span: ByteSpan) -> RecursiveNode {
         toml::Value::Array(seq) => {
             let items = seq
                 .iter()
-                .map(|v| (convert_toml_value(v, ByteSpan { start: 0, end: 0 }), ByteSpan { start: 0, end: 0 }))
+                .map(|v| {
+                    (
+                        convert_toml_value(v, ByteSpan { start: 0, end: 0 }),
+                        ByteSpan { start: 0, end: 0 },
+                    )
+                })
                 .collect();
             RecursiveNode::Array(items)
         }
@@ -261,18 +316,31 @@ fn convert_toml_value(value: &toml::Value, span: ByteSpan) -> RecursiveNode {
 pub struct HclParser;
 
 impl DocParser for HclParser {
-    fn format(&self) -> &'static str { "hcl" }
+    fn format(&self) -> &'static str {
+        "hcl"
+    }
 
     fn parse(&self, path: &str, source: &str, id: u64) -> Result<Document> {
-        let value: hcl_rs::Value = hcl_rs::from_str(source)?;
-        let root = convert_hcl_value(&value, ByteSpan { start: 0, end: source.len() as u64 });
-        Ok(build_document(path.to_string(), self.format().to_string(), id, root))
+        let value: hcl::Value = hcl::from_str(source)?;
+        let root = convert_hcl_value(
+            &value,
+            ByteSpan {
+                start: 0,
+                end: source.len() as u64,
+            },
+        );
+        Ok(build_document(
+            path.to_string(),
+            self.format().to_string(),
+            id,
+            root,
+        ))
     }
 }
 
-fn convert_hcl_value(value: &hcl_rs::Value, span: ByteSpan) -> RecursiveNode {
+fn convert_hcl_value(value: &hcl::Value, span: ByteSpan) -> RecursiveNode {
     match value {
-        hcl_rs::Value::Object(map) => {
+        hcl::Value::Object(map) => {
             let entries = map
                 .iter()
                 .map(|(k, v)| {
@@ -283,17 +351,22 @@ fn convert_hcl_value(value: &hcl_rs::Value, span: ByteSpan) -> RecursiveNode {
                 .collect();
             RecursiveNode::Map(entries)
         }
-        hcl_rs::Value::Array(seq) => {
+        hcl::Value::Array(seq) => {
             let items = seq
                 .iter()
-                .map(|v| (convert_hcl_value(v, ByteSpan { start: 0, end: 0 }), ByteSpan { start: 0, end: 0 }))
+                .map(|v| {
+                    (
+                        convert_hcl_value(v, ByteSpan { start: 0, end: 0 }),
+                        ByteSpan { start: 0, end: 0 },
+                    )
+                })
                 .collect();
             RecursiveNode::Array(items)
         }
-        hcl_rs::Value::String(s) => RecursiveNode::String(s.clone(), span),
-        hcl_rs::Value::Number(n) => RecursiveNode::Number(*n as f64, span),
-        hcl_rs::Value::Boolean(b) => RecursiveNode::Bool(*b, span),
-        hcl_rs::Value::Null => RecursiveNode::Null(span),
+        hcl::Value::String(s) => RecursiveNode::String(s.clone(), span),
+        hcl::Value::Number(n) => RecursiveNode::Number(n.as_f64().unwrap_or(0.0), span),
+        hcl::Value::Bool(b) => RecursiveNode::Bool(*b, span),
+        hcl::Value::Null => RecursiveNode::Null(span),
     }
 }
 
@@ -309,6 +382,6 @@ service:
   replicas: 3
 "#;
         let doc = YamlParser.parse("/tmp/a.yaml", src, 1).unwrap();
-        assert_eq!(doc.nodes.len(), 5); // root, service, name, api, replicas, 3? Actually root + map entries
+        assert_eq!(doc.nodes.len(), 4); // root, service, name, replicas
     }
 }

@@ -13,10 +13,11 @@ members = [
     "crates/codegraph-installer",
     "crates/codegraph-binary",
     "crates/codegraph",
+    "crates/codegraph-docs",
 ]
 
 [workspace.package]
-version = "2.1.3"
+version = "2.1.4"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"

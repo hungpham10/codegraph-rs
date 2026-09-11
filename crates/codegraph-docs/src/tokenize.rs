@@ -92,15 +92,33 @@ impl Element for DocToken {
 
 // Helper constructors
 impl DocToken {
-    pub fn map() -> Self { Self::new(DocTag::Map, 0) }
-    pub fn arr() -> Self { Self::new(DocTag::Arr, 0) }
-    pub fn field(key_id: u64) -> Self { Self::new(DocTag::Field, key_id) }
-    pub fn idx(slot: u32) -> Self { Self::new(DocTag::Idx, slot as u64) }
-    pub fn str(value_id: u64) -> Self { Self::new(DocTag::Str, value_id) }
-    pub fn num(value_id: u64) -> Self { Self::new(DocTag::Num, value_id) }
-    pub fn bool(value_id: u64) -> Self { Self::new(DocTag::Bool, value_id) }
-    pub fn null() -> Self { Self::new(DocTag::Null, 0) }
-    pub fn root() -> Self { Self::new(DocTag::Root, 0) }
+    pub fn map() -> Self {
+        Self::new(DocTag::Map, 0)
+    }
+    pub fn arr() -> Self {
+        Self::new(DocTag::Arr, 0)
+    }
+    pub fn field(key_id: u64) -> Self {
+        Self::new(DocTag::Field, key_id)
+    }
+    pub fn idx(slot: u32) -> Self {
+        Self::new(DocTag::Idx, slot as u64)
+    }
+    pub fn str(value_id: u64) -> Self {
+        Self::new(DocTag::Str, value_id)
+    }
+    pub fn num(value_id: u64) -> Self {
+        Self::new(DocTag::Num, value_id)
+    }
+    pub fn bool(value_id: u64) -> Self {
+        Self::new(DocTag::Bool, value_id)
+    }
+    pub fn null() -> Self {
+        Self::new(DocTag::Null, 0)
+    }
+    pub fn root() -> Self {
+        Self::new(DocTag::Root, 0)
+    }
 }
 
 #[cfg(test)]

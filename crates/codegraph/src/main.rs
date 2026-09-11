@@ -3,8 +3,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::{ArgAction, Parser, Subcommand};
 use codegraph_extract::{ExtractStats, Orchestrator};
 use codegraph_graph::GraphIndex;
+use codegraph_graph::InMemoryStorage;
 use codegraph_mcp::CodegraphServer;
 use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
 
 #[cfg(feature = "fastembed")]
 use codegraph_graph::embeddings::warm_model_cache;
@@ -106,7 +108,7 @@ enum Cmd {
         /// Địa chỉ bind cho `--http` (`HOST:PORT`).
         #[arg(long, default_value = "0.0.0.0:8123")]
         addr: std::net::SocketAddr,
-        /// `Host` header được chấp nhận bởi `--http` (lặp được) — thêm IP hoặc
+        /// `Host` header được chấp nhận bởi `--http` (lặp được). Thêm IP hoặc
         /// hostname LAN để mở ngoài loopback (rmcp chặn host lạ chống DNS rebinding).
         #[arg(long = "allow-host")]
         allow_host: Vec<String>,
@@ -129,6 +131,11 @@ enum Cmd {
         #[arg(long = "api-key")]
         api_key: Vec<String>,
     },
+    /// Document operations: ingest, search, hydrate, and manage structured documents (HCL, YAML, JSON, TOML, XML).
+    Doc {
+        #[command(subcommand)]
+        cmd: DocCmd,
+    },
 }
 
 /// Giá trị `--format` của CLI — map sang `codegraph_mcp::OutputStyle`.
@@ -146,6 +153,39 @@ impl OutputFormat {
             Self::Medium => codegraph_mcp::OutputStyle::Medium,
         }
     }
+}
+
+/// Document CLI subcommands.
+#[derive(Subcommand, Debug)]
+enum DocCmd {
+    /// Parse and ingest a document file (HCL, YAML, JSON, TOML, XML).
+    Ingest {
+        /// Path to the document file.
+        #[arg()]
+        path: String,
+        /// Override auto-detected format (hcl, yaml, json, toml).
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Search document nodes by path pattern.
+    Search {
+        /// Search pattern (substring match on path tokens).
+        #[arg()]
+        pattern: String,
+        /// Search depth (default: 1).
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+    },
+    /// Hydrate a node into a small payload for LLM reasoning.
+    Hydrate {
+        /// Node id to hydrate.
+        #[arg()]
+        node_id: u64,
+    },
+    /// List all ingested documents with stats.
+    List,
+    /// Show document graph statistics.
+    Stats,
 }
 
 #[tokio::main]
@@ -208,6 +248,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Cmd::Doc { cmd } => cmd_doc(&root, cmd).await,
     }
 }
 
@@ -634,4 +675,80 @@ async fn cmd_serve(
         CodegraphServer::new_with_format(format, mermaid)
     };
     codegraph_mcp::serve_stdio(server).await
+}
+
+/// `codegraph doc`: manage structured documents (HCL/Terraform, YAML, JSON, TOML).
+async fn cmd_doc(_root: &Utf8Path, cmd: DocCmd) -> Result<()> {
+    let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
+        Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+    let config = codegraph_docs::DocConfig::default();
+    let mut graph = codegraph_docs::DocumentGraph::new(storage, config);
+
+    match cmd {
+        DocCmd::Ingest { path, format } => {
+            let source = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow!("failed to read {path}: {e}"))?;
+            let ext = std::path::Path::new(&path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            let format = match format {
+                Some(f) => f,
+                None => match ext.as_str() {
+                    "tf" | "hcl" => "hcl".to_string(),
+                    "yaml" | "yml" => "yaml".to_string(),
+                    "json" => "json".to_string(),
+                    "toml" => "toml".to_string(),
+                    _ => {
+                        return Err(anyhow!(
+                            "unknown format for extension .{ext}; use --format to override"
+                        ))
+                    }
+                },
+            };
+            let parser: Box<dyn codegraph_docs::DocParser> = match format.as_str() {
+                "hcl" => Box::new(codegraph_docs::parsers::HclParser),
+                "yaml" => Box::new(codegraph_docs::parsers::YamlParser),
+                "json" => Box::new(codegraph_docs::parsers::JsonParser),
+                "toml" => Box::new(codegraph_docs::parsers::TomlParser),
+                _ => return Err(anyhow!("unsupported document format: {format}")),
+            };
+            let doc_id = graph.stats().docs as u64 + 1;
+            let doc = parser.parse(&path, &source, doc_id)?;
+            let inserted = graph.upsert_document(doc).await?;
+            println!("ingested {} → doc_id={}", path, inserted);
+        }
+        DocCmd::Search { pattern: _, depth } => {
+            use codegraph_docs::DocToken;
+            let tokens = vec![DocToken::root(), DocToken::field(0)]; // simplified
+            let ids = graph.search_path(&tokens, Some(depth)).await?;
+            if ids.is_empty() {
+                println!("no nodes matched");
+            } else {
+                for id in &ids {
+                    if let Some(payload) = graph.hydrate(*id) {
+                        println!("{}: {:?}", id, payload);
+                    }
+                }
+            }
+        }
+        DocCmd::Hydrate { node_id } => match graph.hydrate(node_id) {
+            Some(payload) => {
+                let json = serde_json::to_string_pretty(&payload)?;
+                println!("{json}");
+            }
+            None => println!("node {node_id} not found"),
+        },
+        DocCmd::List => {
+            let stats = graph.stats();
+            println!("documents: {}, nodes: {}", stats.docs, stats.nodes);
+        }
+        DocCmd::Stats => {
+            let stats = graph.stats();
+            println!("documents: {}", stats.docs);
+            println!("nodes: {}", stats.nodes);
+        }
+    }
+    Ok(())
 }

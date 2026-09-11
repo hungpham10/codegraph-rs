@@ -1,6 +1,6 @@
 use crate::config::DocConfig;
-use crate::ir::{Document, Kind, Node, Scalar};
 use crate::intern::Interner;
+use crate::ir::{Document, Kind, Node, Scalar};
 use crate::tokenize::DocToken;
 use anyhow::Result;
 use codegraph_graph::Search;
@@ -81,7 +81,7 @@ impl DocumentGraph {
         let node_ids = {
             let guard = self.storage.read().await;
             if let Some(chain) = guard.get_chain(DOC_NODE_LIST_RECORD as usize).await? {
-                chain.iter().map(|&x| x as u64).collect()
+                chain.to_vec()
             } else {
                 Vec::new()
             }
@@ -90,7 +90,7 @@ impl DocumentGraph {
         let doc_ids = {
             let guard = self.storage.read().await;
             if let Some(chain) = guard.get_chain(DOC_LIST_RECORD as usize).await? {
-                chain.iter().map(|&x| x as u64).collect()
+                chain.to_vec()
             } else {
                 Vec::new()
             }
@@ -101,10 +101,10 @@ impl DocumentGraph {
                 let guard = self.storage.read().await;
                 guard.get_node_meta(*id as usize).await?
             };
-            if let Some(bytes) = bytes {
-                if let Ok(node) = serde_json::from_slice::<Node>(&bytes) {
-                    self.nodes.insert(node.id, node);
-                }
+            if let Some(bytes) = bytes
+                && let Ok(node) = serde_json::from_slice::<Node>(&bytes)
+            {
+                self.nodes.insert(node.id, node);
             }
         }
         // Load docs.
@@ -114,10 +114,10 @@ impl DocumentGraph {
                 let guard = self.storage.read().await;
                 guard.get_node_meta(meta_id as usize).await?
             };
-            if let Some(bytes) = bytes {
-                if let Ok(doc) = serde_json::from_slice::<Document>(&bytes) {
-                    self.docs.insert(doc.id, doc);
-                }
+            if let Some(bytes) = bytes
+                && let Ok(doc) = serde_json::from_slice::<Document>(&bytes)
+            {
+                self.docs.insert(doc.id, doc);
             }
         }
         // Rebuild tries.
@@ -204,22 +204,42 @@ impl DocumentGraph {
             value: node.value.clone(),
             key: node.key.clone(),
             doc: node.doc,
-            children: node.children.iter().filter_map(|c| self.hydrate(*c)).collect(),
+            children: node
+                .children
+                .iter()
+                .filter_map(|c| self.hydrate(*c))
+                .collect(),
         })
     }
 
     // ── Query pipeline (reuses Search::search_resumable) ──────────────
 
-    pub async fn search_path(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_path(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.path_trie, pattern, depth).await
     }
-    pub async fn search_type(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_type(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.type_trie, pattern, depth).await
     }
-    pub async fn search_value(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_value(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.value_trie, pattern, depth).await
     }
-    pub async fn search_struct(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_struct(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.struct_trie, pattern, depth).await
     }
 
@@ -257,7 +277,7 @@ impl DocumentGraph {
             self.storage
                 .write()
                 .await
-                .set_chain(DOC_LIST_RECORD as usize, &list.iter().map(|&x| x as u64).collect::<Vec<_>>())
+                .set_chain(DOC_LIST_RECORD as usize, &list.to_vec())
                 .await?;
         }
         Ok(())
@@ -268,7 +288,7 @@ impl DocumentGraph {
             guard.get_chain(DOC_LIST_RECORD as usize).await?
         };
         if let Some(chain) = chain {
-            Ok(chain.iter().map(|&x| x as u64).collect())
+            Ok(chain.to_vec())
         } else {
             Ok(Vec::new())
         }
@@ -281,7 +301,12 @@ impl DocumentGraph {
             }
             node.doc = doc.id;
         }
-        doc.root = doc.nodes.iter().find(|n| n.kind == Kind::Root).map(|n| n.id).unwrap_or(doc.nodes[0].id);
+        doc.root = doc
+            .nodes
+            .iter()
+            .find(|n| n.kind == Kind::Root)
+            .map(|n| n.id)
+            .unwrap_or(doc.nodes[0].id);
         doc
     }
 
@@ -402,11 +427,11 @@ pub struct DocStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_graph::storage::InMemoryStorage;
+    use codegraph_graph::InMemoryStorage;
 
     #[test]
     fn new_graph() {
-        let storage = Arc::new(RwLock::new(InMemoryStorage::default()));
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
         let config = DocConfig::default();
         let graph = DocumentGraph::new(storage, config);
         assert_eq!(graph.stats().docs, 0);
