@@ -441,7 +441,7 @@ impl ExtractConfig {
 /// Tách suffix `:<format>` khỏi một entry `[docgraph] paths` (chỉ nhận format
 /// đã biết để không nhầm với ký tự `:` khác trong pattern).
 fn split_format_override(entry: &str) -> (&str, Option<&str>) {
-    const FORMATS: [&str; 6] = ["hcl", "tf", "yaml", "yml", "json", "toml"];
+    const FORMATS: [&str; 8] = ["hcl", "tf", "yaml", "yml", "json", "toml", "nginx", "conf"];
     if let Some((pattern, format)) = entry.rsplit_once(':') {
         if FORMATS.contains(&format.to_ascii_lowercase().as_str()) {
             return (pattern, Some(format));

@@ -161,7 +161,7 @@ enum DocCmd {
         /// Path to the document file.
         #[arg()]
         path: String,
-        /// Override auto-detected format (hcl, yaml, json, toml).
+        /// Override auto-detected format (hcl, yaml, json, toml, nginx).
         #[arg(long)]
         format: Option<String>,
     },
