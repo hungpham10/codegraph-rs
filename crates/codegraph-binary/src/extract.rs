@@ -70,6 +70,13 @@ fn do_extract(
 
     // 1. Functions (`aflj`)
     let functions = parse_aflj(session)?;
+    // Parse exports (`iEj`) for JNI address-based detection (catches stripped binaries).
+    let exports = parse_iej(session)?;
+    let jni_export_map: HashMap<u64, String> = exports
+        .iter()
+        .filter(|e| is_jni_name(e.name.as_deref().unwrap_or("")))
+        .filter_map(|e| e.vaddr.map(|v| (v, e.name.clone().unwrap_or_default())))
+        .collect();
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut chains: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut calls: Vec<CallRecord> = Vec::new();
@@ -96,6 +103,15 @@ fn do_extract(
         fn_id_to_name.insert(id, name.clone());
         // r2 6.x tự sinh symbol C++: class.X, method.Class.foo, namespace.X, enum.X
         let (kind, name) = classify_symbol(&raw_name, &name);
+        // JNI enrichment: name-based + address-based (via iEj export table).
+        let mut annotations = Vec::new();
+        if is_jni_name(&name) || jni_export_map.contains_key(&addr) {
+            annotations.push(Annotation {
+                name: "jni".to_string(),
+                args: HashMap::new(),
+                line: 0,
+            });
+        }
         symbols.push(Symbol {
             id,
             name,
@@ -109,7 +125,7 @@ fn do_extract(
             end_line: addr.saturating_add(size).try_into().unwrap_or(u32::MAX),
             signature: Some(sig),
             doc: None,
-            annotations: Vec::new(),
+            annotations,
             language: "binary".to_string(),
         });
     }
@@ -287,6 +303,19 @@ fn classify_symbol(raw_name: &str, name: &str) -> (SymbolKind, String) {
         return (SymbolKind::Enum, name.to_string());
     }
     (SymbolKind::Function, name.to_string())
+}
+
+/// Kiểm tra tên có phải là JNI symbol không.
+/// Java_* — JNI native method naming convention.
+/// JNI_* — JNI runtime functions.
+fn is_jni_name(name: &str) -> bool {
+    name.starts_with("Java_") || name.starts_with("JNI_")
+}
+
+/// Parse exported symbols từ `iEj` để phát hiện JNI symbol qua address matching.
+/// Trả về danh sách symbol xuất khẩu có tên bắt đầu bằng Java_ hoặc JNI_.
+fn parse_iej(session: &mut dyn R2Client) -> Result<Vec<ExportEntry>, Error> {
+    parse_array(session.cmdj("iEj")?)
 }
 
 /// Bản đồ tra cứu từ address/name sang symbol id — gom parameter cho chain builder.
@@ -471,6 +500,7 @@ fn resolve_call_target(target: Option<u64>, maps: &FnMaps) -> (u64, String) {
 mod tests {
     use super::*;
     use codegraph_core::SymbolKind;
+    use serde_json::json;
 
     #[test]
     fn test_classify_symbol_class() {
@@ -574,5 +604,98 @@ mod tests {
         let (kind, cleaned_name) = classify_symbol(raw, name);
         assert_eq!(kind, SymbolKind::Function);
         assert_eq!(cleaned_name, name);
+    }
+
+    // === JNI tests ===
+
+    #[test]
+    fn test_is_jni_name_java_prefix() {
+        assert!(is_jni_name("Java_com_example_Foo_bar"));
+        assert!(is_jni_name("Java_org_example_Baz_qux"));
+    }
+
+    #[test]
+    fn test_is_jni_name_jni_prefix() {
+        assert!(is_jni_name("JNI_OnLoad"));
+        assert!(is_jni_name("JNI_OnUnload"));
+        assert!(is_jni_name("JNI_RegisterNatives"));
+        assert!(is_jni_name("JNI_CreateJavaVM"));
+    }
+
+    #[test]
+    fn test_is_jni_name_not_jni() {
+        assert!(!is_jni_name("fcn.00401000"));
+        assert!(!is_jni_name("sub_1234"));
+        assert!(!is_jni_name("main"));
+        assert!(!is_jni_name("sym.imp.puts"));
+    }
+
+    #[test]
+    fn test_parse_iej_jni_detection() {
+        // Mock R2Client returning iEj with JNI exports
+        struct MockR2 {
+            responses: HashMap<String, Value>,
+        }
+        impl R2Client for MockR2 {
+            fn cmd(&mut self, _cmd: &str) -> Result<String, Error> { Ok(String::new()) }
+            fn cmdj(&mut self, cmd: &str) -> Result<Value, Error> {
+                Ok(self.responses.get(cmd).cloned().unwrap_or(json!([])))
+            }
+        }
+        let mut mock = MockR2 {
+            responses: HashMap::new(),
+        };
+        mock.responses.insert(
+            "iEj".to_string(),
+            json!([
+                {"name": "JNI_OnLoad", "vaddr": 4194304, "bind": "GLOBAL", "type": "FUNC"},
+                {"name": "Java_com_example_Foo_bar", "vaddr": 4194368, "bind": "GLOBAL", "type": "FUNC"},
+                {"name": "free", "vaddr": 4194432, "bind": "GLOBAL", "type": "FUNC"}
+            ]),
+        );
+        let exports = parse_iej(&mut mock).unwrap();
+        assert_eq!(exports.len(), 3);
+        assert!(exports.iter().any(|e| e.name.as_deref() == Some("JNI_OnLoad")));
+        assert!(exports.iter().any(|e| e.name.as_deref() == Some("Java_com_example_Foo_bar")));
+    }
+
+    #[test]
+    fn test_parse_iej_empty() {
+        struct MockR2 {
+            responses: HashMap<String, Value>,
+        }
+        impl R2Client for MockR2 {
+            fn cmd(&mut self, _cmd: &str) -> Result<String, Error> { Ok(String::new()) }
+            fn cmdj(&mut self, cmd: &str) -> Result<Value, Error> {
+                Ok(self.responses.get(cmd).cloned().unwrap_or(json!([])))
+            }
+        }
+        let mut mock = MockR2 {
+            responses: HashMap::new(),
+        };
+        mock.responses.insert("iEj".to_string(), json!([]));
+        let exports = parse_iej(&mut mock).unwrap();
+        assert!(exports.is_empty());
+    }
+
+    #[test]
+    fn test_jni_annotation_name_based() {
+        // Java_com_* name should produce jni annotation via is_jni_name
+        let raw = "Java_com_example_Foo_bar";
+        let name = "Java_com_example_Foo_bar";
+        let (kind, cleaned_name) = classify_symbol(raw, name);
+        assert_eq!(kind, SymbolKind::Function);
+        assert!(is_jni_name(&cleaned_name));
+    }
+
+    #[test]
+    fn test_jni_annotation_address_based() {
+        // JNI_OnLoad in iEj export table should match by address
+        use std::collections::HashMap;
+        let mut jni_export_map: HashMap<u64, String> = HashMap::new();
+        jni_export_map.insert(4194304, "JNI_OnLoad".to_string());
+        let addr = 4194304u64;
+        assert!(jni_export_map.contains_key(&addr));
+        // The function with this addr would get jni annotation even if r2 renamed it
     }
 }

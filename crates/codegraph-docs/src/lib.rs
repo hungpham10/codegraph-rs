@@ -6,6 +6,7 @@ pub mod parsers;
 pub mod tokenize;
 
 pub use crate::config::DocConfig;
+pub use crate::config::StorageConfig;
 pub use crate::graph::DocumentGraph;
 pub use crate::graph::{DocStats, NodePayload};
 pub use crate::ir::{ByteSpan, Document, Kind, Node, Scalar};

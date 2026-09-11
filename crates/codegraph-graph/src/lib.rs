@@ -38,6 +38,9 @@ use crate::embeddings::{EmbeddingBackend, default_backend, embedding_enabled, ma
 pub use crate::radix::Element;
 pub use crate::search::Search;
 pub use crate::search::SearchResume;
+/// Error type của `Search::insert_chain` (ví dụ `Duplicated`) — re-export để
+/// caller xử lý lỗi key trùng mà không cần `mod search` public.
+pub use crate::search::Error as SearchError;
 use crate::storage::cached::CachedStorage;
 #[cfg(feature = "lmdb")]
 pub use crate::storage::lmdb::LmdbStorage;
@@ -117,6 +120,63 @@ fn backend_unavailable(name: &str) -> Error {
 /// Map `search::Error` → `Error::Search`.
 fn serr_search(e: crate::search::Error) -> Error {
     Error::Search(e.to_string())
+}
+
+/// Mở storage handle cho document graph từ DSN — dataset **riêng**, không share
+/// instance với `GraphIndex` (doc tries dùng namespace shard/record riêng nên
+/// phải là dataset riêng, và `DocumentGraph` cần `Arc<TokioRwLock<dyn Storage>>`).
+///
+/// - `sqlite://<path>` → `SqliteStorage` (feature `sqlite`)
+/// - `lmdb://<path>`   → `LmdbStorage` (feature `lmdb`)
+/// - `redis://...`     → `RedisStorage` với keyspace prefix `codegraph:docs`
+///   (feature `redis`) — tách khỏi index `codegraph:idx:<db>`
+pub async fn open_doc_storage(dsn: &str) -> Result<Arc<RwLock<dyn Storage>>> {
+    if let Some(path) = dsn.strip_prefix("sqlite://") {
+        #[cfg(feature = "sqlite")]
+        {
+            let storage = crate::storage::sqlite::SqliteStorage::open(path)
+                .await
+                .map_err(serr)?;
+            return Ok(Arc::new(RwLock::new(storage)));
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            let _ = path;
+            return Err(backend_unavailable("sqlite"));
+        }
+    }
+    if let Some(path) = dsn.strip_prefix("lmdb://") {
+        #[cfg(feature = "lmdb")]
+        {
+            let storage = crate::storage::lmdb::LmdbStorage::open(path)
+                .await
+                .map_err(serr)?;
+            return Ok(Arc::new(RwLock::new(storage)));
+        }
+        #[cfg(not(feature = "lmdb"))]
+        {
+            let _ = path;
+            return Err(backend_unavailable("lmdb"));
+        }
+    }
+    if dsn.starts_with("redis://") || dsn.starts_with("rediss://") {
+        #[cfg(feature = "redis")]
+        {
+            let client = redis::Client::open(dsn)
+                .map_err(|e| Error::Db(format!("redis client: {e}")))?;
+            let storage = crate::storage::redis::RedisStorage::new(client, "codegraph:docs")
+                .await
+                .map_err(serr)?;
+            return Ok(Arc::new(RwLock::new(storage)));
+        }
+        #[cfg(not(feature = "redis"))]
+        {
+            return Err(backend_unavailable("redis"));
+        }
+    }
+    Err(Error::Db(format!(
+        "open_doc_storage: DSN scheme không hỗ trợ: {dsn}"
+    )))
 }
 
 /// Kết quả parse một file — input của `GraphIndex::ingest` (full re-index).

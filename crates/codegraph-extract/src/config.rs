@@ -1,11 +1,13 @@
-use crate::languages::effects::EffectClassifier;
-use crate::project::{project_db_path, project_dir};
-use camino::Utf8Path;
-#[cfg(feature = "binary")]
-pub use codegraph_binary::BinaryConfig;
-use codegraph_core::{EffectCallPattern, EffectRule, EffectType, StorageRoute};
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::Deserialize;
 use std::fs;
+
+#[cfg(feature = "binary")]
+use codegraph_binary::BinaryConfig;
+use codegraph_core::{EffectCallPattern, EffectRule, EffectType, StorageRoute};
+
+use crate::languages::effects::EffectClassifier;
+use crate::project::{project_db_path, project_dir};
 
 /// How `.h` header files should be parsed when both C and C++ extractors are available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -66,6 +68,10 @@ struct ConfigFile {
     /// Embedding backend cho semantic search (fastembed / hashing) + cache model.
     #[serde(default)]
     embedding: EmbeddingSection,
+    /// Document graph — ingest tài liệu cấu trúc lúc `codegraph init`.
+    #[serde(default)]
+    docgraph: DocGraphSection,
+
     /// Phân tích binary (radare2) — feature `binary`.
     #[cfg(feature = "binary")]
     #[serde(default)]
@@ -94,6 +100,52 @@ struct LanguagesSection {
     /// `"auto"`, `"c"`, or `"cpp"`.
     #[serde(default)]
     headers: Option<String>,
+}
+
+/// Section `[docgraph]` — cấu hình document graph (ingest tài liệu lúc `init`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DocGraphSection {
+    /// Bật ingest docs khi `codegraph init` (mặc định bật khi có `paths`).
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// Danh sách glob (tính từ project root), vd `["infra/*.tf", "config/**/*.yaml"]`.
+    /// Mỗi entry hỗ trợ suffix `:<format>` để override, vd `"deploy/README:hcl"`.
+    #[serde(default)]
+    paths: Vec<String>,
+    /// Override storage cho docs — mặc định dataset riêng cùng backend kind của
+    /// `[storage]` (sqlite → `.codegraph/docs.sqlite`, lmdb → `docs.lmdb`).
+    #[serde(default)]
+    storage: Option<DocGraphStorageSection>,
+    /// Base id cho node/doc của document graph (mặc định 1e9).
+    #[serde(default)]
+    doc_base: Option<u64>,
+    /// Base id cho mined pattern (mặc định 3e9).
+    #[serde(default)]
+    pattern_base: Option<u64>,
+    /// Bloom-filter cap (mặc định 64).
+    #[serde(default)]
+    bloom_cap: Option<usize>,
+    /// Alias chuẩn hoá key, vd `aliases = [["instances", "replicas"]]`.
+    #[serde(default)]
+    aliases: Vec<(String, String)>,
+}
+
+/// `[docgraph.storage]` — override backend/dsn cho document graph.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DocGraphStorageSection {
+    /// `"sqlite"`, `"lmdb"`, `"redis"`, `"memory"`.
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
+    /// DSN override (vd `sqlite:///tmp/docs.db`).
+    #[serde(default)]
+    pub dsn: Option<String>,
+}
+
+impl DocGraphSection {
+    /// Ingest docs có bật hay không: `enabled` override, mặc định = có `paths`.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(!self.paths.is_empty())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -139,6 +191,8 @@ pub struct ExtractConfig {
     pub storage: StorageConfig,
     /// Cấu hình embedding backend (semantic search) — đọc từ `[embedding]`.
     pub embedding: codegraph_graph::embeddings::EmbeddingConfig,
+    /// Cấu hình document graph — đọc từ `[docgraph]`.
+    pub docgraph: DocGraphSection,
     /// Cấu hình phân tích binary (radare2).
     #[cfg(feature = "binary")]
     pub binary: BinaryConfig,
@@ -191,6 +245,7 @@ impl ExtractConfig {
                 repo_id: file.storage.repo_id,
                 dsns: file.storage.dsns,
             },
+            docgraph: file.docgraph,
             #[cfg(feature = "binary")]
             binary: file.binary.unwrap_or_default(),
         }
@@ -284,6 +339,115 @@ impl ExtractConfig {
         }
         Some(repo_id)
     }
+
+    /// DSN dataset **riêng** cho document graph (tries của docs đụng namespace
+    /// record/shard với code index nên KHÔNG dùng chung 1 dataset được — dùng
+    /// cùng backend kind nhưng file/keyspace riêng).
+    ///
+    /// - `[docgraph.storage] dsn` override → dùng nguyên văn.
+    /// - Mặc định theo backend kind (override được bằng `[docgraph.storage] type`):
+    ///   - sqlite → `sqlite://<root>/.codegraph/docs.sqlite`
+    ///   - lmdb   → `lmdb://<root>/.codegraph/docs.lmdb`
+    ///   - redis  → DSN của `[storage]` (helper mở keyspace prefix riêng)
+    ///   - memory → `None` (in-memory)
+    ///   - postgres/mysql → chưa hỗ trợ dataset riêng → `None`
+    pub fn doc_storage_dsn(&self, root: &Utf8Path) -> Option<String> {
+        if let Some(dsn) = self
+            .docgraph
+            .storage
+            .as_ref()
+            .and_then(|s| s.dsn.as_deref())
+        {
+            return Some(dsn.to_string());
+        }
+        let kind = self
+            .docgraph
+            .storage
+            .as_ref()
+            .and_then(|s| s.type_.as_deref())
+            .map(StorageKind::parse)
+            .unwrap_or(self.storage.kind);
+        match kind {
+            StorageKind::Sqlite => {
+                Some(format!("sqlite://{}", project_dir(root).join("docs.sqlite")))
+            }
+            StorageKind::Lmdb => {
+                Some(format!("lmdb://{}", project_dir(root).join("docs.lmdb")))
+            }
+            StorageKind::Redis => self.storage.dsn.clone(),
+            StorageKind::Memory | StorageKind::Postgres | StorageKind::MySql => None,
+        }
+    }
+
+    /// Config document graph + danh sách file khớp glob `[docgraph] paths`
+    /// (path kèm format override). Trả `None` khi `[docgraph]` không bật /
+    /// không khai báo `paths`.
+    pub fn doc_config(
+        &self,
+        root: &Utf8Path,
+    ) -> Option<(
+        codegraph_docs::DocConfig,
+        Vec<(Utf8PathBuf, Option<String>)>,
+    )> {
+        if !self.docgraph.is_enabled() {
+            return None;
+        }
+        let mut files: Vec<(Utf8PathBuf, Option<String>)> = Vec::new();
+        for entry in &self.docgraph.paths {
+            let (pattern, format) = split_format_override(entry);
+            let full = root.join(pattern).to_string();
+            let Ok(matches) = glob::glob(&full) else {
+                tracing::warn!("[docgraph] glob `{pattern}` không hợp lệ — bỏ qua");
+                continue;
+            };
+            for path in matches.flatten() {
+                if !path.is_file() {
+                    continue;
+                }
+                let Ok(path) = Utf8PathBuf::from_path_buf(path) else {
+                    tracing::warn!("[docgraph] path không phải UTF-8 — bỏ qua");
+                    continue;
+                };
+                if !files.iter().any(|(p, _)| *p == path) {
+                    files.push((path, format.map(str::to_string)));
+                }
+            }
+        }
+        // Không có file nào khớp → coi như không cấu hình (init bỏ qua ingest).
+        if files.is_empty() {
+            return None;
+        }
+        let dsn = self.doc_storage_dsn(root);
+        if dsn.is_none() && self.storage.kind.is_rdbms() {
+            tracing::warn!(
+                "[docgraph] backend RDBMS chưa hỗ trợ dataset riêng cho docs — \
+                 dùng in-memory (override bằng [docgraph.storage] dsn)"
+            );
+        }
+        let config = codegraph_docs::DocConfig {
+            storage: dsn.map(|dsn| codegraph_docs::StorageConfig {
+                r#type: Some(dsn.split("://").next().unwrap_or("sqlite").to_string()),
+                dsn: Some(dsn),
+            }),
+            doc_base: self.docgraph.doc_base,
+            pattern_base: self.docgraph.pattern_base,
+            bloom_cap: self.docgraph.bloom_cap,
+            aliases: (!self.docgraph.aliases.is_empty()).then(|| self.docgraph.aliases.clone()),
+        };
+        Some((config, files))
+    }
+}
+
+/// Tách suffix `:<format>` khỏi một entry `[docgraph] paths` (chỉ nhận format
+/// đã biết để không nhầm với ký tự `:` khác trong pattern).
+fn split_format_override(entry: &str) -> (&str, Option<&str>) {
+    const FORMATS: [&str; 6] = ["hcl", "tf", "yaml", "yml", "json", "toml"];
+    if let Some((pattern, format)) = entry.rsplit_once(':') {
+        if FORMATS.contains(&format.to_ascii_lowercase().as_str()) {
+            return (pattern, Some(format));
+        }
+    }
+    (entry, None)
 }
 
 /// Setup rule config → skip rule effect unknown (warn) + giữ phần còn lại.
@@ -372,6 +536,26 @@ type = "sqlite"
 # depth = "aaa"         # "aaa" (full) hoặc "fast" (af; aar; aac — nhanh hơn cho binary lớn)
 # cfg_markers = true    # xây marker IF/LOOP/SWITCH từ CFG của mỗi function
 # cache = true          # cache kết quả phân tích theo (path, mtime, size)
+
+# [docgraph]
+# Document graph — ingest tài liệu cấu trúc (HCL/Terraform, YAML, JSON, TOML)
+# lúc `codegraph init`, truy vấn qua MCP (`codegraph_doc_*`) hoặc `codegraph doc`.
+# Bỏ comment section + `paths` để bật:
+# [docgraph]
+# enabled = true                      # mặc định bật khi có `paths`
+# Glob tính từ project root; suffix `:<format>` override format theo entry.
+# paths = ["infra/*.tf", "deploy/*.yaml", "config/settings.toml"]
+#
+# Storage cho docs — mặc định dataset RIÊNG cùng backend kind của [storage]
+# (sqlite → .codegraph/docs.sqlite, lmdb → docs.lmdb, redis → keyspace riêng).
+# [docgraph.storage]
+# type = "sqlite"
+# dsn = "sqlite:///tmp/docs.db"
+#
+# doc_base = 1_000_000_000            # base id node/doc (mặc định 1e9)
+# pattern_base = 3_000_000_000        # base id mined pattern (mặc định 3e9)
+# bloom_cap = 64                      # bloom-filter cap cho doc search
+# aliases = [["instances", "replicas"]]  # chuẩn hoá key khi tra cứu
 "#;
 
 /// Default `config.toml` section `[binary]` (ghi chú, thêm bởi `codegraph init`).
@@ -481,6 +665,86 @@ headers = "cpp"
         assert_eq!(StorageKind::parse("in-memory"), StorageKind::Memory);
         // unknown → sqlite (default).
         assert_eq!(StorageKind::parse("whatsapp"), StorageKind::Sqlite);
+    }
+
+    /// Parse `[docgraph]` — glob mở rộng, format override theo entry, storage
+    /// override; không khai báo `paths` → `doc_config` trả `None`.
+    #[test]
+    fn docgraph_parse_and_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.tf"), "resource {}\n").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("b.yaml"), "k: v\n").unwrap();
+        let cfg_path = root.join("config.toml");
+        let cfg_path = Utf8Path::from_path(&cfg_path).unwrap();
+        std::fs::write(
+            cfg_path.as_std_path(),
+            r#"
+[docgraph]
+paths = ["*.tf", "sub/*.yaml", "nothing/:hcl"]
+
+[docgraph.storage]
+type = "sqlite"
+dsn = "sqlite:///tmp/docs-test.db"
+"#,
+        )
+        .unwrap();
+        let root = Utf8Path::from_path(root).unwrap();
+        let cfg = ExtractConfig::load_from(cfg_path);
+        let (doc_cfg, files) = cfg.doc_config(root).expect("docgraph enabled");
+        // Glob khớp đúng 2 file (pattern "nothing/" không có match); format
+        // override ":hcl" không nhầm với phần mở rộng thường.
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|(p, _)| p.file_name() != Some("nothing")));
+        // Storage override thắng default (không phải docs.sqlite của project).
+        let storage = doc_cfg.storage.expect("storage config");
+        assert_eq!(storage.dsn.as_deref(), Some("sqlite:///tmp/docs-test.db"));
+
+        // Không `paths` → không ingest.
+        std::fs::write(cfg_path.as_std_path(), "[docgraph]\nenabled = true\n").unwrap();
+        let cfg = ExtractConfig::load_from(cfg_path);
+        assert!(cfg.doc_config(root).is_none());
+
+        // Không `[docgraph]` → dsn mặc định vẫn có (docs.sqlite cho sqlite).
+        std::fs::write(cfg_path.as_std_path(), "").unwrap();
+        let cfg = ExtractConfig::load_from(cfg_path);
+        let dsn = cfg.doc_storage_dsn(root).unwrap();
+        assert!(dsn.ends_with("docs.sqlite"), "got {dsn}");
+    }
+
+    /// `doc_storage_dsn` override bằng `[docgraph.storage] dsn` thắng kind.
+    #[test]
+    fn doc_storage_dsn_override() {
+        let dir = std::env::temp_dir().join("codegraph-extract-docdsn-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let path = Utf8Path::from_path(path.as_path()).unwrap();
+        std::fs::write(
+            path.as_std_path(),
+            r#"
+[storage]
+type = "lmdb"
+
+[docgraph.storage]
+dsn = "sqlite:///tmp/custom-docs.db"
+"#,
+        )
+        .unwrap();
+        let cfg = ExtractConfig::load_from(path);
+        assert_eq!(
+            cfg.doc_storage_dsn(Utf8Path::new("/repo")).unwrap(),
+            "sqlite:///tmp/custom-docs.db"
+        );
+
+        // Không override → theo kind của [storage] (lmdb → docs.lmdb).
+        std::fs::write(path.as_std_path(), "[storage]\ntype = \"lmdb\"\n").unwrap();
+        let cfg = ExtractConfig::load_from(path);
+        let dsn = cfg.doc_storage_dsn(Utf8Path::new("/repo")).unwrap();
+        assert!(dsn.starts_with("lmdb://") && dsn.ends_with("docs.lmdb"), "got {dsn}");
+
+        let _ = std::fs::remove_file(path.as_std_path());
+        let _ = std::fs::remove_dir(&dir);
     }
 
     /// `storage_dsn` dựng DSN theo kind; `dsn` override thắng.

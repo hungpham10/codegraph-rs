@@ -11,6 +11,9 @@ warnings = "deny"
 [dependencies]
 codegraph-core = { path = "../codegraph-core" }
 codegraph-graph = { path = "../codegraph-graph", features = ["sqlite"] }
+codegraph-docs = { path = "../codegraph-docs" }
+glob = "0.3"
+tokio = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-typescript = { workspace = true, optional = true }
 tree-sitter-javascript = { workspace = true, optional = true }

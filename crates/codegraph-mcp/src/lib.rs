@@ -94,12 +94,19 @@ impl CodegraphServer {
         format: OutputStyle,
         mermaid: bool,
     ) -> anyhow::Result<Self> {
-        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
-            Arc::new(TokioRwLock::new(InMemoryStorage::default()));
-        let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
-            storage,
-            DocConfig::default(),
-        )));
+        // Document graph mở từ `[docgraph]`/`[storage]` config của root
+        // (dataset riêng, persist qua các phiên). Lỗi config/backend → fallback
+        // in-memory thay vì chặn cả server (doc tools vẫn dùng được per-session).
+        let doc_graph = match codegraph_extract::open_doc_graph(&root).await {
+            Ok(g) => Arc::new(TokioRwLock::new(g)),
+            Err(e) => {
+                tracing::warn!("doc graph open failed ({e}) — fallback in-memory");
+                Arc::new(TokioRwLock::new(DocumentGraph::new(
+                    Arc::new(TokioRwLock::new(InMemoryStorage::default())),
+                    DocConfig::default(),
+                )))
+            }
+        };
         Ok(Self {
             session: Session::with_root_and_format(root, format).await?,
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),

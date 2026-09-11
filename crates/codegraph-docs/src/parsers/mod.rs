@@ -385,3 +385,33 @@ service:
         assert_eq!(doc.nodes.len(), 4); // root, service, name, replicas
     }
 }
+
+/// Detect document format từ extension: `tf`/`hcl` → hcl, `yaml`/`yml`,
+/// `json`, `toml`. Lỗi khi extension không nhận diện được.
+pub fn detect_format(path: &str) -> Result<String> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "tf" | "hcl" => Ok("hcl".to_string()),
+        "yaml" | "yml" => Ok("yaml".to_string()),
+        "json" => Ok("json".to_string()),
+        "toml" => Ok("toml".to_string()),
+        _ => Err(anyhow::anyhow!(
+            "unknown format for extension .{ext}; specify --format to override"
+        )),
+    }
+}
+
+/// Chọn parser theo format name (`"hcl"`, `"yaml"`, `"json"`, `"toml"`).
+pub fn parser_for(format: &str) -> Result<Box<dyn DocParser>> {
+    match format {
+        "hcl" => Ok(Box::new(HclParser)),
+        "yaml" => Ok(Box::new(YamlParser)),
+        "json" => Ok(Box::new(JsonParser)),
+        "toml" => Ok(Box::new(TomlParser)),
+        _ => Err(anyhow::anyhow!("unsupported document format: {format}")),
+    }
+}

@@ -3,10 +3,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::{ArgAction, Parser, Subcommand};
 use codegraph_extract::{ExtractStats, Orchestrator};
 use codegraph_graph::GraphIndex;
-use codegraph_graph::InMemoryStorage;
 use codegraph_mcp::CodegraphServer;
 use std::sync::Arc;
-use tokio::sync::RwLock as TokioRwLock;
 
 #[cfg(feature = "fastembed")]
 use codegraph_graph::embeddings::warm_model_cache;
@@ -292,6 +290,15 @@ async fn open_index(root: &Utf8Path) -> Result<GraphIndex> {
     }
 }
 
+/// Mở document graph theo config (`[docgraph]` + `[storage]`): dataset riêng
+/// cho docs (mặc định `.codegraph/docs.sqlite` với sqlite), rebuild tries từ
+/// storage. Dùng chung helper với MCP server.
+async fn open_doc_graph(root: &Utf8Path) -> Result<codegraph_docs::DocumentGraph> {
+    codegraph_extract::open_doc_graph(root)
+        .await
+        .map_err(|e| anyhow!("{e}"))
+}
+
 /// `codegraph init`: tạo `.codegraph/` + config, index ngay nếu `do_index`
 /// (progress bar khi `show_progress`). không gọi installer nữa.
 async fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
@@ -307,6 +314,28 @@ async fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Resul
             stats.files, stats.symbols, stats.chains, stats.calls, stats.skipped
         );
     }
+    ingest_configured_docs(root).await?;
+    Ok(())
+}
+
+/// Ingest các document khai báo trong `[docgraph] paths` của config.toml
+/// (idempotent — doc trùng path được thay thế tại chỗ).
+async fn ingest_configured_docs(root: &Utf8Path) -> Result<()> {
+    let Some((_, files)) = codegraph_extract::ExtractConfig::load(root).doc_config(root) else {
+        return Ok(());
+    };
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut graph = open_doc_graph(root).await?;
+    let mut ingested = 0usize;
+    for (path, format) in &files {
+        match graph.ingest_file(path.as_str(), format.as_deref()).await {
+            Ok(_) => ingested += 1,
+            Err(e) => eprintln!("doc ingest failed for {path}: {e}"),
+        }
+    }
+    eprintln!("ingested {ingested}/{} documents", files.len());
     Ok(())
 }
 
@@ -678,46 +707,15 @@ async fn cmd_serve(
 }
 
 /// `codegraph doc`: manage structured documents (HCL/Terraform, YAML, JSON, TOML).
-async fn cmd_doc(_root: &Utf8Path, cmd: DocCmd) -> Result<()> {
-    let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
-        Arc::new(TokioRwLock::new(InMemoryStorage::default()));
-    let config = codegraph_docs::DocConfig::default();
-    let mut graph = codegraph_docs::DocumentGraph::new(storage, config);
+/// Persist qua dataset docs theo config (`[docgraph]`/`[storage]`) — không còn
+/// in-memory per-invocation.
+async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
+    let mut graph = open_doc_graph(root).await?;
 
     match cmd {
         DocCmd::Ingest { path, format } => {
-            let source = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow!("failed to read {path}: {e}"))?;
-            let ext = std::path::Path::new(&path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
-                .unwrap_or_default();
-            let format = match format {
-                Some(f) => f,
-                None => match ext.as_str() {
-                    "tf" | "hcl" => "hcl".to_string(),
-                    "yaml" | "yml" => "yaml".to_string(),
-                    "json" => "json".to_string(),
-                    "toml" => "toml".to_string(),
-                    _ => {
-                        return Err(anyhow!(
-                            "unknown format for extension .{ext}; use --format to override"
-                        ))
-                    }
-                },
-            };
-            let parser: Box<dyn codegraph_docs::DocParser> = match format.as_str() {
-                "hcl" => Box::new(codegraph_docs::parsers::HclParser),
-                "yaml" => Box::new(codegraph_docs::parsers::YamlParser),
-                "json" => Box::new(codegraph_docs::parsers::JsonParser),
-                "toml" => Box::new(codegraph_docs::parsers::TomlParser),
-                _ => return Err(anyhow!("unsupported document format: {format}")),
-            };
-            let doc_id = graph.stats().docs as u64 + 1;
-            let doc = parser.parse(&path, &source, doc_id)?;
-            let inserted = graph.upsert_document(doc).await?;
-            println!("ingested {} → doc_id={}", path, inserted);
+            let inserted = graph.ingest_file(&path, format.as_deref()).await?;
+            println!("ingested {path} → doc_id={inserted}");
         }
         DocCmd::Search { pattern: _, depth } => {
             use codegraph_docs::DocToken;
