@@ -72,7 +72,10 @@ pub async fn serve(cfg: ServeConfig) -> anyhow::Result<()> {
     };
     let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
         Arc::new(TokioRwLock::new(InMemoryStorage::default()));
-    let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(storage, DocConfig::default())));
+    let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
+        storage,
+        DocConfig::default(),
+    )));
     let state = Arc::new(AppState {
         session: Arc::new(session),
         search_sessions: Arc::new(SearchSessionStore::new()),
@@ -158,21 +161,24 @@ mod tests {
     use codegraph_api::SearchSessionStore;
     use tower::ServiceExt;
 
-use codegraph_graph::InMemoryStorage;
-use tokio::sync::RwLock as TokioRwLock;
+    use codegraph_graph::InMemoryStorage;
+    use tokio::sync::RwLock as TokioRwLock;
 
-fn make_state(mermaid: bool) -> Arc<AppState> {
-    let session = Session::new_with_format(OutputStyle::Minimize);
-    let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
-        Arc::new(TokioRwLock::new(InMemoryStorage::default()));
-    let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(storage, DocConfig::default())));
-    Arc::new(AppState {
-        session: Arc::new(session),
-        search_sessions: Arc::new(SearchSessionStore::new()),
-        mermaid,
-        doc_graph,
-    })
-}
+    fn make_state(mermaid: bool) -> Arc<AppState> {
+        let session = Session::new_with_format(OutputStyle::Minimize);
+        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
+            Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
+            storage,
+            DocConfig::default(),
+        )));
+        Arc::new(AppState {
+            session: Arc::new(session),
+            search_sessions: Arc::new(SearchSessionStore::new()),
+            mermaid,
+            doc_graph,
+        })
+    }
 
     fn cfg(mermaid: bool) -> ServeConfig {
         ServeConfig {

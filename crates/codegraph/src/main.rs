@@ -87,7 +87,7 @@ enum Cmd {
         #[arg(long)]
         cache_dir: Option<String>,
     },
-/// Run as MCP server (stdio via `--mcp`, hoặc Streamable HTTP via `--http`).
+    /// Run as MCP server (stdio via `--mcp`, hoặc Streamable HTTP via `--http`).
     Serve {
         #[arg(long)]
         mcp: bool,
@@ -733,15 +733,13 @@ async fn cmd_doc(_root: &Utf8Path, cmd: DocCmd) -> Result<()> {
                 }
             }
         }
-        DocCmd::Hydrate { node_id } => {
-            match graph.hydrate(node_id) {
-                Some(payload) => {
-                    let json = serde_json::to_string_pretty(&payload)?;
-                    println!("{json}");
-                }
-                None => println!("node {node_id} not found"),
+        DocCmd::Hydrate { node_id } => match graph.hydrate(node_id) {
+            Some(payload) => {
+                let json = serde_json::to_string_pretty(&payload)?;
+                println!("{json}");
             }
-        }
+            None => println!("node {node_id} not found"),
+        },
         DocCmd::List => {
             let stats = graph.stats();
             println!("documents: {}, nodes: {}", stats.docs, stats.nodes);

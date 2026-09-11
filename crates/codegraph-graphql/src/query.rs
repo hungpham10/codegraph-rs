@@ -347,7 +347,10 @@ impl Query {
     async fn doc_list(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocStatsView>> {
         let state = ctx.data::<Arc<AppState>>()?;
         let stats = state.doc_graph.read().await.stats();
-        Ok(vec![DocStatsView { docs: stats.docs, nodes: stats.nodes }])
+        Ok(vec![DocStatsView {
+            docs: stats.docs,
+            nodes: stats.nodes,
+        }])
     }
 
     /// Search document nodes by pattern string.

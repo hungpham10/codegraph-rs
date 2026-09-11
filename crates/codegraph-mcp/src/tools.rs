@@ -3,7 +3,7 @@ use camino::Utf8Path;
 use codegraph_api::{GraphApi, Pagination};
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
-use codegraph_docs::{DocumentGraph, tokenize::DocToken};
+use codegraph_docs::{tokenize::DocToken, DocumentGraph};
 use rmcp::model::Tool;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1049,7 +1049,11 @@ pub async fn dispatch_doc_ingest(
             "yaml" | "yml" => "yaml".to_string(),
             "json" => "json".to_string(),
             "toml" => "toml".to_string(),
-            _ => return Err(Error::Invalid(format!("unknown format for extension .{ext}"))),
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "unknown format for extension .{ext}"
+                )))
+            }
         },
     };
     let parser: Box<dyn codegraph_docs::DocParser> = match fmt.as_str() {
@@ -1060,8 +1064,15 @@ pub async fn dispatch_doc_ingest(
         _ => return Err(Error::Invalid(format!("unsupported format: {fmt}"))),
     };
     let doc_id = doc_graph.read().await.stats().docs as u64 + 1;
-    let doc = parser.parse(path, &source, doc_id).map_err(|e| Error::Other(e.to_string()))?;
-    let inserted = doc_graph.write().await.upsert_document(doc).await.map_err(|e| Error::Other(e.to_string()))?;
+    let doc = parser
+        .parse(path, &source, doc_id)
+        .map_err(|e| Error::Other(e.to_string()))?;
+    let inserted = doc_graph
+        .write()
+        .await
+        .upsert_document(doc)
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
     Ok(format!("ingested {path} → doc_id={inserted}"))
 }
 
@@ -1071,7 +1082,12 @@ pub async fn dispatch_doc_search(
     depth: usize,
 ) -> Result<String> {
     let tokens = vec![DocToken::root()];
-    let ids = doc_graph.read().await.search_path(&tokens, Some(depth)).await.map_err(|e| Error::Other(e.to_string()))?;
+    let ids = doc_graph
+        .read()
+        .await
+        .search_path(&tokens, Some(depth))
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
     if ids.is_empty() {
         return Ok("no nodes matched".to_string());
     }
@@ -1091,24 +1107,19 @@ pub async fn dispatch_doc_hydrate(
     let payload = doc_graph.read().await.hydrate(node_id);
     match payload {
         Some(p) => {
-            let json = serde_json::to_string_pretty(&p)
-                .map_err(|e| Error::Other(e.to_string()))?;
+            let json = serde_json::to_string_pretty(&p).map_err(|e| Error::Other(e.to_string()))?;
             Ok(json)
         }
         None => Ok(format!("node {node_id} not found")),
     }
 }
 
-pub async fn dispatch_doc_list(
-    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
-) -> Result<String> {
+pub async fn dispatch_doc_list(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Result<String> {
     let stats = doc_graph.read().await.stats();
     Ok(format!("documents: {}, nodes: {}", stats.docs, stats.nodes))
 }
 
-pub async fn dispatch_doc_stats(
-    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
-) -> Result<String> {
+pub async fn dispatch_doc_stats(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Result<String> {
     let stats = doc_graph.read().await.stats();
     Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
 }

@@ -1,7 +1,7 @@
 pub mod config;
 pub mod graph;
-pub mod ir;
 pub mod intern;
+pub mod ir;
 pub mod parsers;
 pub mod tokenize;
 

@@ -1,6 +1,6 @@
 use crate::config::DocConfig;
-use crate::ir::{Document, Kind, Node, Scalar};
 use crate::intern::Interner;
+use crate::ir::{Document, Kind, Node, Scalar};
 use crate::tokenize::DocToken;
 use anyhow::Result;
 use codegraph_graph::Search;
@@ -204,22 +204,42 @@ impl DocumentGraph {
             value: node.value.clone(),
             key: node.key.clone(),
             doc: node.doc,
-            children: node.children.iter().filter_map(|c| self.hydrate(*c)).collect(),
+            children: node
+                .children
+                .iter()
+                .filter_map(|c| self.hydrate(*c))
+                .collect(),
         })
     }
 
     // ── Query pipeline (reuses Search::search_resumable) ──────────────
 
-    pub async fn search_path(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_path(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.path_trie, pattern, depth).await
     }
-    pub async fn search_type(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_type(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.type_trie, pattern, depth).await
     }
-    pub async fn search_value(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_value(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.value_trie, pattern, depth).await
     }
-    pub async fn search_struct(&self, pattern: &[DocToken], depth: Option<usize>) -> Result<Vec<u64>> {
+    pub async fn search_struct(
+        &self,
+        pattern: &[DocToken],
+        depth: Option<usize>,
+    ) -> Result<Vec<u64>> {
         self.search_trie(&self.struct_trie, pattern, depth).await
     }
 
@@ -257,7 +277,10 @@ impl DocumentGraph {
             self.storage
                 .write()
                 .await
-                .set_chain(DOC_LIST_RECORD as usize, &list.iter().map(|&x| x as u64).collect::<Vec<_>>())
+                .set_chain(
+                    DOC_LIST_RECORD as usize,
+                    &list.iter().map(|&x| x as u64).collect::<Vec<_>>(),
+                )
                 .await?;
         }
         Ok(())
@@ -281,7 +304,12 @@ impl DocumentGraph {
             }
             node.doc = doc.id;
         }
-        doc.root = doc.nodes.iter().find(|n| n.kind == Kind::Root).map(|n| n.id).unwrap_or(doc.nodes[0].id);
+        doc.root = doc
+            .nodes
+            .iter()
+            .find(|n| n.kind == Kind::Root)
+            .map(|n| n.id)
+            .unwrap_or(doc.nodes[0].id);
         doc
     }
 

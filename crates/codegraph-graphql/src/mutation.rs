@@ -173,8 +173,8 @@ impl Mutation {
         format: Option<String>,
     ) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let source =
+            std::fs::read_to_string(&path).map_err(|e| async_graphql::Error::new(e.to_string()))?;
         let ext = std::path::Path::new(&path)
             .extension()
             .and_then(|e| e.to_str())
@@ -187,7 +187,11 @@ impl Mutation {
                 "yaml" | "yml" => "yaml".to_string(),
                 "json" => "json".to_string(),
                 "toml" => "toml".to_string(),
-                _ => return Err(async_graphql::Error::new(format!("unknown format for extension .{ext}"))),
+                _ => {
+                    return Err(async_graphql::Error::new(format!(
+                        "unknown format for extension .{ext}"
+                    )))
+                }
             },
         };
         let _doc_graph = state.doc_graph.clone();
@@ -196,15 +200,21 @@ impl Mutation {
             "yaml" => Box::new(codegraph_docs::parsers::YamlParser),
             "json" => Box::new(codegraph_docs::parsers::JsonParser),
             "toml" => Box::new(codegraph_docs::parsers::TomlParser),
-            _ => return Err(async_graphql::Error::new(format!("unsupported format: {fmt}"))),
+            _ => {
+                return Err(async_graphql::Error::new(format!(
+                    "unsupported format: {fmt}"
+                )))
+            }
         };
         let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
             Arc::new(TokioRwLock::new(codegraph_graph::InMemoryStorage::default()));
         let mut graph = DocumentGraph::new(storage, DocConfig::default());
         let doc_id = graph.stats().docs as u64 + 1;
-        let doc = parser.parse(&path, &source, doc_id)
+        let doc = parser
+            .parse(&path, &source, doc_id)
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        let inserted = graph.upsert_document(doc)
+        let inserted = graph
+            .upsert_document(doc)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(format!("ingested {path} → doc_id={inserted}"))
