@@ -102,9 +102,10 @@ impl DocumentGraph {
                 guard.get_node_meta(*id as usize).await?
             };
             if let Some(bytes) = bytes
-                && let Ok(node) = serde_json::from_slice::<Node>(&bytes) {
-                    self.nodes.insert(node.id, node);
-                }
+                && let Ok(node) = serde_json::from_slice::<Node>(&bytes)
+            {
+                self.nodes.insert(node.id, node);
+            }
         }
         // Load docs.
         for id in &doc_ids {
@@ -114,9 +115,10 @@ impl DocumentGraph {
                 guard.get_node_meta(meta_id as usize).await?
             };
             if let Some(bytes) = bytes
-                && let Ok(doc) = serde_json::from_slice::<Document>(&bytes) {
-                    self.docs.insert(doc.id, doc);
-                }
+                && let Ok(doc) = serde_json::from_slice::<Document>(&bytes)
+            {
+                self.docs.insert(doc.id, doc);
+            }
         }
         // Rebuild tries.
         self.path_trie.clear().await?;
@@ -275,10 +277,7 @@ impl DocumentGraph {
             self.storage
                 .write()
                 .await
-                .set_chain(
-                    DOC_LIST_RECORD as usize,
-                    &list.to_vec(),
-                )
+                .set_chain(DOC_LIST_RECORD as usize, &list.to_vec())
                 .await?;
         }
         Ok(())

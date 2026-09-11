@@ -90,9 +90,10 @@ impl DocBuilder {
         self.nodes.insert(id, built_node.clone());
         // Link parent → child.
         if let Some(pid) = parent
-            && let Some(p) = self.nodes.get_mut(&pid) {
-                p.children.push(id);
-            }
+            && let Some(p) = self.nodes.get_mut(&pid)
+        {
+            p.children.push(id);
+        }
         // Recurse.
         match node {
             RecursiveNode::Map(entries) => {
