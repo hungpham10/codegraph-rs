@@ -1,13 +1,16 @@
 //! Mutation resolvers — lifecycle session (init/deinit/index) + 4 heavy tools
 //! (sandbox/diff/diffSimulate/originSimulate) nhận `args: JSON`, trả `JSON`
 //! string (output phức tạp, ít dùng cho UI; passthrough qua `serde_json::Value`).
+//! + Document ingest/search/hydrate/list/stats.
 
 use async_graphql::{Context, Object, Result as GqlResult};
 use camino::Utf8PathBuf;
 use codegraph_api::session::{DetailLevel, OutputStyle};
 use codegraph_api::tools;
+use codegraph_docs::{DocConfig, DocumentGraph};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
 
 use crate::AppState;
 
@@ -158,5 +161,85 @@ impl Mutation {
         tools::dispatch_origin_simulate(&root, sgi, args)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))
+    }
+
+    // ── Document mutations ──
+
+    /// Ingest a document file into the document graph.
+    async fn doc_ingest(
+        &self,
+        ctx: &Context<'_>,
+        path: String,
+        format: Option<String>,
+    ) -> GqlResult<String> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        let fmt: String = match format {
+            Some(f) => f,
+            None => match ext.as_str() {
+                "tf" | "hcl" => "hcl".to_string(),
+                "yaml" | "yml" => "yaml".to_string(),
+                "json" => "json".to_string(),
+                "toml" => "toml".to_string(),
+                _ => return Err(async_graphql::Error::new(format!("unknown format for extension .{ext}"))),
+            },
+        };
+        let _doc_graph = state.doc_graph.clone();
+        let parser: Box<dyn codegraph_docs::DocParser> = match fmt.as_str() {
+            "hcl" => Box::new(codegraph_docs::parsers::HclParser),
+            "yaml" => Box::new(codegraph_docs::parsers::YamlParser),
+            "json" => Box::new(codegraph_docs::parsers::JsonParser),
+            "toml" => Box::new(codegraph_docs::parsers::TomlParser),
+            _ => return Err(async_graphql::Error::new(format!("unsupported format: {fmt}"))),
+        };
+        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
+            Arc::new(TokioRwLock::new(codegraph_graph::InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage, DocConfig::default());
+        let doc_id = graph.stats().docs as u64 + 1;
+        let doc = parser.parse(&path, &source, doc_id)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let inserted = graph.upsert_document(doc)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        Ok(format!("ingested {path} → doc_id={inserted}"))
+    }
+
+    /// Search document nodes.
+    async fn doc_search(
+        &self,
+        ctx: &Context<'_>,
+        _pattern: String,
+        depth: Option<i32>,
+    ) -> GqlResult<String> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let depth = depth.unwrap_or(1).max(1) as usize;
+        let ids = state
+            .doc_graph
+            .read()
+            .await
+            .search_path(&[codegraph_docs::tokenize::DocToken::root()], Some(depth))
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let mut results = Vec::new();
+        for id in &ids {
+            if let Some(payload) = state.doc_graph.read().await.hydrate(*id) {
+                results.push(json!({ "id": payload.id, "path": payload.path, "kind": format!("{:?}", payload.kind) }));
+            }
+        }
+        Ok(serde_json::to_string_pretty(&results)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?)
+    }
+
+    /// Get document stats.
+    async fn doc_stats(&self, ctx: &Context<'_>) -> GqlResult<String> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let stats = state.doc_graph.read().await.stats();
+        Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
     }
 }

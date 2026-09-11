@@ -54,17 +54,24 @@ The agent binds the workspace with `codegraph_init {"path": ...}` and gets tools
 
 ## 📄 Supported Formats
 
-CodeGraph-docs now supports parsing the following configuration file formats:
+CodeGraph supports parsing both **source code** (via tree-sitter) and **configuration/document** files:
 
-| Format | Parser | Status |
-|--------|--------|--------|
-| YAML | YamlParser | ✅ Implemented |
-| JSON | JsonParser | ✅ Implemented |
-| TOML | TomlParser | ✅ Implemented |
-| **HCL** (HashiCorp Configuration Language) | **HclParser** | **✅ New** |
-| **Terraform (.tf)** | **HclParser** | **✅ New** |
+### Source Code Languages
+14 languages: TypeScript · TSX · JavaScript · Python · Go · Rust · Java · C · C++ · C# · Ruby · PHP · Scala · Swift · Lua
 
-HCL and Terraform files can now be indexed and analyzed through the codegraph CLI, enabling semantic understanding of HashiCorp configuration files.
+### Configuration/Document Formats
+
+| Format | Extension | Parser | Access |
+|--------|-----------|--------|--------|
+| YAML | `.yaml`, `.yml` | YamlParser | `codegraph doc ingest` / MCP |
+| JSON | `.json` | JsonParser | `codegraph doc ingest` / MCP |
+| TOML | `.toml` | TomlParser | `codegraph doc ingest` / MCP |
+| **HCL** (HashiCorp) | `.hcl`, `.tf` | HclParser | `codegraph doc ingest` / MCP |
+
+Document files can be ingested into a **document graph** and queried via:
+- **CLI**: `codegraph doc ingest <path>`, `codegraph doc search`, `codegraph doc stats`
+- **MCP**: `codegraph_doc_ingest`, `codegraph_doc_search`, `codegraph_doc_hydrate`, `codegraph_doc_list`, `codegraph_doc_stats`
+- **GraphQL**: `docList`, `docSearch`, `docStats` queries and `docIngest`, `docSearch`, `docStats` mutations
 
 ## 🎯 Key Features
 

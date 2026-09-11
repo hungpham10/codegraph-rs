@@ -18,3 +18,5 @@ serde_yaml = "0.9"
 toml = "0.8"
 toml_edit = { workspace = true }
 hcl-rs = "0.19.8"
+tokio = { workspace = true, features = ["sync"] }
+anyhow = { workspace = true }

@@ -134,3 +134,34 @@ pub enum MermaidKind {
     Callees,
     Impact,
 }
+
+// ==================== Document types ====================
+
+/// Định dạng tài liệu hỗ trợ.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+#[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
+pub enum DocFormat {
+    Hcl,
+    Json,
+    Toml,
+    Yaml,
+}
+
+/// Node payload trong document graph — dạng GraphQL-friendly.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct DocNodePayload {
+    pub id: u64,
+    pub path: Vec<String>,
+    pub kind: String,
+    pub value: Option<String>,
+    pub key: Option<String>,
+    pub doc: u64,
+    pub children: Vec<DocNodePayload>,
+}
+
+/// Summary của document graph (GraphQL view).
+#[derive(SimpleObject, Clone, Debug)]
+pub struct DocStatsView {
+    pub docs: usize,
+    pub nodes: usize,
+}

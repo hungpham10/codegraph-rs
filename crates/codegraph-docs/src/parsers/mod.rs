@@ -264,15 +264,15 @@ impl DocParser for HclParser {
     fn format(&self) -> &'static str { "hcl" }
 
     fn parse(&self, path: &str, source: &str, id: u64) -> Result<Document> {
-        let value: hcl_rs::Value = hcl_rs::from_str(source)?;
+        let value: hcl::Value = hcl::from_str(source)?;
         let root = convert_hcl_value(&value, ByteSpan { start: 0, end: source.len() as u64 });
         Ok(build_document(path.to_string(), self.format().to_string(), id, root))
     }
 }
 
-fn convert_hcl_value(value: &hcl_rs::Value, span: ByteSpan) -> RecursiveNode {
+fn convert_hcl_value(value: &hcl::Value, span: ByteSpan) -> RecursiveNode {
     match value {
-        hcl_rs::Value::Object(map) => {
+        hcl::Value::Object(map) => {
             let entries = map
                 .iter()
                 .map(|(k, v)| {
@@ -283,17 +283,17 @@ fn convert_hcl_value(value: &hcl_rs::Value, span: ByteSpan) -> RecursiveNode {
                 .collect();
             RecursiveNode::Map(entries)
         }
-        hcl_rs::Value::Array(seq) => {
+        hcl::Value::Array(seq) => {
             let items = seq
                 .iter()
                 .map(|v| (convert_hcl_value(v, ByteSpan { start: 0, end: 0 }), ByteSpan { start: 0, end: 0 }))
                 .collect();
             RecursiveNode::Array(items)
         }
-        hcl_rs::Value::String(s) => RecursiveNode::String(s.clone(), span),
-        hcl_rs::Value::Number(n) => RecursiveNode::Number(*n as f64, span),
-        hcl_rs::Value::Boolean(b) => RecursiveNode::Bool(*b, span),
-        hcl_rs::Value::Null => RecursiveNode::Null(span),
+        hcl::Value::String(s) => RecursiveNode::String(s.clone(), span),
+        hcl::Value::Number(n) => RecursiveNode::Number(n.as_f64().unwrap_or(0.0), span),
+        hcl::Value::Bool(b) => RecursiveNode::Bool(*b, span),
+        hcl::Value::Null => RecursiveNode::Null(span),
     }
 }
 
@@ -309,6 +309,6 @@ service:
   replicas: 3
 "#;
         let doc = YamlParser.parse("/tmp/a.yaml", src, 1).unwrap();
-        assert_eq!(doc.nodes.len(), 5); // root, service, name, api, replicas, 3? Actually root + map entries
+        assert_eq!(doc.nodes.len(), 4); // root, service, name, replicas
     }
 }

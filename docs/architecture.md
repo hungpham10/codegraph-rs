@@ -11,8 +11,10 @@ crates/
   codegraph-graph/      GraphIndex (semgraph): registry + 2 engines (chain Search<u64> + name Search<u8>) + pluggable storage (SQLite / LMDB / Redis / Postgres / MySQL) + optional embedding vector index
   codegraph-context/    Markdown/JSON context formatter (symbol + callers + callees + source)
   codegraph-api/        GraphApi wrapper on SharedGraphIndex (async query surface)
+  codegraph-docs/       Document graph: DocParser trait, HCL/YAML/JSON/TOML parsers, DocumentGraph with DocToken tries
   codegraph-sboxes/     Behavior sandbox: Cranelift JIT compile of function groups + Rhai mock runtime
   codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 24‑tool dispatch, session‑driven
+  codegraph-graphql/    GraphQL HTTP API server (queries + mutations for code + documents)
   codegraph-bench/      Benchmarks (criterion search benches, storage benches, codspeed)
   codegraph/            CLI lifecycle (init/deinit/embed/serve --mcp) + watcher (notify + debounced full re‑index)
 ```
@@ -37,30 +39,41 @@ files → ignore::WalkBuilder → rayon parse pool (tree‑sitter, 14 langs)
       MCP server / CLI lifecycle
 ```
 
-## 📄 Supported Formats
+## 📄 Document Formats (codegraph-docs)
 
-CodeGraph-docs now supports parsing the following configuration file formats:
+CodeGraph-docs supports parsing structured configuration and document files into a unified document graph:
 
-| Format | Parser | Status |
-|--------|--------|--------|
-| YAML | YamlParser | ✅ Implemented |
-| JSON | JsonParser | ✅ Implemented |
-| TOML | TomlParser | ✅ Implemented |
-| **HCL** (HashiCorp Configuration Language) | **HclParser** | **✅ New** |
-| **Terraform (.tf)** | **HclParser** | **✅ New** |
+| Format | Extensions | Parser | Status |
+|--------|------------|--------|--------|
+| YAML | `.yaml`, `.yml` | YamlParser | ✅ Implemented |
+| JSON | `.json` | JsonParser | ✅ Implemented |
+| TOML | `.toml` | TomlParser | ✅ Implemented |
+| **HCL** | `.hcl`, `.tf` | HclParser | ✅ Implemented |
 
-HCL and Terraform files can now be indexed and analyzed through the codegraph CLI, enabling semantic understanding of HashiCorp configuration files.
+### Document Graph
 
-## 📄 Supported Formats (in crates/codegraph-docs/src/parsers/mod.rs):
+Parsed documents are stored in a `DocumentGraph` backed by `codegraph-graph`'s `InMemoryStorage` (persistent tries) with `Search<DocToken>` indices for path, type, value, struct, and pattern queries.
 
-Format    Parser        Status
-━━━━━━━━  ━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━
-   YAML      YamlParser    ✅ Implemented
- ────────  ────────────  ────────────────
-   JSON      JsonParser    ✅ Implemented
- ────────  ────────────  ────────────────
-   TOML      TomlParser    ✅ Implemented
- ────────  ────────────  ────────────────
-   HCL      HclParser    ✅ New
- ────────  ────────────  ────────────────
-   Terraform (.tf)      HclParser    ✅ New
+**Access points:**
+- **CLI**: `codegraph doc ingest <path>`, `codegraph doc search`, `codegraph doc hydrate <id>`, `codegraph doc list`, `codegraph doc stats`
+- **MCP**: `codegraph_doc_ingest`, `codegraph_doc_search`, `codegraph_doc_hydrate`, `codegraph_doc_list`, `codegraph_doc_stats`
+- **GraphQL**: `docList`, `docSearch`, `docStats` queries and `docIngest`, `docStats` mutations
+
+**Format auto-detection**: `.tf`/`.hcl` → hcl, `.yaml`/`.yml` → yaml, `.json` → json, `.toml` → toml.
+
+### Crate Structure
+
+```
+codegraph-docs/
+  ├── lib.rs            Re-exports (DocConfig, DocumentGraph, DocToken, DocParser, ...)
+  ├── config.rs         DocConfig (id bases, bloom cap)
+  ├── graph.rs          DocumentGraph, NodePayload, DocStats
+  ├── ir.rs             Document, Node, Kind, Scalar, ByteSpan
+  ├── tokenize.rs       DocToken (8-byte structural token)
+  └── parsers/
+      ├── mod.rs        DocParser trait, build_document(), all parsers
+      ├── hcl.rs        HclParser (hcl-rs)
+      ├── yaml.rs       YamlParser (serde_yaml)
+      ├── json.rs       JsonParser (serde_json)
+      └── toml.rs       TomlParser (toml)
+```

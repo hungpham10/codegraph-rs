@@ -17,6 +17,7 @@ codegraph-extract   = { path = "../codegraph-extract" }
 codegraph-mcp       = { path = "../codegraph-mcp", features = ["http"] }
 codegraph-graphql   = { path = "../codegraph-graphql" }
 codegraph-installer = { path = "../codegraph-installer" }
+codegraph-docs      = { path = "../codegraph-docs" }
 clap = { workspace = true }
 tokio = { workspace = true }
 notify = { workspace = true }
@@ -27,6 +28,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
 indicatif = "0.18.6"
+serde_json = { workspace = true }
 
 [features]
 # Mặc định bật RDBMS (Postgres/MySQL) để CLI + MCP server có thể serve backend

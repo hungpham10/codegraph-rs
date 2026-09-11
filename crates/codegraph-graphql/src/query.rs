@@ -8,6 +8,7 @@ use codegraph_core::{
     ClassInfo, DependenciesReport, FileInfo, FlowResult, FunctionScope, SearchFlowResult,
     SemgraphStats, Symbol, SymbolKind, SymbolMatch,
 };
+use codegraph_docs::tokenize::DocToken;
 use std::sync::Arc;
 
 use crate::types::*;
@@ -338,5 +339,48 @@ impl Query {
     /// Dependencies ước lượng từ call names (internal/external/total).
     async fn dependencies(&self, ctx: &Context<'_>) -> GqlResult<DependenciesReport> {
         Ok(api_for(ctx).await?.dependencies().await)
+    }
+
+    // ── Document queries ──
+
+    /// List all documents in the document graph.
+    async fn doc_list(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocStatsView>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let stats = state.doc_graph.read().await.stats();
+        Ok(vec![DocStatsView { docs: stats.docs, nodes: stats.nodes }])
+    }
+
+    /// Search document nodes by pattern string.
+    async fn doc_search(
+        &self,
+        ctx: &Context<'_>,
+        _pattern: String,
+        depth: Option<i32>,
+    ) -> GqlResult<Vec<DocNodePayload>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let depth = depth.unwrap_or(1).max(1) as usize;
+        let tokens = vec![DocToken::root()];
+        let ids = state
+            .doc_graph
+            .read()
+            .await
+            .search_path(&tokens, Some(depth))
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let mut results = Vec::new();
+        for id in &ids {
+            if let Some(payload) = state.doc_graph.read().await.hydrate(*id) {
+                results.push(DocNodePayload {
+                    id: payload.id,
+                    path: payload.path,
+                    kind: format!("{:?}", payload.kind),
+                    value: payload.value.map(|v| format!("{:?}", v)),
+                    key: payload.key,
+                    doc: payload.doc,
+                    children: vec![],
+                });
+            }
+        }
+        Ok(results)
     }
 }

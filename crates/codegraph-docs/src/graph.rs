@@ -402,11 +402,11 @@ pub struct DocStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_graph::storage::InMemoryStorage;
+    use codegraph_graph::InMemoryStorage;
 
     #[test]
     fn new_graph() {
-        let storage = Arc::new(RwLock::new(InMemoryStorage::default()));
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
         let config = DocConfig::default();
         let graph = DocumentGraph::new(storage, config);
         assert_eq!(graph.stats().docs, 0);

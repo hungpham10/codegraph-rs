@@ -22,9 +22,12 @@ pub use http::serve_http;
 pub use session::{DetailLevel, InitOutcome, OutputStyle, Session};
 pub use stdio::serve_stdio;
 
+use codegraph_graph::InMemoryStorage;
 use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock as TokioRwLock;
 
 use codegraph_api::{GraphApi, SearchSessionStore};
+use codegraph_docs::{DocConfig, DocumentGraph};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
@@ -50,6 +53,8 @@ pub struct CodegraphServer {
     /// Bật output Mermaid cho `codegraph_mermaid` (diagram visualization). Tắt →
     /// tool trả lỗi rõ ràng. Tương ứng flag `--mermaid` ở CLI.
     mermaid: bool,
+    /// Document graph for structured document operations (HCL, YAML, JSON, TOML).
+    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
 }
 
 impl CodegraphServer {
@@ -61,11 +66,15 @@ impl CodegraphServer {
     /// `new()` nhưng seed output format từ CLI lúc khởi động
     /// (`codegraph serve --mcp --format=...`), và flag `--mermaid`.
     pub fn new_with_format(format: OutputStyle, mermaid: bool) -> Self {
+        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
+            Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(storage, DocConfig::default())));
         Self {
             session: Session::new_with_format(format),
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
             search_sessions: Arc::new(SearchSessionStore::new()),
             mermaid,
+            doc_graph,
         }
     }
 
@@ -82,11 +91,15 @@ impl CodegraphServer {
         format: OutputStyle,
         mermaid: bool,
     ) -> anyhow::Result<Self> {
+        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
+            Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(storage, DocConfig::default())));
         Ok(Self {
             session: Session::with_root_and_format(root, format).await?,
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
             search_sessions: Arc::new(SearchSessionStore::new()),
             mermaid,
+            doc_graph,
         })
     }
 
@@ -211,6 +224,47 @@ impl CodegraphServer {
 
         let detail = self.session.detail().await;
         let format = self.session.format().await;
+        // Document tools — don't require session ready.
+        if name.starts_with("codegraph_doc_") {
+            let doc_graph = self.doc_graph.clone();
+            return match name {
+                "codegraph_doc_ingest" => {
+                    let path = args.get("path").and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::invalid_params("codegraph_doc_ingest requires `path`", None))?;
+                    let format = args.get("format").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    tools::dispatch_doc_ingest(doc_graph, path, format).await
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                        .map(|text| ToolOutput::Text { text, source_bytes: 0 })
+                }
+                "codegraph_doc_search" => {
+                    let pattern = args.get("pattern").and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::invalid_params("codegraph_doc_search requires `pattern`", None))?;
+                    let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    tools::dispatch_doc_search(doc_graph, pattern, depth).await
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                        .map(|text| ToolOutput::Text { text, source_bytes: 0 })
+                }
+                "codegraph_doc_hydrate" => {
+                    let node_id = args.get("node_id").and_then(|v| v.as_u64())
+                        .ok_or_else(|| McpError::invalid_params("codegraph_doc_hydrate requires `node_id`", None))?;
+                    tools::dispatch_doc_hydrate(doc_graph, node_id).await
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                        .map(|text| ToolOutput::Text { text, source_bytes: 0 })
+                }
+                "codegraph_doc_list" => {
+                    tools::dispatch_doc_list(doc_graph).await
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                        .map(|text| ToolOutput::Text { text, source_bytes: 0 })
+                }
+                "codegraph_doc_stats" => {
+                    tools::dispatch_doc_stats(doc_graph).await
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                        .map(|text| ToolOutput::Text { text, source_bytes: 0 })
+                }
+                _ => Err(McpError::method_not_found::<rmcp::model::CallToolRequestMethod>()),
+            };
+        }
+
         let dispatch = match name {
             "codegraph_sandbox" => {
                 codegraph_api::tools::dispatch_sandbox(&root, sgi.clone(), args.clone()).await
