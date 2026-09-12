@@ -10,6 +10,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::model::{EntryPoint, ExportEntry};
+
 /// Trích xuất toàn bộ thông tin từ binary thành `ParseResult`.
 /// Gọi `aaa` một lần trong session, rồi query.
 pub fn extract_binary(
@@ -70,12 +72,23 @@ fn do_extract(
 
     // 1. Functions (`aflj`)
     let functions = parse_aflj(session)?;
-    // Parse exports (`iEj`) for JNI address-based detection (catches stripped binaries).
+    // Parse exports (`iEj`) — JNI detection + index export như entrypoint cho link chéo.
     let exports = parse_iej(session)?;
     let jni_export_map: HashMap<u64, String> = exports
         .iter()
         .filter(|e| is_jni_name(e.name.as_deref().unwrap_or("")))
         .filter_map(|e| e.vaddr.map(|v| (v, e.name.clone().unwrap_or_default())))
+        .collect();
+    // Export theo vaddr — function trùng địa chỉ chỉ cần gắn annotation.
+    let export_by_addr: HashMap<u64, &ExportEntry> = exports
+        .iter()
+        .filter_map(|e| e.vaddr.map(|v| (v, e)))
+        .collect();
+    // Entry points (`iej`) — điểm bắt đầu phân tích executable.
+    let entrypoints = parse_entrypoints(session)?;
+    let entry_by_addr: HashMap<u64, &EntryPoint> = entrypoints
+        .iter()
+        .filter_map(|e| e.vaddr.map(|v| (v, e)))
         .collect();
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut chains: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -103,12 +116,26 @@ fn do_extract(
         fn_id_to_name.insert(id, name.clone());
         // r2 6.x tự sinh symbol C++: class.X, method.Class.foo, namespace.X, enum.X
         let (kind, name) = classify_symbol(&raw_name, &name);
-        // JNI enrichment: name-based + address-based (via iEj export table).
+        // Enrichment theo địa chỉ: JNI (Java_/JNI_), export table, entry point.
         let mut annotations = Vec::new();
         if is_jni_name(&name) || jni_export_map.contains_key(&addr) {
             annotations.push(Annotation {
                 name: "jni".to_string(),
                 args: HashMap::new(),
+                line: 0,
+            });
+        }
+        if let Some(export) = export_by_addr.get(&addr) {
+            annotations.push(export_annotation(export));
+        }
+        if let Some(ep) = entry_by_addr.get(&addr) {
+            let mut args = HashMap::new();
+            if let Some(n) = &ep.name {
+                args.insert("name".to_string(), n.clone());
+            }
+            annotations.push(Annotation {
+                name: "entrypoint".to_string(),
+                args,
                 line: 0,
             });
         }
@@ -130,35 +157,85 @@ fn do_extract(
         });
     }
 
+    // 1b. Exports không trùng function nào (data export, stripped binary…) —
+    // tạo symbol riêng để bên ngoài link vào được theo tên export.
+    for export in &exports {
+        let Some(vaddr) = export.vaddr else { continue };
+        if fn_by_addr.contains_key(&vaddr) {
+            continue;
+        }
+        let raw_name = export
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("exp.{vaddr:x}"));
+        let name = demangle(&strip_r2_prefix(&raw_name));
+        let (kind, name) = classify_symbol(&raw_name, &name);
+        let id = next_id;
+        next_id += 1;
+        fn_by_addr.insert(vaddr, id);
+        fn_id_to_name.insert(id, name.clone());
+        let mut annotations = Vec::new();
+        if is_jni_name(&name) || jni_export_map.contains_key(&vaddr) {
+            annotations.push(Annotation {
+                name: "jni".to_string(),
+                args: HashMap::new(),
+                line: 0,
+            });
+        }
+        annotations.push(export_annotation(export));
+        symbols.push(Symbol {
+            id,
+            name,
+            kind,
+            scope: codegraph_core::ScopeLevel::Global,
+            scope_id: 0,
+            type_ref: 0,
+            type_name: None,
+            file: path_str.to_string(),
+            line: vaddr.try_into().unwrap_or(0),
+            end_line: vaddr
+                .saturating_add(export.size.unwrap_or(0))
+                .try_into()
+                .unwrap_or(u32::MAX),
+            signature: Some(format!(
+                "export ({})",
+                export.type_.as_deref().unwrap_or("?")
+            )),
+            doc: None,
+            annotations,
+            language: "binary".to_string(),
+        });
+    }
+
     // 2. Imports (`iij`) — tạo symbol; bỏ qua function entry "sym.imp."
     let imports = parse_iij(session)?;
     let mut import_name_to_id: HashMap<String, u64> = HashMap::new();
     let mut plt_by_addr: HashMap<u64, String> = HashMap::new();
     for imp in &imports {
+        // Giữ tên thuần làm name — bên ngoài link vào theo đúng tên hàm library.
+        // Tên library đưa vào type_name/annotation args thay vì đổi name.
         let clean = imp.import.as_deref().unwrap_or("?");
-        let count = imports
-            .iter()
-            .filter(|i| i.import.as_deref() == Some(clean))
-            .count();
-        let name = if count > 1 {
-            format!("{clean} ({})", imp.lib.as_deref().unwrap_or("?"))
-        } else {
-            clean.to_string()
-        };
         let id = next_id;
         next_id += 1;
         import_name_to_id.insert(clean.to_string(), id);
         if let Some(plt) = imp.plt {
-            plt_by_addr.insert(plt, name.clone());
+            plt_by_addr.insert(plt, clean.to_string());
+        }
+        let mut import_args = HashMap::new();
+        if let Some(lib) = &imp.lib {
+            import_args.insert("lib".to_string(), lib.clone());
+        }
+        if let Some(bind) = &imp.bind {
+            import_args.insert("bind".to_string(), bind.clone());
         }
         symbols.push(Symbol {
             id,
-            name,
+            name: clean.to_string(),
             kind: SymbolKind::Function,
             scope: codegraph_core::ScopeLevel::Global,
             scope_id: 0,
             type_ref: 0,
-            type_name: None,
+            type_name: imp.lib.clone(),
             file: path_str.to_string(),
             line: imp.plt.unwrap_or(0).try_into().unwrap_or(0),
             end_line: 0,
@@ -166,7 +243,7 @@ fn do_extract(
             doc: imp.lib.clone(),
             annotations: vec![Annotation {
                 name: "import".to_string(),
-                args: HashMap::new(),
+                args: import_args,
                 line: 0,
             }],
             language: "binary".to_string(),
@@ -246,6 +323,27 @@ fn parse_iij(session: &mut dyn R2Client) -> Result<Vec<ImportEntry>, Error> {
 
 fn parse_izj(session: &mut dyn R2Client) -> Result<Vec<StrEntry>, Error> {
     parse_array(session.cmdj("izj")?)
+}
+
+/// Parse entry points từ `iej` — điểm bắt đầu phân tích executable.
+fn parse_entrypoints(session: &mut dyn R2Client) -> Result<Vec<EntryPoint>, Error> {
+    parse_array(session.cmdj("iej")?)
+}
+
+/// Annotation `"export"` kèm bind/type nếu có — dùng cho link chéo giữa binary.
+fn export_annotation(export: &ExportEntry) -> Annotation {
+    let mut args = HashMap::new();
+    if let Some(bind) = &export.bind {
+        args.insert("bind".to_string(), bind.clone());
+    }
+    if let Some(t) = &export.type_ {
+        args.insert("type".to_string(), t.clone());
+    }
+    Annotation {
+        name: "export".to_string(),
+        args,
+        line: 0,
+    }
 }
 
 fn build_signature(addr: u64, size: u64, entry: &FnEntry) -> String {
@@ -705,5 +803,116 @@ mod tests {
         let addr = 4194304u64;
         assert!(jni_export_map.contains_key(&addr));
         // The function with this addr would get jni annotation even if r2 renamed it
+    }
+
+    struct FullMock {
+        responses: HashMap<String, Value>,
+    }
+    impl R2Client for FullMock {
+        fn cmd(&mut self, _cmd: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+        fn cmdj(&mut self, cmd: &str) -> Result<Value, Error> {
+            Ok(self.responses.get(cmd).cloned().unwrap_or(json!([])))
+        }
+    }
+
+    #[test]
+    fn test_extract_entrypoint_export_annotations() {
+        let mock = FullMock {
+            responses: HashMap::from([
+                (
+                    "aflj".to_string(),
+                    json!([
+                        {"addr": 4196, "name": "method.Foo.bar", "size": 16}
+                    ]),
+                ),
+                (
+                    "iEj".to_string(),
+                    json!([
+                        {"name": "method.Foo.bar", "vaddr": 4196, "bind": "GLOBAL", "type": "FUNC"},
+                        {"name": "exported_data", "vaddr": 8192, "bind": "GLOBAL", "type": "OBJ"}
+                    ]),
+                ),
+                (
+                    "iej".to_string(),
+                    json!([{"vaddr": 4196, "name": "entry0"}]),
+                ),
+            ]),
+        };
+        let result = do_extract(
+            &mut FullMock {
+                responses: mock.responses.clone(),
+            },
+            Path::new("/tmp/fake.so"),
+            0,
+            false,
+            AnalysisDepth::default(),
+        )
+        .unwrap();
+
+        let func = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "method.Foo.bar")
+            .expect("function symbol phải tồn tại");
+        assert!(
+            func.annotations.iter().any(|a| a.name == "export"),
+            "function trùng vaddr export phải gắn annotation export"
+        );
+        assert!(
+            func.annotations.iter().any(|a| a.name == "entrypoint"),
+            "function trùng vaddr entrypoint phải gắn annotation entrypoint"
+        );
+        // Export không trùng function → symbol riêng.
+        let data_export = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "exported_data")
+            .expect("export-only symbol phải được tạo");
+        assert!(data_export.annotations.iter().any(|a| a.name == "export"));
+    }
+
+    #[test]
+    fn test_extract_import_keeps_clean_name() {
+        let mock = FullMock {
+            responses: HashMap::from([
+                ("aflj".to_string(), json!([])),
+                (
+                    "iij".to_string(),
+                    json!([
+                        {"import": "memcpy", "plt": 100, "lib": "libc.so"},
+                        {"import": "memcpy", "plt": 200, "lib": "libb.so"}
+                    ]),
+                ),
+            ]),
+        };
+        let result = do_extract(
+            &mut FullMock {
+                responses: mock.responses.clone(),
+            },
+            Path::new("/tmp/fake.so"),
+            0,
+            false,
+            AnalysisDepth::default(),
+        )
+        .unwrap();
+
+        let imports: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.annotations.iter().any(|a| a.name == "import"))
+            .collect();
+        assert_eq!(imports.len(), 2, "2 import entries → 2 symbol");
+        assert!(
+            imports.iter().all(|s| s.name == "memcpy"),
+            "import phải giữ tên thuần (không đổi thành 'memcpy (lib)')"
+        );
+        assert!(
+            imports
+                .iter()
+                .any(|s| s.type_name.as_deref() == Some("libc.so")),
+            "tên library phải nằm trong type_name"
+        );
     }
 }

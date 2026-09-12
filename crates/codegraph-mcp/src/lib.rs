@@ -314,6 +314,18 @@ impl CodegraphServer {
             };
         }
 
+        // Binary tools — dataset riêng, lazy; mở per-call (open là O(1),
+        // search contains đi radix trie persist).
+        if name.starts_with("codegraph_binary_") {
+            return match tools::dispatch_binary(&root, name, args).await {
+                Ok(text) => Ok(ToolOutput::Text {
+                    text,
+                    source_bytes: 0,
+                }),
+                Err(e) => Ok(ToolOutput::Error(e.to_string())),
+            };
+        }
+
         let dispatch = match name {
             "codegraph_sandbox" => {
                 codegraph_api::tools::dispatch_sandbox(&root, sgi.clone(), args.clone()).await

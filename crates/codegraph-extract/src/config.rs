@@ -71,6 +71,10 @@ struct ConfigFile {
     /// Document graph — ingest tài liệu cấu trúc lúc `codegraph init`.
     #[serde(default)]
     docgraph: DocGraphSection,
+    /// Binary graph — dataset riêng cho symbol binary (`[bingraph]`).
+    #[cfg(feature = "binary")]
+    #[serde(default)]
+    bingraph: BinGraphSection,
 
     /// Phân tích binary (radare2) — feature `binary`.
     #[cfg(feature = "binary")]
@@ -141,6 +145,30 @@ pub struct DocGraphStorageSection {
     pub dsn: Option<String>,
 }
 
+/// Section `[bingraph]` — cấu hình binary graph: dataset riêng (mặc định
+/// `.codegraph/binary.sqlite`) cho symbol binary, tách khỏi code index và
+/// docs để query search/list chạy lazy trên SQL index không phải rebuild RAM.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BinGraphSection {
+    /// Bật binary graph (mặc định bật).
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// Override storage — hiện chỉ hỗ trợ sqlite; backend khác → in-memory + warn.
+    #[serde(default)]
+    storage: Option<DocGraphStorageSection>,
+    /// Base id cho symbol binary graph (mặc định 2e9 — không đụng dải docs
+    /// 1e9/3e9 và dải code index).
+    #[serde(default)]
+    bin_base: Option<u64>,
+}
+
+impl BinGraphSection {
+    /// Binary graph có bật hay không (mặc định bật).
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
 impl DocGraphSection {
     /// Ingest docs có bật hay không: `enabled` override, mặc định = có `paths`.
     pub fn is_enabled(&self) -> bool {
@@ -193,6 +221,9 @@ pub struct ExtractConfig {
     pub embedding: codegraph_graph::embeddings::EmbeddingConfig,
     /// Cấu hình document graph — đọc từ `[docgraph]`.
     pub docgraph: DocGraphSection,
+    /// Cấu hình binary graph — đọc từ `[bingraph]`.
+    #[cfg(feature = "binary")]
+    pub bingraph: BinGraphSection,
     /// Cấu hình phân tích binary (radare2).
     #[cfg(feature = "binary")]
     pub binary: BinaryConfig,
@@ -253,6 +284,8 @@ impl ExtractConfig {
                 dsns: file.storage.dsns,
             },
             docgraph: file.docgraph,
+            #[cfg(feature = "binary")]
+            bingraph: file.bingraph,
             #[cfg(feature = "binary")]
             binary: file.binary.unwrap_or_default(),
         }
@@ -383,6 +416,48 @@ impl ExtractConfig {
             StorageKind::Redis => self.storage.dsn.clone(),
             StorageKind::Memory | StorageKind::Postgres | StorageKind::MySql => None,
         }
+    }
+
+    /// DSN dataset **riêng** cho binary graph (`[bingraph]`) — dataset chạy trên
+    /// trait `Storage` nên hỗ trợ mọi backend local/remote:
+    /// - `[bingraph.storage] dsn` override → dùng nguyên văn.
+    /// - Mặc định theo backend kind (override được bằng `[bingraph.storage] type`):
+    ///   - sqlite → `sqlite://<root>/.codegraph/binary.sqlite`
+    ///   - lmdb   → `lmdb://<root>/.codegraph/binary.lmdb`
+    ///   - redis  → DSN của `[storage]` (keyspace `codegraph:binary`)
+    ///   - memory / RDBMS → `None` (in-memory + warn ở caller)
+    #[cfg(feature = "binary")]
+    pub fn bingraph_dsn(&self, root: &Utf8Path) -> Option<String> {
+        if let Some(dsn) = self
+            .bingraph
+            .storage
+            .as_ref()
+            .and_then(|s| s.dsn.as_deref())
+        {
+            return Some(dsn.to_string());
+        }
+        let kind = self
+            .bingraph
+            .storage
+            .as_ref()
+            .and_then(|s| s.type_.as_deref())
+            .map(StorageKind::parse)
+            .unwrap_or(self.storage.kind);
+        match kind {
+            StorageKind::Sqlite => Some(format!(
+                "sqlite://{}",
+                project_dir(root).join("binary.sqlite")
+            )),
+            StorageKind::Lmdb => Some(format!("lmdb://{}", project_dir(root).join("binary.lmdb"))),
+            StorageKind::Redis => self.storage.dsn.clone(),
+            _ => None,
+        }
+    }
+
+    /// Base id cho symbol binary graph (mặc định 2e9).
+    #[cfg(feature = "binary")]
+    pub fn bin_base(&self) -> u64 {
+        self.bingraph.bin_base.unwrap_or(2_000_000_000)
     }
 
     /// Config document graph + danh sách file khớp glob `[docgraph] paths`

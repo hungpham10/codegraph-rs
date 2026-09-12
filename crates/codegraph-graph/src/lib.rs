@@ -50,7 +50,7 @@ pub use crate::storage::mysql::MySqlStorage;
 pub use crate::storage::postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use crate::storage::sqlite::SqliteStorage;
-pub use crate::storage::{InMemoryStorage, IndexCounts, Storage, Tx};
+pub use crate::storage::{InMemoryStorage, IndexCounts, Storage, StorageError, Tx};
 // Sub-traits of `Storage` — callers that need only one facet (e.g. a chain-engine
 // read path) can name it directly instead of taking the full umbrella.
 #[cfg(feature = "bloom-search")]
@@ -131,6 +131,13 @@ fn serr_search(e: crate::search::Error) -> Error {
 /// - `redis://...`     → `RedisStorage` với keyspace prefix `codegraph:docs`
 ///   (feature `redis`) — tách khỏi index `codegraph:idx:<db>`
 pub async fn open_doc_storage(dsn: &str) -> Result<Arc<RwLock<dyn Storage>>> {
+    open_keyspace_storage(dsn, "codegraph:docs").await
+}
+
+/// Mở storage cho một dataset theo DSN + keyspace (backend redis dùng prefix
+/// này để tách dữ liệu; sqlite/lmdb tách bằng file riêng nên bỏ qua keyspace).
+/// Dùng chung cho docs (`codegraph:docs`) và binary graph (`codegraph:binary`).
+pub async fn open_keyspace_storage(dsn: &str, keyspace: &str) -> Result<Arc<RwLock<dyn Storage>>> {
     if let Some(path) = dsn.strip_prefix("sqlite://") {
         #[cfg(feature = "sqlite")]
         {
@@ -164,18 +171,19 @@ pub async fn open_doc_storage(dsn: &str) -> Result<Arc<RwLock<dyn Storage>>> {
         {
             let client =
                 redis::Client::open(dsn).map_err(|e| Error::Db(format!("redis client: {e}")))?;
-            let storage = crate::storage::redis::RedisStorage::new(client, "codegraph:docs")
+            let storage = crate::storage::redis::RedisStorage::new(client, keyspace)
                 .await
                 .map_err(serr)?;
             return Ok(Arc::new(RwLock::new(storage)));
         }
         #[cfg(not(feature = "redis"))]
         {
+            let _ = keyspace;
             return Err(backend_unavailable("redis"));
         }
     }
     Err(Error::Db(format!(
-        "open_doc_storage: DSN scheme không hỗ trợ: {dsn}"
+        "open_keyspace_storage: DSN scheme không hỗ trợ: {dsn}"
     )))
 }
 

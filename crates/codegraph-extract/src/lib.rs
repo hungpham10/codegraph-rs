@@ -13,6 +13,12 @@ mod orchestrator;
 mod project;
 mod walker;
 
+/// Binary graph — dataset riêng cho symbol binary (feature `binary`).
+#[cfg(feature = "binary")]
+pub mod bingraph;
+
+#[cfg(feature = "binary")]
+pub use bingraph::{BinFlag, BinPage, BinSymbolRow, BinaryGraph, ListOrder, NameMatch};
 pub use config::{DocGraphSection, ExtractConfig, HeaderLanguage, DEFAULT_CONFIG_TOML};
 pub use docgraph::open_doc_graph;
 pub use orchestrator::{ExtractStats, Orchestrator};

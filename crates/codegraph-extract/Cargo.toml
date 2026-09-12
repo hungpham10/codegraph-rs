@@ -32,6 +32,8 @@ tree-sitter-swift     = { workspace = true, optional = true }
 # tree-sitter-kotlin    = { workspace = true, optional = true }
 tree-sitter-lua       = { workspace = true, optional = true }
 codegraph-binary = { path = "../codegraph-binary", optional = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
 ignore = { workspace = true }
 rayon = { workspace = true }
 camino = { workspace = true }
