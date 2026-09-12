@@ -346,7 +346,13 @@ impl Query {
     /// List all documents in the document graph.
     async fn doc_list(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocStatsView>> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let stats = state.doc_graph.read().await.stats();
+        let stats = state
+            .doc_graph
+            .read()
+            .await
+            .stats()
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(vec![DocStatsView {
             docs: stats.docs,
             nodes: stats.nodes,
@@ -372,7 +378,7 @@ impl Query {
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         let mut results = Vec::new();
         for id in &ids {
-            if let Some(payload) = state.doc_graph.read().await.hydrate(*id) {
+            if let Some(payload) = state.doc_graph.read().await.hydrate(*id).await {
                 results.push(DocNodePayload {
                     id: payload.id,
                     path: payload.path,

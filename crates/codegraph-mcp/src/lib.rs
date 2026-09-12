@@ -12,6 +12,7 @@
 
 #[cfg(feature = "http")]
 pub mod http;
+mod docgraph;
 mod session;
 pub mod stdio;
 mod tools;
@@ -19,6 +20,7 @@ mod usage;
 
 #[cfg(feature = "http")]
 pub use http::serve_http;
+pub use docgraph::SharedDocGraph;
 pub use session::{DetailLevel, InitOutcome, OutputStyle, Session};
 pub use stdio::serve_stdio;
 
@@ -45,7 +47,7 @@ pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Server MCP. Transport-agnostic: stdio (1 process = 1 session) mount trực
 /// tiếp, http (tương lai) sẽ xoay vòng session store riêng.
 pub struct CodegraphServer {
-    session: Session,
+    session: Arc<Session>,
     usage: Arc<Mutex<usage::UsageStats>>,
     /// Session store cho search resumable — sống qua nhiều tool call để resume
     /// id (trả về khi timeout) có thể retry được.
@@ -54,7 +56,8 @@ pub struct CodegraphServer {
     /// tool trả lỗi rõ ràng. Tương ứng flag `--mermaid` ở CLI.
     mermaid: bool,
     /// Document graph for structured document operations (HCL, YAML, JSON, TOML).
-    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    /// Lazy: chỉ giữ root lúc startup, open+rebuild trễ tới doc tool đầu tiên.
+    doc_graph: Arc<SharedDocGraph>,
 }
 
 impl CodegraphServer {
@@ -73,11 +76,11 @@ impl CodegraphServer {
             DocConfig::default(),
         )));
         Self {
-            session: Session::new_with_format(format),
+            session: Arc::new(Session::new_with_format(format)),
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
             search_sessions: Arc::new(SearchSessionStore::new()),
             mermaid,
-            doc_graph,
+            doc_graph: Arc::new(SharedDocGraph::ready(doc_graph)),
         }
     }
 
@@ -94,21 +97,13 @@ impl CodegraphServer {
         format: OutputStyle,
         mermaid: bool,
     ) -> anyhow::Result<Self> {
-        // Document graph mở từ `[docgraph]`/`[storage]` config của root
-        // (dataset riêng, persist qua các phiên). Lỗi config/backend → fallback
-        // in-memory thay vì chặn cả server (doc tools vẫn dùng được per-session).
-        let doc_graph = match codegraph_extract::open_doc_graph(&root).await {
-            Ok(g) => Arc::new(TokioRwLock::new(g)),
-            Err(e) => {
-                tracing::warn!("doc graph open failed ({e}) — fallback in-memory");
-                Arc::new(TokioRwLock::new(DocumentGraph::new(
-                    Arc::new(TokioRwLock::new(InMemoryStorage::default())),
-                    DocConfig::default(),
-                )))
-            }
-        };
+        // Document graph mở LAZY theo `[docgraph]`/`[storage]` config của root
+        // (dataset riêng, persist qua các phiên): startup chỉ giữ root, open +
+        // rebuild (tuyến tính với số node — có thể lâu trên repo document lớn)
+        // trễ tới doc tool đầu tiên. Xem `SharedDocGraph`.
+        let doc_graph = Arc::new(SharedDocGraph::lazy(root.clone()));
         Ok(Self {
-            session: Session::with_root_and_format(root, format).await?,
+            session: Arc::new(Session::with_root_and_format(root, format).await?),
             usage: Arc::new(Mutex::new(usage::UsageStats::default())),
             search_sessions: Arc::new(SearchSessionStore::new()),
             mermaid,
@@ -119,6 +114,24 @@ impl CodegraphServer {
     /// Flag `--mermaid` của server (gate cho `codegraph_mermaid`).
     pub fn mermaid_enabled(&self) -> bool {
         self.mermaid
+    }
+
+    /// Prewarm symbol index ngầm: `initialize` của client không chờ index,
+    /// nhưng tool call đầu tiên sẽ block cho tới khi `SharedGraphIndex` build
+    /// xong snapshot (repo lớn → cả phút). Spawn task build ngay sau khi
+    /// serve bắt đầu — call đầu không còn chờ (hoặc chỉ chờ task này xong).
+    /// Chỉ có ý nghĩa khi session đã pre-seed root (`with_root_and_format`);
+    /// session trống → `ensure_ready` refuse, bỏ qua im lặng.
+    pub fn prewarm_symbol_index(&self) {
+        let session = Arc::clone(&self.session);
+        tokio::spawn(async move {
+            match session.ensure_ready().await {
+                Ok(index) => {
+                    let _ = index.ensure_fresh().await;
+                }
+                Err(e) => tracing::debug!("symbol index prewarm skipped: {e}"),
+            }
+        });
     }
 
     /// Dispatch một tool call đã verify tên. Trả [`ToolOutput::Text`] cho thành
@@ -237,7 +250,8 @@ impl CodegraphServer {
 
         let detail = self.session.detail().await;
         let format = self.session.format().await;
-        // Document tools — don't require session ready.
+        // Document tools — lazy doc graph (SharedDocGraph), không cần session
+        // ready. Open giờ rẻ: `DocumentGraph::open` không materialize nodes.
         if name.starts_with("codegraph_doc_") {
             let doc_graph = self.doc_graph.clone();
             return match name {

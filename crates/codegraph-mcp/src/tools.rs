@@ -3,12 +3,11 @@ use camino::Utf8Path;
 use codegraph_api::{GraphApi, Pagination};
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
-use codegraph_docs::{tokenize::DocToken, DocumentGraph};
 use rmcp::model::Tool;
 use serde::Serialize;
 use serde_json::{json, Value};
+use codegraph_docs::tokenize::DocToken;
 use std::sync::Arc;
-use tokio::sync::RwLock as TokioRwLock;
 
 /// Định nghĩa một MCP tool — single source of truth cho `tools/list`.
 struct ToolDef {
@@ -1070,11 +1069,13 @@ pub(crate) fn omit_defaults(v: &mut Value) {
 // ── Document tool dispatch ──
 
 pub async fn dispatch_doc_ingest(
-    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    doc_graph: Arc<crate::SharedDocGraph>,
     path: &str,
     format: Option<String>,
 ) -> Result<String> {
     let inserted = doc_graph
+        .graph()
+        .await
         .write()
         .await
         .ingest_file(path, format.as_deref())
@@ -1084,12 +1085,14 @@ pub async fn dispatch_doc_ingest(
 }
 
 pub async fn dispatch_doc_search(
-    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    doc_graph: Arc<crate::SharedDocGraph>,
     _pattern: &str,
     depth: usize,
 ) -> Result<String> {
     let tokens = vec![DocToken::root()];
     let ids = doc_graph
+        .graph()
+        .await
         .read()
         .await
         .search_path(&tokens, Some(depth))
@@ -1098,9 +1101,10 @@ pub async fn dispatch_doc_search(
     if ids.is_empty() {
         return Ok("no nodes matched".to_string());
     }
+    let graph = doc_graph.graph().await;
     let mut results = Vec::new();
     for id in &ids {
-        if let Some(payload) = doc_graph.read().await.hydrate(*id) {
+        if let Some(payload) = graph.read().await.hydrate(*id).await {
             results.push(json!({ "id": payload.id, "path": payload.path, "kind": format!("{:?}", payload.kind), "value": payload.value }));
         }
     }
@@ -1108,10 +1112,10 @@ pub async fn dispatch_doc_search(
 }
 
 pub async fn dispatch_doc_hydrate(
-    doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    doc_graph: Arc<crate::SharedDocGraph>,
     node_id: u64,
 ) -> Result<String> {
-    let payload = doc_graph.read().await.hydrate(node_id);
+    let payload = doc_graph.graph().await.read().await.hydrate(node_id).await;
     match payload {
         Some(p) => {
             let json = serde_json::to_string_pretty(&p).map_err(|e| Error::Other(e.to_string()))?;
@@ -1121,13 +1125,27 @@ pub async fn dispatch_doc_hydrate(
     }
 }
 
-pub async fn dispatch_doc_list(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Result<String> {
-    let stats = doc_graph.read().await.stats();
+pub async fn dispatch_doc_list(doc_graph: Arc<crate::SharedDocGraph>) -> Result<String> {
+    let stats = doc_graph
+        .graph()
+        .await
+        .read()
+        .await
+        .stats()
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
     Ok(format!("documents: {}, nodes: {}", stats.docs, stats.nodes))
 }
 
-pub async fn dispatch_doc_stats(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Result<String> {
-    let stats = doc_graph.read().await.stats();
+pub async fn dispatch_doc_stats(doc_graph: Arc<crate::SharedDocGraph>) -> Result<String> {
+    let stats = doc_graph
+        .graph()
+        .await
+        .read()
+        .await
+        .stats()
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
     Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
 }
 

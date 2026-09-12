@@ -209,7 +209,7 @@ impl Mutation {
         let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
             Arc::new(TokioRwLock::new(codegraph_graph::InMemoryStorage::default()));
         let mut graph = DocumentGraph::new(storage, DocConfig::default());
-        let doc_id = graph.stats().docs as u64 + 1;
+        let doc_id = 1; // doc in-memory per-mutation — id không quan trọng
         let doc = parser
             .parse(&path, &source, doc_id)
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
@@ -238,7 +238,7 @@ impl Mutation {
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         let mut results = Vec::new();
         for id in &ids {
-            if let Some(payload) = state.doc_graph.read().await.hydrate(*id) {
+            if let Some(payload) = state.doc_graph.read().await.hydrate(*id).await {
                 results.push(json!({ "id": payload.id, "path": payload.path, "kind": format!("{:?}", payload.kind) }));
             }
         }
@@ -249,7 +249,13 @@ impl Mutation {
     /// Get document stats.
     async fn doc_stats(&self, ctx: &Context<'_>) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let stats = state.doc_graph.read().await.stats();
+        let stats = state
+            .doc_graph
+            .read()
+            .await
+            .stats()
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
     }
 }
