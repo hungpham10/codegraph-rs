@@ -756,12 +756,7 @@ impl BinaryGraph {
         for _ in 0..depth.max(1) {
             let mut next_names = Vec::new();
             for name in &frontier {
-                for caller_id in meta_ids(
-                    &self.storage,
-                    &format!("caller_of:{name}"),
-                )
-                .await?
-                {
+                for caller_id in meta_ids(&self.storage, &format!("caller_of:{name}")).await? {
                     if !seen_ids.insert(caller_id) {
                         continue;
                     }
@@ -857,7 +852,9 @@ impl BinaryGraph {
                 to_id,
                 line: rec.map(|r| r.line).unwrap_or(0),
                 condition: rec.and_then(|r| r.condition.clone()),
-                effect: rec.map(|r| r.effect).unwrap_or(codegraph_core::EffectType::None),
+                effect: rec
+                    .map(|r| r.effect)
+                    .unwrap_or(codegraph_core::EffectType::None),
                 effect_desc: rec.and_then(|r| r.effect_desc.clone()),
                 args: rec.map(|r| r.arg_exprs.clone()).unwrap_or_default(),
             });
@@ -943,8 +940,20 @@ mod tests {
                     4096,
                     vec![ann("entrypoint")],
                 ),
-                sym(sid(2), "foo", SymbolKind::Function, 4200, vec![ann("export")]),
-                sym(sid(3), "memcpy", SymbolKind::Function, 100, vec![ann("import")]),
+                sym(
+                    sid(2),
+                    "foo",
+                    SymbolKind::Function,
+                    4200,
+                    vec![ann("export")],
+                ),
+                sym(
+                    sid(3),
+                    "memcpy",
+                    SymbolKind::Function,
+                    100,
+                    vec![ann("import")],
+                ),
                 sym(sid(4), "local_fn", SymbolKind::Function, 5000, Vec::new()),
                 sym(sid(5), "str:6000", SymbolKind::Constant, 6000, Vec::new()),
             ],

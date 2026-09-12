@@ -484,8 +484,7 @@ pub async fn dispatch_with_api(
         "codegraph_callers" => {
             let id = arg_u64(&args, "node")?;
             if let Some(out) =
-                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
-                    .await?
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format).await?
             {
                 return Ok(out);
             }
@@ -502,8 +501,7 @@ pub async fn dispatch_with_api(
         "codegraph_callees" => {
             let id = arg_u64(&args, "node")?;
             if let Some(out) =
-                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
-                    .await?
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format).await?
             {
                 return Ok(out);
             }
@@ -519,8 +517,7 @@ pub async fn dispatch_with_api(
         "codegraph_impact" => {
             let id = arg_u64(&args, "node")?;
             if let Some(out) =
-                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
-                    .await?
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format).await?
             {
                 return Ok(out);
             }
@@ -537,8 +534,7 @@ pub async fn dispatch_with_api(
         "codegraph_flow" => {
             let id = arg_u64(&args, "node")?;
             if let Some(out) =
-                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
-                    .await?
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format).await?
             {
                 return Ok(out);
             }
@@ -985,10 +981,7 @@ fn arg_u64(v: &Value, k: &str) -> Result<u64> {
 
 /// Mở BinaryGraph nếu `id` thuộc dải binary; `None` khi id thường hoặc
 /// `[bingraph]` không mở được (fallback query code index như cũ).
-async fn binary_graph_for(
-    root: &Utf8Path,
-    id: u64,
-) -> Option<codegraph_extract::BinaryGraph> {
+async fn binary_graph_for(root: &Utf8Path, id: u64) -> Option<codegraph_extract::BinaryGraph> {
     let bin_base = codegraph_extract::ExtractConfig::load(root).bin_base();
     if id < bin_base {
         return None;
