@@ -829,7 +829,8 @@ http {
         // 2 args → Array; `${uri}` giữ nguyên trong arg thứ 2.
         let last = doc
             .nodes
-            .iter().rfind(|n| n.parent == Some(set.id))
+            .iter()
+            .rfind(|n| n.parent == Some(set.id))
             .unwrap();
         assert_eq!(
             last.value,
