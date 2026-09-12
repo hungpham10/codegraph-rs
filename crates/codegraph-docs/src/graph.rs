@@ -174,7 +174,8 @@ impl DocumentGraph {
     /// Persist interner — gọi sau mỗi upsert để lần `open()` sau vẫn khớp
     /// token payload đã ghi vào tries.
     async fn persist_interner(&self) -> Result<()> {
-        let blob = serde_json::to_vec(&self.intern.strings()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let blob =
+            serde_json::to_vec(&self.intern.strings()).map_err(|e| anyhow::anyhow!("{e}"))?;
         self.storage
             .write()
             .await
@@ -311,7 +312,11 @@ impl DocumentGraph {
 
     /// Như `hydrate` nhưng giới hạn số tầng con đi xuống (`max_depth = Some(2)`
     /// là payload 2 tầng — giữ payload nhỏ cho LLM trên doc lớn).
-    pub async fn hydrate_depth(&self, node_id: u64, max_depth: Option<usize>) -> Option<NodePayload> {
+    pub async fn hydrate_depth(
+        &self,
+        node_id: u64,
+        max_depth: Option<usize>,
+    ) -> Option<NodePayload> {
         self.hydrate_inner(node_id, max_depth, 0).await
     }
 
@@ -881,7 +886,9 @@ mod tests {
         graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
         drop(graph);
 
-        let reopened = DocumentGraph::open(storage, DocConfig::default()).await.unwrap();
+        let reopened = DocumentGraph::open(storage, DocConfig::default())
+            .await
+            .unwrap();
         let key_id = reopened
             .intern_id("replicas")
             .expect("key `replicas` phải còn trong interner sau reopen");
@@ -910,11 +917,7 @@ mod tests {
         for f in &files {
             doc_ids.push(graph.ingest_file(f.to_str().unwrap(), None).await.unwrap());
         }
-        let node_ids: Vec<u64> = graph
-            .list_docs()
-            .iter()
-            .map(|i| i.root_node_id)
-            .collect();
+        let node_ids: Vec<u64> = graph.list_docs().iter().map(|i| i.root_node_id).collect();
         for d in &doc_ids {
             assert!(
                 !node_ids.contains(d),

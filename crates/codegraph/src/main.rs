@@ -745,7 +745,10 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
                     None => break,
                 }
             }
-            let ids = graph.search_path(&tokens, Some(depth)).await.unwrap_or_default();
+            let ids = graph
+                .search_path(&tokens, Some(depth))
+                .await
+                .unwrap_or_default();
             if ids.is_empty() {
                 let last = pattern.rsplit('.').next().unwrap_or(&pattern);
                 let hits = graph.search_key_substring(last, 100);

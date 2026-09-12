@@ -1142,7 +1142,9 @@ pub async fn dispatch_doc_search(
         let last = pattern.rsplit('.').next().unwrap_or(pattern);
         let hits = graph.search_key_substring(last, 100);
         if hits.is_empty() {
-            return Ok(format!("no nodes matched — key `{last}` not seen in any ingested document"));
+            return Ok(format!(
+                "no nodes matched — key `{last}` not seen in any ingested document"
+            ));
         }
         let results: Vec<Value> = hits
             .iter()
@@ -1249,7 +1251,9 @@ pub async fn dispatch_doc_ingest_dir(
             let p = entry.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().and_then(|e| e.to_str())
+            } else if p
+                .extension()
+                .and_then(|e| e.to_str())
                 .is_some_and(|ext| EXTS.contains(&ext.to_ascii_lowercase().as_str()))
             {
                 files.push(p);

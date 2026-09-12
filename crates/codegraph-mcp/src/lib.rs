@@ -313,15 +313,12 @@ impl CodegraphServer {
                         })
                 }
                 "codegraph_doc_search_value" => {
-                    let query = args
-                        .get("query")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            McpError::invalid_params(
-                                "codegraph_doc_search_value requires `query`",
-                                None,
-                            )
-                        })?;
+                    let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+                        McpError::invalid_params(
+                            "codegraph_doc_search_value requires `query`",
+                            None,
+                        )
+                    })?;
                     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
                     tools::dispatch_doc_search_value(doc_graph, query, limit)
                         .await
@@ -332,17 +329,10 @@ impl CodegraphServer {
                         })
                 }
                 "codegraph_doc_ingest_dir" => {
-                    let path = args
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            McpError::invalid_params(
-                                "codegraph_doc_ingest_dir requires `path`",
-                                None,
-                            )
-                        })?;
-                    let limit =
-                        args.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+                    let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                        McpError::invalid_params("codegraph_doc_ingest_dir requires `path`", None)
+                    })?;
+                    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
                     tools::dispatch_doc_ingest_dir(doc_graph, path, limit)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))
@@ -352,15 +342,9 @@ impl CodegraphServer {
                         })
                 }
                 "codegraph_doc_remove" => {
-                    let doc_id = args
-                        .get("doc_id")
-                        .and_then(|v| v.as_u64())
-                        .ok_or_else(|| {
-                            McpError::invalid_params(
-                                "codegraph_doc_remove requires `doc_id`",
-                                None,
-                            )
-                        })?;
+                    let doc_id = args.get("doc_id").and_then(|v| v.as_u64()).ok_or_else(|| {
+                        McpError::invalid_params("codegraph_doc_remove requires `doc_id`", None)
+                    })?;
                     tools::dispatch_doc_remove(doc_graph, doc_id)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))
