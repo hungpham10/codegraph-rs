@@ -353,6 +353,47 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
+                "codegraph_doc_mine_patterns" => {
+                    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                    let min_count =
+                        args.get("min_count").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                    let max_depth =
+                        args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
+                    tools::dispatch_doc_mine_patterns(doc_graph, top_k, min_count, max_depth)
+                        .await
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                        .map(|text| ToolOutput::Text {
+                            text,
+                            source_bytes: 0,
+                        })
+                }
+                "codegraph_doc_list_patterns" => tools::dispatch_doc_list_patterns(doc_graph)
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))
+                    .map(|text| ToolOutput::Text {
+                        text,
+                        source_bytes: 0,
+                    }),
+                "codegraph_doc_search_struct" => {
+                    let pattern =
+                        args.get("pattern")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                McpError::invalid_params(
+                                    "codegraph_doc_search_struct requires `pattern`",
+                                    None,
+                                )
+                            })?;
+                    let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                    tools::dispatch_doc_search_struct(doc_graph, pattern, depth, limit)
+                        .await
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                        .map(|text| ToolOutput::Text {
+                            text,
+                            source_bytes: 0,
+                        })
+                }
                 "codegraph_doc_list" => tools::dispatch_doc_list(doc_graph)
                     .await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))

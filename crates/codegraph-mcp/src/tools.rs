@@ -335,6 +335,29 @@ fn tool_defs() -> Vec<ToolDef> {
                 "doc_id": { "type": "integer", "description": "Doc id returned by codegraph_doc_ingest / codegraph_doc_list." }
             }, "required": ["doc_id"] }),
         ),
+        tool(
+            "codegraph_doc_mine_patterns",
+            "Mine structural patterns across all ingested documents: counts kind chains (e.g. MAP → FIELD → NUMBER) ending at scalar leaves, assigns stable pattern ids (P#) and indexes them. Results are sorted by document frequency ascending — rare/characteristic patterns first, background noise (freq ≈ 1.0) last.",
+            json!({ "type": "object", "properties": {
+                "top_k": { "type": "integer", "default": 20, "description": "Max patterns to keep." },
+                "min_count": { "type": "integer", "default": 3, "description": "Min node occurrences for a pattern to be kept." },
+                "max_depth": { "type": "integer", "default": 4, "description": "Max kind-chain window length ending at the leaf." }
+            } }),
+        ),
+        tool(
+            "codegraph_doc_list_patterns",
+            "List the mined structural pattern registry (pattern id, kind tokens, node count, doc count, doc frequency) from the last mining run.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "codegraph_doc_search_struct",
+            "Search document nodes by structural kind chain, e.g. `MAP, FIELD, NUMBER`. Results are ranked by IDF — nodes whose surrounding structure is rare across documents rank first; background structures rank last.",
+            json!({ "type": "object", "properties": {
+                "pattern": { "type": "string", "description": "Comma-separated kind labels: MAP, ARRAY, FIELD, INDEX, STRING, NUMBER, BOOL, NULL, ROOT." },
+                "depth": { "type": "integer", "default": 1, "description": "Search depth." },
+                "limit": { "type": "integer", "default": 20, "description": "Max results." }
+            }, "required": ["pattern"] }),
+        ),
         // ── Binary tools (dataset riêng .codegraph/binary.sqlite — lazy SQL) ──
         tool(
             "codegraph_binary_list",
@@ -1117,30 +1140,61 @@ pub async fn dispatch_doc_search(
     let graph = graph.read().await;
     // Pattern "spec.replicas" → [root, FIELD(spec), FIELD(replicas)].
     // Chain radix luôn bắt đầu từ root nên pattern phải là full path;
-    // không match → fallback quét key chứa segment cuối (case-insensitive).
+    // không match → fallback quét key (exact chứa) rồi fuzzy. Segment có
+    // tiền tố `~` (vd `spec.~replcas`) bỏ qua full-path, vào fuzzy trực tiếp.
     let mut tokens = vec![DocToken::root()];
-    let mut unknown_seg = None;
+    let mut unknown_seg = false;
+    let mut fuzzy_seg: Option<String> = None;
     for seg in pattern.split('.') {
+        if let Some(fz) = seg.strip_prefix('~') {
+            fuzzy_seg = Some(fz.to_string());
+            break;
+        }
         match graph.intern_id(seg) {
             Some(id) => tokens.push(DocToken::field(id)),
             None => {
-                unknown_seg = Some(seg.to_string());
+                unknown_seg = true;
                 break;
             }
         }
     }
-    let ids = if unknown_seg.is_none() {
-        graph
-            .search_path(&tokens, Some(depth))
+    // depth = số tầng thừa BÊN DƯỚI pattern; radix filter theo tổng chiều dài
+    // key nên phải cộng với độ dài pattern (depth=1 cho phép 1 segment kế tiếp).
+    let ids = if !unknown_seg && fuzzy_seg.is_none() {
+        // Trie trả nhanh node đại diện; scan bổ sung ĐỦ node trùng path ở
+        // các doc khác (radix leaf chỉ giữ 1 record/chain).
+        let mut ids = graph
+            .search_path(&tokens, Some(tokens.len() - 1 + depth))
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        ids.extend(graph.search_path_scan(&tokens, 100));
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     } else {
         Vec::new()
     };
     if ids.is_empty() {
-        // Fallback: quét key theo segment cuối của pattern.
-        let last = pattern.rsplit('.').next().unwrap_or(pattern);
-        let hits = graph.search_key_substring(last, 100);
+        let last = fuzzy_seg
+            .clone()
+            .unwrap_or_else(|| pattern.rsplit('.').next().unwrap_or(pattern).to_string());
+        let exact = graph.search_key_substring(&last, 100);
+        if !exact.is_empty() {
+            let results: Vec<Value> = exact
+                .iter()
+                .map(|n| {
+                    json!({
+                        "id": n.id,
+                        "doc": n.doc,
+                        "key": n.key,
+                        "kind": format!("{:?}", n.kind),
+                        "value": n.value,
+                    })
+                })
+                .collect();
+            return serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()));
+        }
+        let hits = graph.search_key_fuzzy(&last, 50);
         if hits.is_empty() {
             return Ok(format!(
                 "no nodes matched — key `{last}` not seen in any ingested document"
@@ -1148,13 +1202,14 @@ pub async fn dispatch_doc_search(
         }
         let results: Vec<Value> = hits
             .iter()
-            .map(|n| {
+            .map(|h| {
                 json!({
-                    "id": n.id,
-                    "doc": n.doc,
-                    "key": n.key,
-                    "kind": format!("{:?}", n.kind),
-                    "value": n.value,
+                    "id": h.node.id,
+                    "doc": h.node.doc,
+                    "matched_key": h.matched_key,
+                    "score": (h.score * 1000.0).round() / 1000.0,
+                    "kind": format!("{:?}", h.node.kind),
+                    "value": h.node.value,
                 })
             })
             .collect();
@@ -1175,6 +1230,84 @@ pub async fn dispatch_doc_search(
         }
     }
     serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
+}
+
+/// Search node theo kind chain cấu trúc (vd "MAP, FIELD, NUMBER") — kết quả
+/// rank theo IDF: node thuộc cấu trúc hiếm (ít document chứa) lên trước,
+/// cấu trúc nền (xuất hiện ở ~mọi document) xuống cuối.
+pub async fn dispatch_doc_search_struct(
+    doc_graph: Arc<crate::SharedDocGraph>,
+    pattern: &str,
+    depth: usize,
+    limit: usize,
+) -> Result<String> {
+    let graph = doc_graph.graph().await;
+    let graph = graph.read().await;
+    let tokens: Vec<DocToken> = pattern
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            (!s.is_empty()).then(|| codegraph_docs::parse_kind_label(s))
+        })
+        .collect();
+    if tokens.is_empty() {
+        return Ok("empty pattern — expected kind labels like `MAP, FIELD, NUMBER`".to_string());
+    }
+    let _ = depth; // search_kind_chain match suffix window — depth không áp dụng
+    let ids = graph.search_kind_chain(&tokens, None);
+    if ids.is_empty() {
+        return Ok("no nodes matched this structural pattern".to_string());
+    }
+    let total_docs = graph.list_docs().len();
+    let mut rows: Vec<(f64, Value)> = Vec::new();
+    for id in ids.iter().take(limit * 5) {
+        let Some(payload) = graph.hydrate_depth(*id, Some(1)).await else {
+            continue;
+        };
+        let uniq = graph.pattern_uniqueness(*id, total_docs);
+        rows.push((
+            uniq,
+            json!({
+                "id": payload.id,
+                "doc": payload.doc,
+                "path": payload.path,
+                "key": payload.key,
+                "kind": format!("{:?}", payload.kind),
+                "value": payload.value,
+                "idf": (uniq * 1000.0).round() / 1000.0,
+            }),
+        ));
+    }
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let results: Vec<&Value> = rows.iter().take(limit).map(|(_, v)| v).collect();
+    serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
+}
+
+/// Mine structural patterns — đếm kind chain trên mọi node lá scalar, cấp
+/// pattern id (P#) ổn định, index vào pattern trie. Kết quả sort theo
+/// doc_freq tăng dần: pattern đặc trưng (hiếm) lên đầu, nền (~1.0) cuối.
+pub async fn dispatch_doc_mine_patterns(
+    doc_graph: Arc<crate::SharedDocGraph>,
+    top_k: usize,
+    min_count: usize,
+    max_depth: usize,
+) -> Result<String> {
+    let mined = doc_graph
+        .graph()
+        .await
+        .write()
+        .await
+        .mine_patterns(top_k, min_count, max_depth)
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
+    serde_json::to_string_pretty(&mined).map_err(|e| Error::Other(e.to_string()))
+}
+
+pub async fn dispatch_doc_list_patterns(doc_graph: Arc<crate::SharedDocGraph>) -> Result<String> {
+    let graph = doc_graph.graph().await;
+    let graph = graph.read().await;
+    let entries = graph.list_patterns();
+    serde_json::to_string_pretty(&entries).map_err(|e| Error::Other(e.to_string()))
 }
 
 pub async fn dispatch_doc_search_value(

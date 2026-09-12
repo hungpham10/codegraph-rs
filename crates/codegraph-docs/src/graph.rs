@@ -1,11 +1,11 @@
 use crate::config::DocConfig;
 use crate::intern::Interner;
 use crate::ir::{Document, Kind, Node, Scalar};
-use crate::tokenize::DocToken;
+use crate::tokenize::{DocTag, DocToken};
 use anyhow::Result;
 use codegraph_graph::Search;
 use codegraph_graph::Storage;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -33,6 +33,9 @@ const DOC_META_BASE: u64 = 10_000_000_000;
 /// Sentinel cho interner (mảng string JSON theo thứ tự id). Doc id nằm ở
 /// dải ≥ DOC_ID_BASE nên các slot nhỏ này không đụng doc metadata.
 const DOC_INTERNER_RECORD: u64 = DOC_META_BASE + 1;
+/// Sentinel cho pattern registry (JSON) — pattern id P# giữ ổn định qua
+/// các lần mine và qua restart.
+const DOC_PATTERNS_RECORD: u64 = DOC_META_BASE + 2;
 
 /// Default sharding for document tries (mirrors code graph).
 const DEFAULT_SHARDING: usize = 64;
@@ -53,10 +56,12 @@ pub struct DocumentGraph {
     type_trie: Search<DocToken>,
     value_trie: Search<DocToken>,
     struct_trie: Search<DocToken>,
-    /// Pattern-mining trie — reserve cho tính năng mined patterns, chưa có
-    /// reader (trước đây chỉ được clear trong rebuild).
-    #[allow(dead_code)]
+    /// Pattern-mining trie — index các structural pattern đã mine (leaf lưu
+    /// `PATTERN_RECORD_BASE + pattern_id`).
     pattern_trie: Search<DocToken>,
+    /// Registry các pattern đã mine — pattern id (P#) ổn định qua các lần
+    /// mine và qua restart. Persist ở `DOC_PATTERNS_RECORD`.
+    patterns: std::sync::Mutex<PatternRegistry>,
     /// Base id global cho node/doc — id nhỏ hơn đây là id local của parser.
     doc_base: u64,
     next_doc_id: u64,
@@ -83,6 +88,7 @@ impl DocumentGraph {
             value_trie: Search::with_shard_bias(sharding, storage.clone(), 2),
             struct_trie: Search::with_shard_bias(sharding, storage.clone(), 3),
             pattern_trie: Search::with_shard_bias(sharding, storage.clone(), 4),
+            patterns: std::sync::Mutex::new(PatternRegistry::default()),
             doc_base,
             next_doc_id: DOC_ID_BASE,
             next_node_id: doc_base,
@@ -131,6 +137,7 @@ impl DocumentGraph {
         if !graph.restore_interner().await? {
             graph.rebuild_interner_from_docs();
         }
+        graph.restore_patterns().await?;
         graph.materialize_node_cache();
         Ok(graph)
     }
@@ -470,6 +477,373 @@ impl DocumentGraph {
         hits
     }
 
+    /// Fuzzy key match — similarity (exact > prefix > contains > Levenshtein)
+    /// cộng bonus IDF của key: key càng hiếm (xuất hiện ở ít document) càng
+    /// khử tuyến, node match key hiếm lên trước. Query `~tên` ở `doc_search`
+    /// rẽ vào đây.
+    pub fn search_key_fuzzy(&self, query: &str, limit: usize) -> Vec<KeyHit> {
+        let q = query.to_lowercase();
+        let total_docs = self.docs.len().max(1) as f64;
+        // Điểm similarity cho từng distinct key + đếm doc chứa key.
+        let cache = self.nodes.lock().unwrap();
+        let mut key_score: HashMap<&str, f64> = HashMap::new();
+        let mut key_docs: HashMap<&str, std::collections::HashSet<u64>> = HashMap::new();
+        for node in cache.values() {
+            let Some(k) = node.key.as_deref() else {
+                continue;
+            };
+            let kl = k.to_lowercase();
+            let sim = if kl == q {
+                1.0
+            } else if kl.starts_with(&q) {
+                0.8
+            } else if kl.contains(&q) {
+                0.6
+            } else {
+                let ratio = levenshtein_similarity(&q, &kl);
+                if ratio >= 0.7 {
+                    ratio
+                } else {
+                    continue;
+                }
+            };
+            let best = key_score.entry(k).or_insert(0.0);
+            *best = best.max(sim);
+            key_docs.entry(k).or_default().insert(node.doc);
+        }
+        if key_score.is_empty() {
+            return Vec::new();
+        }
+        let mut hits: Vec<KeyHit> = cache
+            .values()
+            .filter_map(|node| {
+                let k = node.key.as_deref()?;
+                let sim = *key_score.get(k)?;
+                let key_doc_count = key_docs[k].len().max(1) as f64;
+                // IDF của key — log2(total/df); key độc nhất df=1 → bonus lớn.
+                let idf = (total_docs / key_doc_count).log2().max(0.0);
+                let score = sim + 0.1 * idf;
+                Some(KeyHit {
+                    node: node.clone(),
+                    matched_key: k.to_string(),
+                    score,
+                })
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.node.id.cmp(&b.node.id))
+        });
+        hits.truncate(limit);
+        hits
+    }
+
+    // ── Pattern mining (P#) + structural ranking ─────────────────────
+
+    /// Mine structural patterns: đếm kind chain (root → node lá scalar,
+    /// FIELD/IDX wildcard) trên cửa sổ `max_depth` phần tử cuối. Chain mới
+    /// được cấp pattern id kế tiếp (id ổn định — registry persist); counts
+    /// refresh mỗi lần mine. Kết quả sort theo `doc_freq` tăng dần trong
+    /// nhóm đủ `min_count` — pattern đặc trưng (hiếm) lên đầu, noise nền
+    /// (~1.0) xuống cuối; kèm token pattern_trie để `search_patterns`.
+    pub async fn mine_patterns(
+        &mut self,
+        top_k: usize,
+        min_count: usize,
+        max_depth: usize,
+    ) -> Result<Vec<PatternEntry>> {
+        let total_docs = self.docs.len().max(1);
+        // Đếm chain: chain key → (node count, docs set, tokens).
+        let mut counts: HashMap<String, (usize, std::collections::HashSet<u64>, Vec<String>)> =
+            HashMap::new();
+        {
+            let cache = self.nodes.lock().unwrap();
+            for node in cache.values() {
+                if node.value.is_none() {
+                    continue; // chỉ node lá scalar — shape "MAP→FIELD→NUMBER".
+                }
+                let chain = self.kind_chain_of(node.id, &cache);
+                let slice = &chain[chain.len().saturating_sub(max_depth)..];
+                let labels = kind_chain_labels(slice);
+                let key = labels.join("\u{1}");
+                let entry = counts
+                    .entry(key)
+                    .or_insert_with(|| (0, std::collections::HashSet::new(), labels));
+                entry.0 += 1;
+                entry.1.insert(node.doc);
+            }
+        }
+        // Merge vào registry: chain cũ giữ id, chain mới cấp id kế tiếp.
+        // Guard pattern registry phải đóng TRƯỚC mọi .await (non-Send).
+        let (mined, chains): (Vec<PatternEntry>, Vec<(Vec<DocToken>, u64)>) = {
+            let mut registry = self.patterns.lock().unwrap();
+            let mut mined: Vec<PatternEntry> = Vec::new();
+            for (_key, (node_count, docs, tokens)) in counts {
+                if node_count < min_count {
+                    continue;
+                }
+                let id = match registry.by_chain.get(&_key) {
+                    Some(&id) => id,
+                    None => {
+                        let id = registry.next_id;
+                        registry.next_id += 1;
+                        registry.by_chain.insert(_key.clone(), id);
+                        id
+                    }
+                };
+                mined.push(PatternEntry {
+                    pattern_id: id,
+                    tokens,
+                    node_count,
+                    doc_count: docs.len(),
+                    doc_freq: docs.len() as f64 / total_docs as f64,
+                });
+            }
+            mined.sort_by(|a, b| {
+                a.doc_freq
+                    .partial_cmp(&b.doc_freq)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.node_count.cmp(&a.node_count))
+                    .then(a.pattern_id.cmp(&b.pattern_id))
+            });
+            mined.truncate(top_k);
+            // Registry = union(chain đã biết, kết quả lần này) — chain không
+            // còn xuất hiện vẫn giữ id nhưng counts về 0.
+            for e in &mut registry.entries {
+                if let Some(p) = mined.iter().find(|p| p.pattern_id == e.pattern_id) {
+                    *e = p.clone();
+                } else {
+                    e.node_count = 0;
+                    e.doc_count = 0;
+                    e.doc_freq = 0.0;
+                }
+            }
+            for p in &mined {
+                if !registry
+                    .entries
+                    .iter()
+                    .any(|e| e.pattern_id == p.pattern_id)
+                {
+                    registry.entries.push(p.clone());
+                }
+            }
+            registry.entries.sort_by_key(|e| e.pattern_id);
+            // Index mined chains vào pattern_trie (leaf = PATTERN base + id).
+            let chains = mined
+                .iter()
+                .map(|p| {
+                    (
+                        p.tokens
+                            .iter()
+                            .map(|t| parse_kind_label(t))
+                            .collect::<Vec<_>>(),
+                        p.pattern_id,
+                    )
+                })
+                .collect();
+            (mined, chains)
+        };
+        for (tokens, id) in chains {
+            Self::insert_chain_allow_dup(
+                &mut self.pattern_trie,
+                (PATTERN_RECORD_BASE + id) as usize,
+                &tokens,
+            )
+            .await?;
+        }
+        self.persist_patterns().await?;
+        Ok(mined)
+    }
+
+    /// Registry hiện tại (counts từ lần mine gần nhất).
+    pub fn list_patterns(&self) -> Vec<PatternEntry> {
+        self.patterns.lock().unwrap().entries.clone()
+    }
+
+    /// Search pattern theo kind chain đã mine — leaf lưu pattern id.
+    pub async fn search_patterns(&self, pattern: &[DocToken]) -> Result<Vec<PatternEntry>> {
+        let pages = self.pattern_trie.search(pattern, None).await?;
+        let registry = self.patterns.lock().unwrap();
+        let mut out = Vec::new();
+        for (record, _) in pages {
+            let r = record as u64;
+            if r >= PATTERN_RECORD_BASE
+                && let Some(e) = registry
+                    .entries
+                    .iter()
+                    .find(|e| e.pattern_id == r - PATTERN_RECORD_BASE)
+            {
+                out.push(e.clone());
+            }
+        }
+        out.sort_by_key(|e| e.pattern_id);
+        Ok(out)
+    }
+
+    /// Search node theo kind chain (kind token payload 0) trên type trie.
+    /// Search node theo kind chain (kind token payload 0) — quét cache so
+    /// khớp suffix window. Không dùng trie ở đây vì radix leaf chỉ giữ MỘT
+    /// record per chain: các node trùng shape (cùng pattern ở nhiều doc) sẽ
+    /// bị collapse còn node đầu tiên. Trie giữ vai trò index của pattern P#
+    /// (`pattern_trie` — mỗi pattern một chain), node retrieval quét cache.
+    pub fn search_kind_chain(&self, pattern: &[DocToken], _depth: Option<usize>) -> Vec<u64> {
+        if pattern.is_empty() {
+            return Vec::new();
+        }
+        let cache = self.nodes.lock().unwrap();
+        let mut ids: Vec<u64> = cache
+            .values()
+            .filter(|node| {
+                let chain = self.kind_chain_of_unchecked(node.id, &cache);
+                chain.len() >= pattern.len() && chain[chain.len() - pattern.len()..] == *pattern
+            })
+            .map(|node| node.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Như `kind_chain_of` nhưng nhận cache đã lock bên ngoài.
+    fn kind_chain_of_unchecked(&self, node_id: u64, cache: &HashMap<u64, Node>) -> Vec<DocToken> {
+        let mut tokens = Vec::new();
+        let mut cur = Some(node_id);
+        while let Some(id) = cur {
+            let Some(n) = cache.get(&id) else { break };
+            tokens.push(kind_token(&n.kind));
+            cur = n.parent;
+        }
+        tokens.reverse();
+        tokens
+    }
+
+    /// Bổ sung cho `search_path`: quét cache trả ĐỦ node có key-chain khớp
+    /// pattern (radix leaf chỉ giữ 1 record/chain nên trie chỉ đại diện node
+    /// đầu tiên — với repo nhiều doc trùng path thì thiếu). `pattern[0]` là
+    /// `DocToken::root()`, các segment sau là `DocToken::field(id)`.
+    pub fn search_path_scan(&self, pattern: &[DocToken], limit: usize) -> Vec<u64> {
+        if pattern.len() < 2 {
+            return Vec::new();
+        }
+        let fields: Vec<u64> = pattern[1..].iter().map(|t| t.field_key_id()).collect();
+        let last = *fields.last().unwrap();
+        let cache = self.nodes.lock().unwrap();
+        let mut ids: Vec<u64> = Vec::new();
+        for node in cache.values() {
+            // Lọc thô: node phải mang key cuối của pattern.
+            let Some(key) = &node.key else { continue };
+            if self.intern.get(key) != Some(last) {
+                continue;
+            }
+            // Xác minh tổ tiên: chuỗi key id từ node lên phải khớp reversed.
+            let mut up: Vec<u64> = Vec::with_capacity(fields.len());
+            let mut cur = Some(node.id);
+            while let Some(id) = cur {
+                let Some(n) = cache.get(&id) else { break };
+                if let Some(k) = &n.key {
+                    up.push(self.intern.get(k).unwrap_or(0));
+                }
+                cur = n.parent;
+                if up.len() == fields.len() {
+                    break;
+                }
+            }
+            up.reverse();
+            if up == fields {
+                ids.push(node.id);
+                if ids.len() >= limit {
+                    break;
+                }
+            }
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Uniqueness score của node theo pattern registry — pattern càng hiếm
+    /// (ít document chứa) càng điểm: IDF = log2(total_docs / doc_count).
+    /// Chain chưa từng mine coi như hiếm nhất (điểm +1).
+    pub fn pattern_uniqueness(&self, node_id: u64, total_docs: usize) -> f64 {
+        let cache = self.nodes.lock().unwrap();
+        if !cache.contains_key(&node_id) {
+            return 0.0;
+        }
+        let chain = self.kind_chain_of(node_id, &cache);
+        drop(cache);
+        let registry = self.patterns.lock().unwrap();
+        match registry.by_chain.get(&kind_labels_key(&chain)) {
+            Some(&id) => registry
+                .entries
+                .iter()
+                .find(|e| e.pattern_id == id)
+                .map(|e| {
+                    if e.doc_count == 0 {
+                        (total_docs.max(1) as f64).log2() + 1.0
+                    } else {
+                        (total_docs.max(1) as f64 / e.doc_count as f64)
+                            .log2()
+                            .max(0.0)
+                    }
+                })
+                .unwrap_or(0.0),
+            None => (total_docs.max(1) as f64).log2() + 1.0,
+        }
+    }
+
+    /// Kind chain root → node (FIELD/IDX payload wildcard) từ cache.
+    fn kind_chain_of(&self, node_id: u64, cache: &HashMap<u64, Node>) -> Vec<DocToken> {
+        let mut tokens = Vec::new();
+        let mut cur = Some(node_id);
+        while let Some(id) = cur {
+            let Some(n) = cache.get(&id) else { break };
+            tokens.push(kind_token(&n.kind));
+            cur = n.parent;
+        }
+        tokens.reverse();
+        tokens
+    }
+
+    // ── Pattern registry persist ─────────────────────────────────────
+
+    async fn persist_patterns(&self) -> Result<()> {
+        // Guard phải đóng trước .await (non-Send) — scope block.
+        let blob = {
+            let registry = self.patterns.lock().unwrap();
+            serde_json::to_vec(&registry.entries).map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+        self.storage
+            .write()
+            .await
+            .set_node_meta(DOC_PATTERNS_RECORD as usize, &blob)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    /// Restore registry từ storage. Trả `false` nếu chưa có (graph mới).
+    async fn restore_patterns(&mut self) -> Result<bool> {
+        let bytes = {
+            let guard = self.storage.read().await;
+            guard.get_node_meta(DOC_PATTERNS_RECORD as usize).await?
+        };
+        let Some(bytes) = bytes else {
+            return Ok(false);
+        };
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+        let entries: Vec<PatternEntry> = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("corrupt pattern registry: {e}"))?;
+        let mut reg = PatternRegistry::default();
+        for e in entries {
+            reg.by_chain.insert(e.tokens.join("\u{1}"), e.pattern_id);
+            reg.next_id = reg.next_id.max(e.pattern_id + 1);
+            reg.entries.push(e);
+        }
+        self.patterns = std::sync::Mutex::new(reg);
+        Ok(true)
+    }
+
     // ── Stats ─────────────────────────────────────────────────────────
 
     pub async fn stats(&self) -> Result<DocStats> {
@@ -761,6 +1135,81 @@ fn kind_token(kind: &Kind) -> DocToken {
     }
 }
 
+/// Nhãn hiển thị của một structural token ("MAP", "FIELD", ...).
+fn token_label(tag: DocTag) -> &'static str {
+    match tag {
+        DocTag::Root => "ROOT",
+        DocTag::Map => "MAP",
+        DocTag::Arr => "ARRAY",
+        DocTag::Field => "FIELD",
+        DocTag::Idx => "INDEX",
+        DocTag::Str => "STRING",
+        DocTag::Num => "NUMBER",
+        DocTag::Bool => "BOOL",
+        DocTag::Null => "NULL",
+    }
+}
+
+/// Parse nhãn kind ("MAP", "FIELD", ...) về kind token payload 0 — dùng cho
+/// query `doc_search_struct`. Nhãn lạ → Map token.
+pub fn parse_kind_label(label: &str) -> DocToken {
+    match label.trim().to_ascii_uppercase().as_str() {
+        "ROOT" => DocToken::root(),
+        "ARRAY" | "ARR" => DocToken::arr(),
+        "FIELD" => DocToken::field(0),
+        "INDEX" | "IDX" => DocToken::idx(0),
+        "STRING" | "STR" => DocToken::str(0),
+        "NUMBER" | "NUM" => DocToken::num(0),
+        "BOOL" => DocToken::bool(0),
+        "NULL" => DocToken::null(),
+        _ => DocToken::map(),
+    }
+}
+
+fn kind_chain_labels(chain: &[DocToken]) -> Vec<String> {
+    chain
+        .iter()
+        .map(|t| token_label(t.tag()).to_string())
+        .collect()
+}
+
+fn kind_labels_key(chain: &[DocToken]) -> String {
+    kind_chain_labels(chain).join("\u{1}")
+}
+
+/// Similarity = 1 - d(a,b)/max(len) — 1.0 khi trùng khớp hoàn toàn.
+fn levenshtein_similarity(a: &str, b: &str) -> f64 {
+    let max = a.chars().count().max(b.chars().count());
+    if max == 0 {
+        return 1.0;
+    }
+    let d = levenshtein(a, b);
+    1.0 - d as f64 / max as f64
+}
+
+/// Levenshtein chuẩn (một hàng, O(min·max)).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// Small payload returned to LLM after `hydrate`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodePayload {
@@ -782,6 +1231,37 @@ pub struct DocInfo {
     pub format: String,
     pub root_node_id: u64,
     pub nodes: usize,
+}
+
+/// Một structural pattern đã mine — kind chain (FIELD/IDX wildcard payload)
+/// từ một cửa sổ tổ tiên đến node lá scalar. `doc_freq` = tỷ lệ số document
+/// chứa pattern (pattern ~1.0 là noise nền, nhỏ là đặc trưng).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatternEntry {
+    pub pattern_id: u64,
+    /// Nhãn hiển thị, vd ["MAP", "FIELD", "NUMBER"].
+    pub tokens: Vec<String>,
+    pub node_count: usize,
+    pub doc_count: usize,
+    pub doc_freq: f64,
+}
+
+/// Registry pattern — id (P#) ổn định: chain đã đăng ký giữ nguyên id giữa
+/// các lần mine; counts refresh mỗi lần mine.
+#[derive(Debug, Default)]
+pub struct PatternRegistry {
+    entries: Vec<PatternEntry>,
+    by_chain: HashMap<String, u64>,
+    next_id: u64,
+}
+
+/// Kết quả fuzzy match một key.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyHit {
+    pub node: Node,
+    pub matched_key: String,
+    /// Điểm similarity (0..1] cộng bonus IDF của key (key hiếm +điểm).
+    pub score: f64,
 }
 
 /// Summary returned by `codegraph doc stats`.
@@ -899,6 +1379,124 @@ mod tests {
         ];
         let ids = reopened.search_path(&tokens, None).await.unwrap();
         assert!(!ids.is_empty(), "search `replicas` sau reopen phải match");
+    }
+
+    /// Fuzzy key match: exact/prefix/contains và Levenshtein (sai chính tả)
+    /// phải tìm được `replicas`; key vô nghĩa thì không.
+    #[tokio::test]
+    async fn fuzzy_key_match_ranks_and_finds() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.yaml");
+        std::fs::write(&p, "service:\n  replicas: 3\n  name: api\n").unwrap();
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage, DocConfig::default());
+        graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
+
+        // exact (viết hoa vẫn match — case-insensitive).
+        let hits = graph.search_key_fuzzy("REPLICAS", 10);
+        assert!(hits.iter().any(|h| h.matched_key == "replicas"));
+        // sai chính tả 1 ký tự → Levenshtein.
+        let hits = graph.search_key_fuzzy("replcas", 10);
+        assert!(
+            hits.iter().any(|h| h.matched_key == "replicas"),
+            "fuzzy phải bắt được lỗi chính tả"
+        );
+        // key không liên quan → rỗng.
+        assert!(graph.search_key_fuzzy("zzzzzz", 10).is_empty());
+    }
+
+    /// Pattern mining: hai doc cùng shape → pattern lặp với count/doc đúng;
+    /// id (P#) ổn định sau reopen + mine lại; kết quả sort theo doc_freq.
+    #[tokio::test]
+    async fn mine_patterns_stable_ids_and_frequency() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for i in 0..2 {
+            let p = dir.path().join(format!("d{i}.yaml"));
+            std::fs::write(&p, format!("svc{i}:\n  name: a{i}\n  replicas: {i}\n")).unwrap();
+            paths.push(p);
+        }
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage.clone(), DocConfig::default());
+        for p in &paths {
+            graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
+        }
+        let mined = graph.mine_patterns(10, 2, 4).await.unwrap();
+        // Mỗi scalar lá (name x2, replicas x2) tạo chain [MAP, MAP, STRING|NUMBER].
+        let string_pat = mined
+            .iter()
+            .find(|p| p.tokens.last() == Some(&"STRING".to_string()));
+        let number_pat = mined
+            .iter()
+            .find(|p| p.tokens.last() == Some(&"NUMBER".to_string()));
+        let string_pat = string_pat.expect("pattern STRING");
+        assert_eq!(number_pat.expect("pattern NUMBER").node_count, 2);
+        assert_eq!(string_pat.node_count, 2);
+        assert_eq!(string_pat.doc_count, 2);
+        assert!((string_pat.doc_freq - 1.0).abs() < 1e-9);
+        let s_id = string_pat.pattern_id;
+
+        // Reopen + mine lại — id giữ nguyên.
+        drop(graph);
+        let mut reopened = DocumentGraph::open(storage, DocConfig::default())
+            .await
+            .unwrap();
+        let mined2 = reopened.mine_patterns(10, 2, 4).await.unwrap();
+        let string_pat2 = mined2
+            .iter()
+            .find(|p| p.tokens.last() == Some(&"STRING".to_string()))
+            .expect("pattern STRING sau reopen");
+        assert_eq!(string_pat2.pattern_id, s_id, "pattern id phải ổn định");
+    }
+
+    /// Search cấu trúc theo nhãn kind + ranking IDF: node thuộc pattern hiếm
+    /// (ít doc) phải đứng trước node pattern nền.
+    #[tokio::test]
+    async fn struct_search_and_idf_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        // d0, d1: shape phổ biến (MAP MAP NUMBER); d2: thêm nhánh hiếm hơn.
+        for (i, body) in [
+            "svc:\n  replicas: 1\n".to_string(),
+            "svc:\n  replicas: 2\n".to_string(),
+            "svc:\n  replicas: 3\n  metrics:\n    unique_metric: 9\n".to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let p = dir.path().join(format!("d{i}.yaml"));
+            std::fs::write(&p, body).unwrap();
+        }
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage, DocConfig::default());
+        for i in 0..3 {
+            let p = dir.path().join(format!("d{i}.yaml"));
+            graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
+        }
+        graph.mine_patterns(10, 2, 4).await.unwrap();
+
+        // Chain [MAP, MAP, NUMBER] match cả 3 node replicas.
+        let tokens: Vec<DocToken> = ["MAP", "MAP", "NUMBER"]
+            .iter()
+            .map(|l| parse_kind_label(l))
+            .collect();
+        let ids = graph.search_kind_chain(&tokens, None);
+        // Window [MAP, MAP, NUMBER] match 3 node replicas + unique_metric
+        // (chain [MAP, MAP, MAP, NUMBER] có tail window trùng — đúng ngữ nghĩa
+        // cửa sổ của mining).
+        assert_eq!(ids.len(), 4);
+        // uniqueness: replicas ở 3/3 docs → IDF thấp; unique_metric 1/3 → cao.
+        let uniq_replicas = graph.pattern_uniqueness(ids[0], 3);
+        let metric_id = graph
+            .search_key_fuzzy("unique", 10)
+            .first()
+            .expect("unique_metric")
+            .node
+            .id;
+        let uniq_metric = graph.pattern_uniqueness(metric_id, 3);
+        assert!(
+            uniq_metric > uniq_replicas,
+            "cấu trúc hiếm phải có IDF cao hơn nền: {uniq_metric} vs {uniq_replicas}"
+        );
     }
 
     #[tokio::test]
