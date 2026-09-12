@@ -1192,8 +1192,7 @@ pub async fn dispatch_doc_search(
                     })
                 })
                 .collect();
-            return serde_json::to_string_pretty(&results)
-                .map_err(|e| Error::Other(e.to_string()));
+            return serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()));
         }
         let hits = graph.search_key_fuzzy(&last, 50);
         if hits.is_empty() {
@@ -1214,8 +1213,7 @@ pub async fn dispatch_doc_search(
                 })
             })
             .collect();
-        return serde_json::to_string_pretty(&results)
-            .map_err(|e| Error::Other(e.to_string()));
+        return serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()));
     }
     let mut results = Vec::new();
     for id in ids.iter().take(100) {

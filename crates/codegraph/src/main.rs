@@ -792,9 +792,8 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
                 Vec::new()
             };
             if ids.is_empty() {
-                let last = fuzzy_seg.unwrap_or_else(|| {
-                    pattern.rsplit('.').next().unwrap_or(&pattern).to_string()
-                });
+                let last = fuzzy_seg
+                    .unwrap_or_else(|| pattern.rsplit('.').next().unwrap_or(&pattern).to_string());
                 let hits = graph.search_key_fuzzy(&last, 50);
                 if hits.is_empty() {
                     println!("no nodes matched — key `{last}` not seen in any ingested document");

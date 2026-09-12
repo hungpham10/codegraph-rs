@@ -489,7 +489,9 @@ impl DocumentGraph {
         let mut key_score: HashMap<&str, f64> = HashMap::new();
         let mut key_docs: HashMap<&str, std::collections::HashSet<u64>> = HashMap::new();
         for node in cache.values() {
-            let Some(k) = node.key.as_deref() else { continue };
+            let Some(k) = node.key.as_deref() else {
+                continue;
+            };
             let kl = k.to_lowercase();
             let sim = if kl == q {
                 1.0
@@ -619,7 +621,11 @@ impl DocumentGraph {
                 }
             }
             for p in &mined {
-                if !registry.entries.iter().any(|e| e.pattern_id == p.pattern_id) {
+                if !registry
+                    .entries
+                    .iter()
+                    .any(|e| e.pattern_id == p.pattern_id)
+                {
                     registry.entries.push(p.clone());
                 }
             }
@@ -629,7 +635,10 @@ impl DocumentGraph {
                 .iter()
                 .map(|p| {
                     (
-                        p.tokens.iter().map(|t| parse_kind_label(t)).collect::<Vec<_>>(),
+                        p.tokens
+                            .iter()
+                            .map(|t| parse_kind_label(t))
+                            .collect::<Vec<_>>(),
                         p.pattern_id,
                     )
                 })
@@ -654,10 +663,7 @@ impl DocumentGraph {
     }
 
     /// Search pattern theo kind chain đã mine — leaf lưu pattern id.
-    pub async fn search_patterns(
-        &self,
-        pattern: &[DocToken],
-    ) -> Result<Vec<PatternEntry>> {
+    pub async fn search_patterns(&self, pattern: &[DocToken]) -> Result<Vec<PatternEntry>> {
         let pages = self.pattern_trie.search(pattern, None).await?;
         let registry = self.patterns.lock().unwrap();
         let mut out = Vec::new();
@@ -775,7 +781,9 @@ impl DocumentGraph {
                     if e.doc_count == 0 {
                         (total_docs.max(1) as f64).log2() + 1.0
                     } else {
-                        (total_docs.max(1) as f64 / e.doc_count as f64).log2().max(0.0)
+                        (total_docs.max(1) as f64 / e.doc_count as f64)
+                            .log2()
+                            .max(0.0)
                     }
                 })
                 .unwrap_or(0.0),
@@ -1415,8 +1423,12 @@ mod tests {
         }
         let mined = graph.mine_patterns(10, 2, 4).await.unwrap();
         // Mỗi scalar lá (name x2, replicas x2) tạo chain [MAP, MAP, STRING|NUMBER].
-        let string_pat = mined.iter().find(|p| p.tokens.last() == Some(&"STRING".to_string()));
-        let number_pat = mined.iter().find(|p| p.tokens.last() == Some(&"NUMBER".to_string()));
+        let string_pat = mined
+            .iter()
+            .find(|p| p.tokens.last() == Some(&"STRING".to_string()));
+        let number_pat = mined
+            .iter()
+            .find(|p| p.tokens.last() == Some(&"NUMBER".to_string()));
         let string_pat = string_pat.expect("pattern STRING");
         assert_eq!(number_pat.expect("pattern NUMBER").node_count, 2);
         assert_eq!(string_pat.node_count, 2);
@@ -1426,7 +1438,9 @@ mod tests {
 
         // Reopen + mine lại — id giữ nguyên.
         drop(graph);
-        let mut reopened = DocumentGraph::open(storage, DocConfig::default()).await.unwrap();
+        let mut reopened = DocumentGraph::open(storage, DocConfig::default())
+            .await
+            .unwrap();
         let mined2 = reopened.mine_patterns(10, 2, 4).await.unwrap();
         let string_pat2 = mined2
             .iter()
