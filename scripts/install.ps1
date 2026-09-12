@@ -5,11 +5,11 @@
 #
 # Usage (pin a version / download the script first):
 #   irm https://raw.githubusercontent.com/hungpham10/codegraph-rs/main/scripts/install.ps1 -OutFile install.ps1
-#   .\install.ps1 -Version 2.1.6
+#   .\install.ps1 -Version 2.1.7
 
 [CmdletBinding()]
 param(
-    # Pin a specific version, e.g. "2.1.6". Empty = latest release.
+    # Pin a specific version, e.g. "2.1.7". Empty = latest release.
     [string]$Version
 )
 
