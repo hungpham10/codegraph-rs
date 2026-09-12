@@ -7,7 +7,7 @@ CodeGraph có thể xây dựng semantic graph **trực tiếp từ file binary*
 ```
 files → tree-sitter (source) ─┐
                               ├→ GraphIndex::ingest → semgraph → MCP server
-binaries → radare2 (r2pipe) ──┘
+binaries → radare2 (r2pipe) ──┘ → BinaryGraph (binary.sqlite)
 ```
 
 Sau khi tree-sitter parse các file source, orchestrator gọi `codegraph_binary::collect_binaries` để scan và phân tích binary, rồi append kết quả `ParseResult` (với `language = "binary"`) vào cùng danh sách ingest.
@@ -30,7 +30,16 @@ Các bước chính trong `crates/codegraph-binary`:
      | `swi` / `syscall` | `THROW` |
 
      Nếu tắt `cfg_markers`: chỉ lấy call edges nhẹ từ `agCj` (không có markers).
-4. **Ingest** — `ParseResult` được nạp vào `GraphIndex` như mọi nguồn khác; từ đó `codegraph_search_symbol`, `codegraph_flow`, `codegraph_callers`, `codegraph_impact`, `codegraph_context`… hoạt động trên binary y như source.
+4. **Ingest** — `ParseResult` binary được nạp vào dataset **riêng** `BinaryGraph`
+   (mặc định `.codegraph/binary.sqlite`, cấu hình qua `[bingraph]`) với dải id
+   riêng bắt đầu từ `bin_base` (mặc định 2e9), **không** nạp vào `GraphIndex`
+   chính (tránh làm phình name trie/RAM của code index). Các MCP tool
+   `codegraph_binary_list` / `codegraph_binary_search` / `codegraph_binary_addr`
+   / `codegraph_binary_stats` query trực tiếp dataset này; còn
+   `codegraph_callees` / `codegraph_callers` / `codegraph_flow` /
+   `codegraph_impact` tự route sang `BinaryGraph` khi nhận symbol id ≥
+   `bin_base` — dùng chung giao diện như với source code. `codegraph_search_symbol`
+   và `codegraph_context` chỉ thấy source code, không thấy binary.
 
 ## Cấu hình
 
@@ -43,6 +52,21 @@ depth = "aaa"         # "aaa" (đầy đủ, chính xác nhất) | "fast" (af + 
 cfg_markers = true    # xây markers IF/LOOP/RETURN/THROW từ CFG từng function (pdfj)
 cache = true          # cache kết quả theo (path, mtime, size) trong .codegraph/binary-cache/
 ```
+
+Dataset binary graph — section `[bingraph]`:
+
+```toml
+[bingraph]
+enabled = true              # dataset binary riêng (mặc định bật)
+bin_base = 2_000_000_000    # base id symbol binary (mặc định 2e9)
+
+[bingraph.storage]
+type = "sqlite"             # mặc định theo backend kind của [storage]
+dsn = "sqlite:///tmp/binary.db"
+```
+
+Lưu ý: `bin_base` không được chồng lên dải id docs (1e9/3e9) hay code index
+(< 1e9) — route của callees/callers/flow dựa vào khoảng id này.
 
 Ghi chú:
 

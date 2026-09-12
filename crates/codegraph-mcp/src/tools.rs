@@ -483,6 +483,12 @@ pub async fn dispatch_with_api(
         }
         "codegraph_callers" => {
             let id = arg_u64(&args, "node")?;
+            if let Some(out) =
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
+                    .await?
+            {
+                return Ok(out);
+            }
             let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
             let hits = api.callers(id, depth).await?;
             let detail = detail_from_args(&args, session_detail);
@@ -495,6 +501,12 @@ pub async fn dispatch_with_api(
         }
         "codegraph_callees" => {
             let id = arg_u64(&args, "node")?;
+            if let Some(out) =
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
+                    .await?
+            {
+                return Ok(out);
+            }
             let hits = api.callees(id).await?;
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
@@ -506,6 +518,12 @@ pub async fn dispatch_with_api(
         }
         "codegraph_impact" => {
             let id = arg_u64(&args, "node")?;
+            if let Some(out) =
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
+                    .await?
+            {
+                return Ok(out);
+            }
             let depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
             let hits = api.impact(id, depth).await?;
             let detail = detail_from_args(&args, session_detail);
@@ -518,6 +536,12 @@ pub async fn dispatch_with_api(
         }
         "codegraph_flow" => {
             let id = arg_u64(&args, "node")?;
+            if let Some(out) =
+                dispatch_binary_graph(root, name, &args, id, session_detail, session_format)
+                    .await?
+            {
+                return Ok(out);
+            }
             let flow = api.flow(id).await?;
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
@@ -952,6 +976,84 @@ fn arg_u64(v: &Value, k: &str) -> Result<u64> {
     v.get(k)
         .and_then(|x| x.as_u64())
         .ok_or_else(|| Error::Invalid(format!("missing int arg: {k}")))
+}
+
+// ── Binary graph routing ──
+// Symbol binary (id >= `[bingraph] bin_base`, mặc định 2e9) nằm trong dataset
+// riêng `binary.sqlite` chứ không phải GraphIndex chính — `callees`/`callers`/
+// `flow`/`impact` phải route sang `BinaryGraph`, không thì luôn rỗng.
+
+/// Mở BinaryGraph nếu `id` thuộc dải binary; `None` khi id thường hoặc
+/// `[bingraph]` không mở được (fallback query code index như cũ).
+async fn binary_graph_for(
+    root: &Utf8Path,
+    id: u64,
+) -> Option<codegraph_extract::BinaryGraph> {
+    let bin_base = codegraph_extract::ExtractConfig::load(root).bin_base();
+    if id < bin_base {
+        return None;
+    }
+    codegraph_extract::BinaryGraph::open_from_config(root)
+        .await
+        .ok()
+}
+
+/// Xử lý callees/callers/impact/flow cho symbol binary — output shape giống hệt
+/// nhánh code index. Trả `None` nếu tool không thuộc nhóm này (caller fallback).
+async fn dispatch_binary_graph(
+    root: &Utf8Path,
+    name: &str,
+    args: &Value,
+    id: u64,
+    session_detail: DetailLevel,
+    session_format: OutputStyle,
+) -> Result<Option<String>> {
+    let Some(graph) = binary_graph_for(root, id).await else {
+        return Ok(None);
+    };
+    let detail = detail_from_args(args, session_detail);
+    let format = format_from_args(args, session_format);
+    let out = match name {
+        "codegraph_callees" => {
+            let hits = graph.callees(id).await?;
+            let arr: Vec<Value> = hits
+                .iter()
+                .map(|s| symbol_json(root.as_str(), s, detail, format))
+                .collect();
+            emit_value(root.as_str(), Value::Array(arr))?
+        }
+        "codegraph_callers" | "codegraph_impact" => {
+            let depth = args
+                .get(if name == "codegraph_impact" {
+                    "max_depth"
+                } else {
+                    "depth"
+                })
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as u32;
+            let hits = graph.callers(id, depth).await?;
+            let arr: Vec<Value> = hits
+                .iter()
+                .map(|s| symbol_json(root.as_str(), s, detail, format))
+                .collect();
+            emit_value(root.as_str(), Value::Array(arr))?
+        }
+        "codegraph_flow" => {
+            let flow = graph.flow(id).await?;
+            emit_value(
+                root.as_str(),
+                json!({
+                    "symbol": symbol_json(root.as_str(), &flow.symbol, detail, format),
+                    "chain": flow.chain,
+                    "chain_desc": flow.chain_desc,
+                    "calls": flow.calls,
+                }),
+            )?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
 }
 
 // ── Symbol detail + path relativization ──
