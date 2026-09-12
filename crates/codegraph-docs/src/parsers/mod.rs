@@ -1,5 +1,6 @@
 use crate::ir::{ByteSpan, Document, Kind, Node, Scalar};
 use anyhow::Result;
+use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Generic document parser: turns a raw source file into the normalized
@@ -137,14 +138,25 @@ impl DocParser for YamlParser {
     }
 
     fn parse(&self, path: &str, source: &str, id: u64) -> Result<Document> {
-        let value: serde_yaml::Value = serde_yaml::from_str(source)?;
-        let root = convert_yaml_value(
-            &value,
-            ByteSpan {
-                start: 0,
-                end: source.len() as u64,
-            },
-        );
+        // File YAML được phép chứa nhiều document (`---`), vd k8s manifest.
+        let mut values: Vec<serde_yaml::Value> = Vec::new();
+        for doc in serde_yaml::Deserializer::from_str(source) {
+            values.push(serde_yaml::Value::deserialize(doc)?);
+        }
+        let span = ByteSpan {
+            start: 0,
+            end: source.len() as u64,
+        };
+        let root = match values.len() {
+            0 => RecursiveNode::Null(span),
+            1 => convert_yaml_value(&values[0], span),
+            _ => RecursiveNode::Array(
+                values
+                    .iter()
+                    .map(|v| (convert_yaml_value(v, ByteSpan { start: 0, end: 0 }), span))
+                    .collect(),
+            ),
+        };
         Ok(build_document(
             path.to_string(),
             self.format().to_string(),
@@ -737,6 +749,21 @@ service:
 "#;
         let doc = YamlParser.parse("/tmp/a.yaml", src, 1).unwrap();
         assert_eq!(doc.nodes.len(), 4); // root, service, name, replicas
+    }
+
+    #[test]
+    fn yaml_parser_multi_document() {
+        let src = "---\nkind: Service\nname: api\n---\nkind: Deployment\nname: web\n";
+        let doc = YamlParser.parse("/tmp/multi.yaml", src, 1).unwrap();
+        // root (Array của 2 doc) + 2 doc + 4 trường con
+        assert_eq!(doc.nodes.len(), 7);
+        assert_eq!(
+            doc.nodes
+                .iter()
+                .filter(|n| n.key == Some("kind".into()))
+                .count(),
+            2
+        );
     }
 
     #[test]
