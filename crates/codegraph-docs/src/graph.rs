@@ -410,7 +410,7 @@ impl DocumentGraph {
                 .map(|c| c.to_vec())
                 .unwrap_or_default()
         };
-        list.retain(|id| !removed.contains(&id));
+        list.retain(|id| !removed.contains(id));
         self.storage
             .write()
             .await
