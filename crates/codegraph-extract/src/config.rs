@@ -612,6 +612,19 @@ type = "sqlite"
 # cfg_markers = true    # xây marker IF/LOOP/SWITCH từ CFG của mỗi function
 # cache = true          # cache kết quả phân tích theo (path, mtime, size)
 
+# [bingraph]
+# Dataset riêng cho symbol binary (mặc định .codegraph/binary.sqlite) — tool
+# callees/callers/flow route symbol binary sang dataset này theo khoảng id
+# `bin_base`. KHÔNG đặt bin_base chồng lên dải docs (1e9/3e9) hoặc dải code
+# index (< 1e9); đổi bin_base giữa chừng cần re-index binary.
+# enabled = true
+# bin_base = 2_000_000_000          # base id symbol binary (mặc định 2e9)
+#
+# Storage — mặc định dataset RIÊNG cùng backend kind của [storage].
+# [bingraph.storage]
+# type = "sqlite"
+# dsn = "sqlite:///tmp/binary.db"
+
 # [docgraph]
 # Document graph — ingest tài liệu cấu trúc (HCL/Terraform, YAML, JSON, TOML)
 # lúc `codegraph init`, truy vấn qua MCP (`codegraph_doc_*`) hoặc `codegraph doc`.

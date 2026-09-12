@@ -15,7 +15,10 @@
 
 use crate::config::ExtractConfig;
 use camino::Utf8Path;
-use codegraph_core::{CallRecord, Error, Result, Symbol, SymbolKind};
+use codegraph_core::{
+    is_marker, marker_name, CallRecord, Error, FlowCall, FlowResult, Result, Symbol, SymbolKind,
+    SYMBOL_BASE,
+};
 use codegraph_graph::{
     open_keyspace_storage, ParseResult, Search, SearchError, Storage, StorageError,
 };
@@ -379,9 +382,20 @@ impl BinaryGraph {
         }
         meta_set_ids(&self.storage, "next_record", &[next_record as u64]).await?;
 
-        // 4. Chains (u64 native) + call records (JSON).
+        // 4. Chains (u64 native) + call records (JSON). Chain chứa marker CFG
+        // (id < SYMBOL_BASE) và placeholder `0` cho call-site chưa resolve —
+        // cả hai phải giữ nguyên, chỉ remap symbol id thật sang dải `bin_base`.
         for (local_id, chain) in &parsed.chains {
-            let global: Vec<u64> = chain.iter().map(|v| bin_base + v).collect();
+            let global: Vec<u64> = chain
+                .iter()
+                .map(|&v| {
+                    if v == 0 || v < SYMBOL_BASE {
+                        v
+                    } else {
+                        bin_base + v
+                    }
+                })
+                .collect();
             self.storage
                 .write()
                 .await
@@ -409,6 +423,17 @@ impl BinaryGraph {
                 .set_call_records(bin_base + call.caller_id, &blob)
                 .await
                 .map_err(db_err)?;
+            // Reverse index cho `callers` — tra ngược theo tên callee. Re-ingest
+            // gỡ symbol cũ khỏi index chính nhưng entry stale ở đây chỉ bị bỏ
+            // qua lúc query (load_symbol → None), không cần dọn.
+            if !call.call_name.is_empty() {
+                meta_add_id(
+                    &self.storage,
+                    &format!("caller_of:{}", call.call_name),
+                    bin_base + call.caller_id,
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -656,6 +681,192 @@ impl BinaryGraph {
             .collect())
     }
 
+    /// Call records thô của một caller id (kèm call_name/line/effect/args).
+    async fn call_records(&self, caller: u64) -> Result<Vec<CallRecord>> {
+        let blob = self
+            .storage
+            .read()
+            .await
+            .get_call_records(caller)
+            .await
+            .map_err(db_err)?;
+        Ok(blob
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default())
+    }
+
+    /// Resolve một call name thành symbol trong cùng binary path — exact match
+    /// qua name trie. Ưu tiên Function; trả `None` nếu không khớp symbol nào
+    /// (call ra ngoài binary, `sub_xxx` chưa recover, …).
+    async fn resolve_call_name(&self, name: &str, path: &str) -> Result<Option<Symbol>> {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let Some(record) = self.name_record_lookup(name).await? else {
+            return Ok(None);
+        };
+        let ids = meta_ids_at(&self.storage, record).await?;
+        let mut fallback: Option<Symbol> = None;
+        for id in ids {
+            let Some(sym) = self.load_symbol(id).await? else {
+                continue;
+            };
+            if sym.file != path {
+                continue;
+            }
+            if sym.kind == SymbolKind::Function {
+                return Ok(Some(sym));
+            }
+            fallback.get_or_insert(sym);
+        }
+        Ok(fallback)
+    }
+
+    /// Callees trực tiếp của một hàm — resolve call records theo tên trong cùng
+    /// binary. Call không resolve được (import ngoài, `sub_xxx`) bị bỏ qua, giữ
+    /// hành vi "rỗng, không lỗi" như `GraphIndex::callees`.
+    pub async fn callees(&self, id: u64) -> Result<Vec<Symbol>> {
+        let Some(caller) = self.get_symbol(id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut recs = self.call_records(id).await?;
+        recs.sort_by_key(|c| c.position);
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for rec in recs {
+            if let Some(sym) = self.resolve_call_name(&rec.call_name, &caller.file).await? {
+                if sym.id != id && seen.insert(sym.id) {
+                    out.push(sym);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Callers của một hàm (BFS tới `depth` hop) — đi qua reverse index
+    /// `caller_of:{name}` ghi lúc ingest. Symbol đã bị gỡ (re-ingest) hoặc ở
+    /// binary khác bị lọc bỏ.
+    pub async fn callers(&self, id: u64, depth: u32) -> Result<Vec<Symbol>> {
+        let Some(target) = self.get_symbol(id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut frontier = vec![target.name.clone()];
+        let mut seen_ids = std::collections::HashSet::from([id]);
+        let mut out = Vec::new();
+        for _ in 0..depth.max(1) {
+            let mut next_names = Vec::new();
+            for name in &frontier {
+                for caller_id in meta_ids(&self.storage, &format!("caller_of:{name}")).await? {
+                    if !seen_ids.insert(caller_id) {
+                        continue;
+                    }
+                    let Some(sym) = self.load_symbol(caller_id).await? else {
+                        continue;
+                    };
+                    if sym.file != target.file || sym.kind != SymbolKind::Function {
+                        continue;
+                    }
+                    next_names.push(sym.name.clone());
+                    out.push(sym);
+                }
+            }
+            if next_names.is_empty() {
+                break;
+            }
+            frontier = next_names;
+        }
+        Ok(out)
+    }
+
+    /// Flow của một hàm binary — tương đương `GraphIndex::flow`: chain render
+    /// (marker name / symbol name / call thô cho placeholder) + call sites kèm
+    /// line/condition/effect/args.
+    pub async fn flow(&self, id: u64) -> Result<FlowResult> {
+        let sym = self
+            .get_symbol(id)
+            .await?
+            .ok_or_else(|| Error::Invalid(format!("symbol id {id} not found")))?;
+        let chain = self
+            .get_chain(id)
+            .await?
+            .ok_or_else(|| Error::Invalid(format!("chain for {:?} not found", sym.name)))?;
+        let mut recs = self.call_records(id).await?;
+        recs.sort_by_key(|c| c.position);
+        let rec_by_pos: HashMap<usize, &CallRecord> =
+            recs.iter().map(|r| (r.position, r)).collect();
+
+        let mut chain_desc: Vec<String> = Vec::with_capacity(chain.len());
+        for (i, &e) in chain.iter().enumerate() {
+            let desc = if is_marker(e) {
+                marker_name(e).unwrap_or("MARKER").to_string()
+            } else if e >= self.bin_base {
+                match self.get_symbol(e).await {
+                    Ok(Some(s)) => s.name,
+                    _ => format!("unknown({e})"),
+                }
+            } else if let Some(rec) = rec_by_pos.get(&i) {
+                if !rec.call_name.is_empty() {
+                    rec.call_name.clone()
+                } else {
+                    format!("unknown({e})")
+                }
+            } else {
+                format!("unknown({e})")
+            };
+            chain_desc.push(desc);
+        }
+
+        let mut calls = Vec::new();
+        for (i, &e) in chain.iter().enumerate() {
+            if is_marker(e) || e == id {
+                continue;
+            }
+            let rec = rec_by_pos.get(&i);
+            let (to_name, to_id) = if e >= self.bin_base {
+                match self.get_symbol(e).await {
+                    Ok(Some(s)) => (s.name, Some(e)),
+                    _ => (
+                        rec.map(|r| r.call_name.clone())
+                            .unwrap_or_else(|| format!("unknown({e})")),
+                        None,
+                    ),
+                }
+            } else if e == 0 {
+                match rec {
+                    Some(rec) => {
+                        let resolved = self
+                            .resolve_call_name(&rec.call_name, &sym.file)
+                            .await?
+                            .map(|s| s.id);
+                        (rec.call_name.clone(), resolved)
+                    }
+                    None => ("unknown(0)".to_string(), None),
+                }
+            } else {
+                (format!("unknown({e})"), None)
+            };
+            let rec = rec.copied();
+            calls.push(FlowCall {
+                position: i,
+                to_name,
+                to_id,
+                line: rec.map(|r| r.line).unwrap_or(0),
+                condition: rec.and_then(|r| r.condition.clone()),
+                effect: rec
+                    .map(|r| r.effect)
+                    .unwrap_or(codegraph_core::EffectType::None),
+                effect_desc: rec.and_then(|r| r.effect_desc.clone()),
+                args: rec.map(|r| r.arg_exprs.clone()).unwrap_or_default(),
+            });
+        }
+        Ok(FlowResult {
+            symbol: sym,
+            chain,
+            chain_desc,
+            calls,
+        })
+    }
+
     /// Thống kê — đếm từ secondary index (chỉ đọc danh sách id, không load
     /// symbol).
     pub async fn stats(&self) -> Result<BinStats> {
@@ -713,6 +924,9 @@ mod tests {
     }
 
     fn sample() -> ParseResult {
+        // Id local thật của binary bắt đầu từ SYMBOL_BASE + 1 — mọi id
+        // < SYMBOL_BASE là marker CFG, không được remap.
+        let sid = |n: u64| SYMBOL_BASE + n;
         ParseResult {
             path: "/tmp/fake.so".to_string(),
             language: "binary".to_string(),
@@ -720,31 +934,67 @@ mod tests {
             lines: 0,
             symbols: vec![
                 sym(
-                    1,
+                    sid(1),
                     "entry0",
                     SymbolKind::Function,
                     4096,
                     vec![ann("entrypoint")],
                 ),
-                sym(2, "foo", SymbolKind::Function, 4200, vec![ann("export")]),
-                sym(3, "memcpy", SymbolKind::Function, 100, vec![ann("import")]),
-                sym(4, "local_fn", SymbolKind::Function, 5000, Vec::new()),
-                sym(5, "str:6000", SymbolKind::Constant, 6000, Vec::new()),
+                sym(
+                    sid(2),
+                    "foo",
+                    SymbolKind::Function,
+                    4200,
+                    vec![ann("export")],
+                ),
+                sym(
+                    sid(3),
+                    "memcpy",
+                    SymbolKind::Function,
+                    100,
+                    vec![ann("import")],
+                ),
+                sym(sid(4), "local_fn", SymbolKind::Function, 5000, Vec::new()),
+                sym(sid(5), "str:6000", SymbolKind::Constant, 6000, Vec::new()),
             ],
-            chains: HashMap::from([(1u64, vec![1u64, 3u64])]),
-            calls: vec![CallRecord {
-                caller_id: 1,
-                call_name: "memcpy".to_string(),
-                position: 1,
-                arg_exprs: Vec::new(),
-                line: 4100,
-                condition: None,
-                is_loop_body: false,
-                effect: EffectType::None,
-                effect_desc: None,
-                target_class: None,
-                target_method: None,
-            }],
+            chains: HashMap::from([(
+                sid(1),
+                vec![
+                    sid(1),
+                    codegraph_core::MARKER_IF_TRUE,
+                    0,
+                    sid(3),
+                    codegraph_core::MARKER_RETURN,
+                ],
+            )]),
+            calls: vec![
+                CallRecord {
+                    caller_id: sid(1),
+                    call_name: "memcpy".to_string(),
+                    position: 3,
+                    arg_exprs: Vec::new(),
+                    line: 4100,
+                    condition: None,
+                    is_loop_body: false,
+                    effect: EffectType::None,
+                    effect_desc: None,
+                    target_class: None,
+                    target_method: None,
+                },
+                CallRecord {
+                    caller_id: sid(1),
+                    call_name: "external_unresolved".to_string(),
+                    position: 2,
+                    arg_exprs: Vec::new(),
+                    line: 4090,
+                    condition: None,
+                    is_loop_body: false,
+                    effect: EffectType::None,
+                    effect_desc: None,
+                    target_class: None,
+                    target_method: None,
+                },
+            ],
         }
     }
 
@@ -804,14 +1054,25 @@ mod tests {
         assert_eq!(eps.len(), 1);
         assert_eq!(eps[0].1, "entry0");
 
-        // get_symbol lazy hydrate + chain (u64 native trên Storage).
-        let s = g.get_symbol(DEFAULT_BIN_BASE + 2).await.unwrap().unwrap();
+        // get_symbol lazy hydrate + chain (u64 native trên Storage) — marker và
+        // placeholder 0 giữ nguyên, chỉ symbol id thật được remap.
+        let g2 = DEFAULT_BIN_BASE + SYMBOL_BASE;
+        let s = g.get_symbol(g2 + 2).await.unwrap().unwrap();
         assert_eq!(s.name, "foo");
-        let chain = g.get_chain(DEFAULT_BIN_BASE + 1).await.unwrap().unwrap();
-        assert_eq!(chain, vec![DEFAULT_BIN_BASE + 1, DEFAULT_BIN_BASE + 3]);
-        let calls = g.get_calls(DEFAULT_BIN_BASE + 1).await.unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1.as_deref(), Some("memcpy"));
+        let chain = g.get_chain(g2 + 1).await.unwrap().unwrap();
+        assert_eq!(
+            chain,
+            vec![
+                g2 + 1,
+                codegraph_core::MARKER_IF_TRUE,
+                0,
+                g2 + 3,
+                codegraph_core::MARKER_RETURN
+            ]
+        );
+        let calls = g.get_calls(g2 + 1).await.unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|c| c.1.as_deref() == Some("memcpy")));
 
         // stats.
         let stats = g.stats().await.unwrap();
@@ -820,6 +1081,50 @@ mod tests {
         assert_eq!(stats.imports, 1);
         assert_eq!(stats.exports, 1);
         assert_eq!(stats.binaries, 1);
+    }
+
+    #[tokio::test]
+    async fn binary_callees_callers_flow() {
+        let g = mem_graph().await;
+        g.ingest(&sample(), DEFAULT_BIN_BASE).await.unwrap();
+        let g2 = DEFAULT_BIN_BASE + SYMBOL_BASE;
+
+        // callees — resolve qua call records; call ngoài binary bị bỏ qua.
+        let callees = g.callees(g2 + 1).await.unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].name, "memcpy");
+
+        // callers — reverse index theo tên callee.
+        let memcpy_id = g2 + 3;
+        let callers = g.callers(memcpy_id, 2).await.unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].name, "entry0");
+
+        // flow — chain_desc render marker + call thô cho placeholder.
+        let flow = g.flow(g2 + 1).await.unwrap();
+        assert_eq!(flow.symbol.name, "entry0");
+        assert_eq!(
+            flow.chain_desc,
+            vec![
+                "entry0",
+                "IF_TRUE",
+                "external_unresolved",
+                "memcpy",
+                "RETURN"
+            ]
+        );
+        assert_eq!(flow.calls.len(), 2, "skip marker + self, giữ placeholder");
+        let resolved = flow
+            .calls
+            .iter()
+            .find(|c| c.to_name == "memcpy")
+            .expect("memcpy call site");
+        assert_eq!(resolved.to_id, Some(memcpy_id));
+        assert_eq!(flow.calls[0].to_name, "external_unresolved");
+        assert_eq!(flow.calls[0].to_id, None);
+
+        // flow cho id không tồn tại → lỗi rõ ràng.
+        assert!(g.flow(g2 + 999).await.is_err());
     }
 
     #[tokio::test]
