@@ -10,17 +10,17 @@
 //! và [`http`] (Streamable HTTP — rmcp cấp một `CodegraphServer` riêng per
 //! `mcp-session-id`, mỗi phiên bind root riêng).
 
+mod docgraph;
 #[cfg(feature = "http")]
 pub mod http;
-mod docgraph;
 mod session;
 pub mod stdio;
 mod tools;
 mod usage;
 
+pub use docgraph::SharedDocGraph;
 #[cfg(feature = "http")]
 pub use http::serve_http;
-pub use docgraph::SharedDocGraph;
 pub use session::{DetailLevel, InitOutcome, OutputStyle, Session};
 pub use stdio::serve_stdio;
 

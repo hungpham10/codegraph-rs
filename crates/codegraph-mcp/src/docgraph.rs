@@ -113,7 +113,10 @@ mod tests {
         let shared = Arc::new(SharedDocGraph::lazy("/nonexistent-root-xyz".into()));
         let (a, b) = {
             let (s1, s2) = (shared.clone(), shared.clone());
-            tokio::join!(async move { s1.graph().await }, async move { s2.graph().await })
+            tokio::join!(
+                async move { s1.graph().await },
+                async move { s2.graph().await }
+            )
         };
         assert!(Arc::ptr_eq(&a, &b));
         assert!(shared.is_ready());

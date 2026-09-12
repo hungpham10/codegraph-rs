@@ -3,10 +3,10 @@ use camino::Utf8Path;
 use codegraph_api::{GraphApi, Pagination};
 use codegraph_context::{ContextRequest, Format};
 use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
+use codegraph_docs::tokenize::DocToken;
 use rmcp::model::Tool;
 use serde::Serialize;
 use serde_json::{json, Value};
-use codegraph_docs::tokenize::DocToken;
 use std::sync::Arc;
 
 /// Định nghĩa một MCP tool — single source of truth cho `tools/list`.
