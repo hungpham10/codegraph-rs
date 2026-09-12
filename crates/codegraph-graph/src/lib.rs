@@ -36,11 +36,11 @@
 
 use crate::embeddings::{EmbeddingBackend, default_backend, embedding_enabled, make_backend};
 pub use crate::radix::Element;
-pub use crate::search::Search;
-pub use crate::search::SearchResume;
 /// Error type của `Search::insert_chain` (ví dụ `Duplicated`) — re-export để
 /// caller xử lý lỗi key trùng mà không cần `mod search` public.
 pub use crate::search::Error as SearchError;
+pub use crate::search::Search;
+pub use crate::search::SearchResume;
 use crate::storage::cached::CachedStorage;
 #[cfg(feature = "lmdb")]
 pub use crate::storage::lmdb::LmdbStorage;
@@ -162,8 +162,8 @@ pub async fn open_doc_storage(dsn: &str) -> Result<Arc<RwLock<dyn Storage>>> {
     if dsn.starts_with("redis://") || dsn.starts_with("rediss://") {
         #[cfg(feature = "redis")]
         {
-            let client = redis::Client::open(dsn)
-                .map_err(|e| Error::Db(format!("redis client: {e}")))?;
+            let client =
+                redis::Client::open(dsn).map_err(|e| Error::Db(format!("redis client: {e}")))?;
             let storage = crate::storage::redis::RedisStorage::new(client, "codegraph:docs")
                 .await
                 .map_err(serr)?;

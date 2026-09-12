@@ -368,12 +368,11 @@ impl ExtractConfig {
             .map(StorageKind::parse)
             .unwrap_or(self.storage.kind);
         match kind {
-            StorageKind::Sqlite => {
-                Some(format!("sqlite://{}", project_dir(root).join("docs.sqlite")))
-            }
-            StorageKind::Lmdb => {
-                Some(format!("lmdb://{}", project_dir(root).join("docs.lmdb")))
-            }
+            StorageKind::Sqlite => Some(format!(
+                "sqlite://{}",
+                project_dir(root).join("docs.sqlite")
+            )),
+            StorageKind::Lmdb => Some(format!("lmdb://{}", project_dir(root).join("docs.lmdb"))),
             StorageKind::Redis => self.storage.dsn.clone(),
             StorageKind::Memory | StorageKind::Postgres | StorageKind::MySql => None,
         }
@@ -741,7 +740,10 @@ dsn = "sqlite:///tmp/custom-docs.db"
         std::fs::write(path.as_std_path(), "[storage]\ntype = \"lmdb\"\n").unwrap();
         let cfg = ExtractConfig::load_from(path);
         let dsn = cfg.doc_storage_dsn(Utf8Path::new("/repo")).unwrap();
-        assert!(dsn.starts_with("lmdb://") && dsn.ends_with("docs.lmdb"), "got {dsn}");
+        assert!(
+            dsn.starts_with("lmdb://") && dsn.ends_with("docs.lmdb"),
+            "got {dsn}"
+        );
 
         let _ = std::fs::remove_file(path.as_std_path());
         let _ = std::fs::remove_dir(&dir);

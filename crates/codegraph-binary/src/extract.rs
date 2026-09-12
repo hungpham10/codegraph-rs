@@ -637,7 +637,9 @@ mod tests {
             responses: HashMap<String, Value>,
         }
         impl R2Client for MockR2 {
-            fn cmd(&mut self, _cmd: &str) -> Result<String, Error> { Ok(String::new()) }
+            fn cmd(&mut self, _cmd: &str) -> Result<String, Error> {
+                Ok(String::new())
+            }
             fn cmdj(&mut self, cmd: &str) -> Result<Value, Error> {
                 Ok(self.responses.get(cmd).cloned().unwrap_or(json!([])))
             }
@@ -655,8 +657,12 @@ mod tests {
         );
         let exports = parse_iej(&mut mock).unwrap();
         assert_eq!(exports.len(), 3);
-        assert!(exports.iter().any(|e| e.name.as_deref() == Some("JNI_OnLoad")));
-        assert!(exports.iter().any(|e| e.name.as_deref() == Some("Java_com_example_Foo_bar")));
+        assert!(exports
+            .iter()
+            .any(|e| e.name.as_deref() == Some("JNI_OnLoad")));
+        assert!(exports
+            .iter()
+            .any(|e| e.name.as_deref() == Some("Java_com_example_Foo_bar")));
     }
 
     #[test]
@@ -665,7 +671,9 @@ mod tests {
             responses: HashMap<String, Value>,
         }
         impl R2Client for MockR2 {
-            fn cmd(&mut self, _cmd: &str) -> Result<String, Error> { Ok(String::new()) }
+            fn cmd(&mut self, _cmd: &str) -> Result<String, Error> {
+                Ok(String::new())
+            }
             fn cmdj(&mut self, cmd: &str) -> Result<Value, Error> {
                 Ok(self.responses.get(cmd).cloned().unwrap_or(json!([])))
             }

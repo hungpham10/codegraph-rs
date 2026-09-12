@@ -509,9 +509,7 @@ fn tokenize_nginx(source: &str) -> Result<Vec<NginxToken>> {
             }
         }
         // `_by_lua_block {` → nội dung tiếp theo là code thô đến `}` đóng.
-        if last_word.ends_with("_by_lua_block")
-            && chars.get(i) == Some(&'{')
-        {
+        if last_word.ends_with("_by_lua_block") && chars.get(i) == Some(&'{') {
             i += 1;
             let mut code = String::new();
             let mut depth = 0usize;
@@ -578,12 +576,18 @@ fn parse_nginx_entries(
                             *pos += 1;
                             let value = match args.len() {
                                 0 => RecursiveNode::Null(ByteSpan { start: 0, end: 0 }),
-                                1 => RecursiveNode::String(args.remove(0), ByteSpan { start: 0, end: 0 }),
+                                1 => RecursiveNode::String(
+                                    args.remove(0),
+                                    ByteSpan { start: 0, end: 0 },
+                                ),
                                 _ => RecursiveNode::Array(
                                     args.drain(..)
                                         .map(|a| {
                                             (
-                                                RecursiveNode::String(a, ByteSpan { start: 0, end: 0 }),
+                                                RecursiveNode::String(
+                                                    a,
+                                                    ByteSpan { start: 0, end: 0 },
+                                                ),
                                                 ByteSpan { start: 0, end: 0 },
                                             )
                                         })
@@ -753,8 +757,14 @@ http {
             .filter(|n| n.parent == Some(servers[0].id))
             .collect();
         assert_eq!(kids.len(), 2);
-        assert_eq!(kids[0].value, Some(Scalar::String("10.0.0.1:8080".to_string())));
-        assert_eq!(kids[1].value, Some(Scalar::String("10.0.0.2:8080".to_string())));
+        assert_eq!(
+            kids[0].value,
+            Some(Scalar::String("10.0.0.1:8080".to_string()))
+        );
+        assert_eq!(
+            kids[1].value,
+            Some(Scalar::String("10.0.0.2:8080".to_string()))
+        );
     }
 
     #[test]
@@ -762,7 +772,11 @@ http {
         // Thiếu ';' trước '{' lạc.
         assert!(NginxParser.parse("a.conf", "foo bar }", 1).is_err());
         // Thiếu '}' cuối file.
-        assert!(NginxParser.parse("a.conf", "http { server { listen 80;", 1).is_err());
+        assert!(
+            NginxParser
+                .parse("a.conf", "http { server { listen 80;", 1)
+                .is_err()
+        );
         // Dấu ';' đứng một mình.
         assert!(NginxParser.parse("a.conf", ";", 1).is_err());
     }
@@ -771,7 +785,11 @@ http {
     fn nginx_parser_variables_quoted_and_lua() {
         // Issue 17: `${uri}` trong value — `{`/`}` trong var-ref không phải block.
         let doc = NginxParser
-            .parse("a.conf", "location / {\n set $serve_URL $fullurl${uri}index.html;\n}", 1)
+            .parse(
+                "a.conf",
+                "location / {\n set $serve_URL $fullurl${uri}index.html;\n}",
+                1,
+            )
             .unwrap();
         let set = doc
             .nodes
@@ -785,7 +803,10 @@ http {
             .filter(|n| n.parent == Some(set.id))
             .last()
             .unwrap();
-        assert_eq!(last.value, Some(Scalar::String("$fullurl${uri}index.html".to_string())));
+        assert_eq!(
+            last.value,
+            Some(Scalar::String("$fullurl${uri}index.html".to_string()))
+        );
 
         // Issue 65: quoted string chứa `{`/`}` — không đếm là block delimiter.
         let doc = NginxParser
@@ -795,14 +816,25 @@ http {
                 1,
             )
             .unwrap();
-        assert!(doc.nodes.iter().any(|n| n.key.as_deref() == Some("error_log")));
+        assert!(
+            doc.nodes
+                .iter()
+                .any(|n| n.key.as_deref() == Some("error_log"))
+        );
 
         // Quoted string unquote + escape `\"`.
         let doc = NginxParser
             .parse("a.conf", r#"directive "with a quoted \" good.";"#, 1)
             .unwrap();
-        let d = doc.nodes.iter().find(|n| n.key.as_deref() == Some("directive")).unwrap();
-        assert_eq!(d.value, Some(Scalar::String("with a quoted \" good.".to_string())));
+        let d = doc
+            .nodes
+            .iter()
+            .find(|n| n.key.as_deref() == Some("directive"))
+            .unwrap();
+        assert_eq!(
+            d.value,
+            Some(Scalar::String("with a quoted \" good.".to_string()))
+        );
 
         // `_by_lua_block` — code thô giữ nguyên, `{`/`}` trong comment không đổi depth.
         let doc = NginxParser
@@ -822,7 +854,9 @@ http {
             .iter()
             .find(|n| n.parent == Some(loc.id) && n.key.as_deref() == Some("rewrite_by_lua_block"))
             .unwrap();
-        assert!(matches!(lua.value, Some(Scalar::String(ref s)) if s.contains("t = { key=\"foo\" }")));
+        assert!(
+            matches!(lua.value, Some(Scalar::String(ref s)) if s.contains("t = { key=\"foo\" }"))
+        );
 
         // Unclosed quote → lỗi có số dòng.
         let err = NginxParser.parse("a.conf", "server {\n set $a \"unterminated\n}", 1);
