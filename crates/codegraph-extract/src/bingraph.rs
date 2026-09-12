@@ -141,6 +141,14 @@ pub enum ListOrder {
     Id,
 }
 
+/// Filter áp khi load symbol thành row — dùng chung cho `list`/`search_name`.
+#[derive(Debug, Clone, Default)]
+pub struct PageFilter {
+    pub kind: Option<SymbolKind>,
+    pub flag: Option<BinFlag>,
+    pub path: Option<String>,
+}
+
 /// Một trang kết quả list/search.
 #[derive(Debug, Clone, Serialize)]
 pub struct BinPage {
@@ -437,14 +445,11 @@ impl BinaryGraph {
             .map_err(db_err)
     }
 
-    /// Load symbols theo danh sách id, lọc kind/flag/path, sort theo order,
-    /// phân trang.
+    /// Load symbols theo danh sách id, áp filter + sort + phân trang.
     async fn load_page(
         &self,
         ids: &[u64],
-        kind: Option<&SymbolKind>,
-        flag: Option<&BinFlag>,
-        path: Option<&str>,
+        filter: &PageFilter,
         order: ListOrder,
         offset: u64,
         limit: u64,
@@ -452,18 +457,18 @@ impl BinaryGraph {
         let mut rows: Vec<BinSymbolRow> = Vec::new();
         for id in ids {
             if let Some(sym) = self.load_symbol(*id).await? {
-                if let Some(k) = kind {
+                if let Some(k) = &filter.kind {
                     if sym.kind != *k {
                         continue;
                     }
                 }
-                if let Some(f) = flag {
+                if let Some(f) = &filter.flag {
                     if !symbol_flags(&sym).contains(f) {
                         continue;
                     }
                 }
-                if let Some(p) = path {
-                    if sym.file != p {
+                if let Some(p) = &filter.path {
+                    if sym.file != *p {
                         continue;
                     }
                 }
@@ -513,16 +518,12 @@ impl BinaryGraph {
         } else {
             meta_ids(&self.storage, "all").await?
         };
-        self.load_page(
-            &ids,
-            kind.as_ref(),
-            flag.as_ref(),
-            path,
-            order,
-            offset,
-            limit,
-        )
-        .await
+        let filter = PageFilter {
+            kind,
+            flag,
+            path: path.map(str::to_string),
+        };
+        self.load_page(&ids, &filter, order, offset, limit).await
     }
 
     /// Search theo tên + mode. Contains/suffix đi qua name trie (substring);
@@ -573,16 +574,13 @@ impl BinaryGraph {
                 }
             }
         }
-        self.load_page(
-            &ids,
-            kind.as_ref(),
-            flag.as_ref(),
-            None,
-            ListOrder::Name,
-            offset,
-            limit,
-        )
-        .await
+        let filter = PageFilter {
+            kind,
+            flag,
+            path: None,
+        };
+        self.load_page(&ids, &filter, ListOrder::Name, offset, limit)
+            .await
     }
 
     /// Tra cứu theo địa chỉ (secondary index `addr:{a}`) — điểm bắt đầu
@@ -590,7 +588,7 @@ impl BinaryGraph {
     pub async fn by_addr(&self, addr: u64, limit: u64) -> Result<Vec<BinSymbolRow>> {
         let ids = meta_ids(&self.storage, &format!("addr:{addr}")).await?;
         let page = self
-            .load_page(&ids, None, None, None, ListOrder::Name, 0, limit)
+            .load_page(&ids, &PageFilter::default(), ListOrder::Name, 0, limit)
             .await?;
         Ok(page.rows)
     }
