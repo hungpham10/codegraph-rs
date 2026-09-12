@@ -328,13 +328,25 @@ async fn ingest_configured_docs(root: &Utf8Path) -> Result<()> {
         return Ok(());
     }
     let mut graph = open_doc_graph(root).await?;
+    let bar = indicatif::ProgressBar::new(files.len() as u64);
+    bar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%) {msg}")
+            .expect("valid progress bar template")
+            .progress_chars("#>-"),
+    );
     let mut ingested = 0usize;
     for (path, format) in &files {
+        bar.set_message(path.to_string());
         match graph.ingest_file(path.as_str(), format.as_deref()).await {
             Ok(_) => ingested += 1,
-            Err(e) => eprintln!("doc ingest failed for {path}: {e}"),
+            Err(e) => {
+                bar.suspend(|| eprintln!("doc ingest failed for {path}: {e}"));
+            }
         }
+        bar.inc(1);
     }
+    bar.finish_and_clear();
     eprintln!("ingested {ingested}/{} documents", files.len());
     Ok(())
 }
