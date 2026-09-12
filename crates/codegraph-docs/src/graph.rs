@@ -7,6 +7,8 @@ use codegraph_graph::Search;
 use codegraph_graph::Storage;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock as TokioRwLock;
 
@@ -17,6 +19,10 @@ const TYPE_RECORD_BASE: u64 = 200_000_000_000;
 const VALUE_RECORD_BASE: u64 = 300_000_000_000;
 const STRUCT_RECORD_BASE: u64 = 400_000_000_000;
 const PATTERN_RECORD_BASE: u64 = 500_000_000_000;
+/// Dải riêng cho doc id — node id và doc id phải không đè nhau (hydrate/
+/// storage key dùng chung namespace `set_node_meta`). Node id ≥ `doc_base`
+/// (~1e9), pattern id ở dải 5e11, doc id ở dải này.
+const DOC_ID_BASE: u64 = 600_000_000_000;
 
 /// Sentinel storage keys for persisted node/doc lists (node ids are u64
 /// that never reach these small constants because real ids start at
@@ -24,6 +30,9 @@ const PATTERN_RECORD_BASE: u64 = 500_000_000_000;
 const DOC_NODE_LIST_RECORD: u64 = 0;
 const DOC_LIST_RECORD: u64 = 1;
 const DOC_META_BASE: u64 = 10_000_000_000;
+/// Sentinel cho interner (mảng string JSON theo thứ tự id). Doc id nằm ở
+/// dải ≥ DOC_ID_BASE nên các slot nhỏ này không đụng doc metadata.
+const DOC_INTERNER_RECORD: u64 = DOC_META_BASE + 1;
 
 /// Default sharding for document tries (mirrors code graph).
 const DEFAULT_SHARDING: usize = 64;
@@ -65,13 +74,17 @@ impl DocumentGraph {
             docs: HashMap::new(),
             nodes: std::sync::Mutex::new(HashMap::new()),
             intern: Interner::new(),
-            path_trie: Search::new(sharding, storage.clone()),
-            type_trie: Search::new(sharding, storage.clone()),
-            value_trie: Search::new(sharding, storage.clone()),
-            struct_trie: Search::new(sharding, storage.clone()),
-            pattern_trie: Search::new(sharding, storage.clone()),
+            // 4 trie projection dùng CHUNG một storage — radix lưu root/shortcut
+            // theo shard index (0..sharding) nên mỗi trie phải ở một dải shard
+            // riêng (bias * sharding), nếu không root pointer ghi đè lẫn nhau
+            // và search chỉ thấy trie insert sau cùng.
+            path_trie: Search::with_shard_bias(sharding, storage.clone(), 0),
+            type_trie: Search::with_shard_bias(sharding, storage.clone(), 1),
+            value_trie: Search::with_shard_bias(sharding, storage.clone(), 2),
+            struct_trie: Search::with_shard_bias(sharding, storage.clone(), 3),
+            pattern_trie: Search::with_shard_bias(sharding, storage.clone(), 4),
             doc_base,
-            next_doc_id: doc_base,
+            next_doc_id: DOC_ID_BASE,
             next_node_id: doc_base,
         }
     }
@@ -111,7 +124,76 @@ impl DocumentGraph {
         };
         graph.next_doc_id = graph.next_doc_id.max(max_doc + 1);
         graph.next_node_id = graph.next_node_id.max(max_node + 1);
+        // Interner chỉ sống trong RAM — persist kèm mỗi upsert, restore tại
+        // đây để id trong tries persist vẫn resolve được. Thiếu blob (graph
+        // cũ) → dựng lại từ doc metadata theo thứ tự doc id (không clear trie
+        // — Search::clear xoá cả namespace dùng chung của storage).
+        if !graph.restore_interner().await? {
+            graph.rebuild_interner_from_docs();
+        }
+        graph.materialize_node_cache();
         Ok(graph)
+    }
+
+    /// Load interner đã persist. Trả `false` nếu chưa có blob (graph cũ).
+    async fn restore_interner(&mut self) -> Result<bool> {
+        let bytes = {
+            let guard = self.storage.read().await;
+            guard.get_node_meta(DOC_INTERNER_RECORD as usize).await?
+        };
+        let Some(bytes) = bytes else {
+            return Ok(false);
+        };
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+        let strings: Vec<String> = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("corrupt interner blob: {e}"))?;
+        self.intern = Interner::with_strings(strings);
+        Ok(true)
+    }
+
+    /// Dựng interner từ keys + scalar values của các doc đã load (theo thứ tự
+    /// doc id — trùng thứ tự intern lúc ingest tuần tự).
+    fn rebuild_interner_from_docs(&mut self) {
+        self.intern = Interner::new();
+        let mut docs: Vec<&Document> = self.docs.values().collect();
+        docs.sort_by_key(|d| d.id);
+        for doc in docs {
+            for node in &doc.nodes {
+                if let Some(k) = &node.key {
+                    self.intern.intern(k.clone());
+                }
+                if let Some(Scalar::String(s)) = &node.value {
+                    self.intern.intern(s.clone());
+                }
+            }
+        }
+    }
+
+    /// Persist interner — gọi sau mỗi upsert để lần `open()` sau vẫn khớp
+    /// token payload đã ghi vào tries.
+    async fn persist_interner(&self) -> Result<()> {
+        let blob =
+            serde_json::to_vec(&self.intern.strings()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.storage
+            .write()
+            .await
+            .set_node_meta(DOC_INTERNER_RECORD as usize, &blob)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    /// Materialize node cache từ doc metadata (Document serialize đủ nodes) —
+    /// hydrate/path_tokens/search_value đọc từ cache trước storage.
+    fn materialize_node_cache(&self) {
+        let mut cache = self.nodes.lock().unwrap();
+        cache.clear();
+        for doc in self.docs.values() {
+            for node in &doc.nodes {
+                cache.insert(node.id, node.clone());
+            }
+        }
     }
 
     /// Ingest một file từ disk: đọc, detect format theo extension (override
@@ -166,19 +248,21 @@ impl DocumentGraph {
         self.add_doc_id(doc_id).await?;
         let node_ids: Vec<u64> = doc.nodes.iter().map(|n| n.id).collect();
         self.add_node_ids(&node_ids).await?;
-        // Insert into tries.
-        for node in &doc.nodes {
-            self.insert_node_into_tries(node).await?;
-        }
-        // Materialize nodes vào cache in-memory (hydrate/collect_path đọc từ
-        // đây trước, thiếu thì mới xuống storage).
+        // Materialize nodes vào cache TRƯỚC khi tokenize — `path_tokens`/
+        // `type_tokens` đi lên tổ tiên qua cache, cache thiếu thì path chain
+        // chỉ còn `[root]` (bug gốc: tries insert trước, cache sau).
         {
             let mut cache = self.nodes.lock().unwrap();
             for node in &doc.nodes {
                 cache.insert(node.id, node.clone());
             }
         }
+        // Insert into tries.
+        for node in &doc.nodes {
+            self.insert_node_into_tries(node).await?;
+        }
         self.docs.insert(doc_id, doc.clone());
+        self.persist_interner().await?;
         Ok(doc_id)
     }
 
@@ -223,22 +307,47 @@ impl DocumentGraph {
     /// Hydrate a node into a small payload suitable for LLM reasoning.
     /// Đọc node + tổ tiên (cho path) + con theo nhu cầu từ storage.
     pub async fn hydrate(&self, node_id: u64) -> Option<NodePayload> {
-        let node = self.node(node_id).await?;
-        let path = self.collect_path(node_id).await;
-        let mut children = Vec::new();
-        for c in &node.children {
-            if let Some(payload) = Box::pin(self.hydrate(*c)).await {
-                children.push(payload);
+        self.hydrate_depth(node_id, None).await
+    }
+
+    /// Như `hydrate` nhưng giới hạn số tầng con đi xuống (`max_depth = Some(2)`
+    /// là payload 2 tầng — giữ payload nhỏ cho LLM trên doc lớn).
+    pub async fn hydrate_depth(
+        &self,
+        node_id: u64,
+        max_depth: Option<usize>,
+    ) -> Option<NodePayload> {
+        self.hydrate_inner(node_id, max_depth, 0).await
+    }
+
+    fn hydrate_inner(
+        &self,
+        node_id: u64,
+        max_depth: Option<usize>,
+        level: usize,
+    ) -> Pin<Box<dyn Future<Output = Option<NodePayload>> + Send + '_>> {
+        Box::pin(async move {
+            let node = self.node(node_id).await?;
+            let path = self.collect_path(node_id).await;
+            let mut children = Vec::new();
+            let descend = max_depth.is_none_or(|d| level < d);
+            if descend {
+                for c in &node.children {
+                    if let Some(payload) = self.hydrate_inner(*c, max_depth, level + 1).await {
+                        children.push(payload);
+                    }
+                }
             }
-        }
-        Some(NodePayload {
-            id: node.id,
-            path,
-            kind: node.kind,
-            value: node.value.clone(),
-            key: node.key.clone(),
-            doc: node.doc,
-            children,
+            Some(NodePayload {
+                id: node.id,
+                path,
+                kind: node.kind,
+                value: node.value.clone(),
+                key: node.key.clone(),
+                index: node.index,
+                doc: node.doc,
+                children,
+            })
         })
     }
 
@@ -287,6 +396,78 @@ impl DocumentGraph {
             }
         }
         Ok(ids)
+    }
+
+    // ── Doc listing / value lookup (dùng bởi MCP + CLI) ───────────────
+
+    /// Liệt kê các document đã ingest kèm metadata (path, format, root, số node).
+    pub fn list_docs(&self) -> Vec<DocInfo> {
+        let mut infos: Vec<DocInfo> = self
+            .docs
+            .values()
+            .map(|d| DocInfo {
+                doc_id: d.id,
+                path: d.path.clone(),
+                format: d.format.clone(),
+                root_node_id: d.root,
+                nodes: d.nodes.len(),
+            })
+            .collect();
+        infos.sort_by_key(|i| i.doc_id);
+        infos
+    }
+
+    /// Tra id đã intern cho một key — cầu nối query text → `DocToken::field`.
+    pub fn intern_id(&self, s: &str) -> Option<u64> {
+        self.intern.get(s)
+    }
+
+    /// Giải ngược id interned thành chuỗi (resolve kết quả search).
+    pub fn intern_str(&self, id: u64) -> Option<String> {
+        self.intern.resolve(id).map(str::to_string)
+    }
+
+    /// Tìm node scalar chứa `query` (case-insensitive) — quét node cache,
+    /// không cần trie. `limit` chặn kết quả cho payload LLM.
+    pub fn search_value_substring(&self, query: &str, limit: usize) -> Vec<Node> {
+        let q = query.to_lowercase();
+        let cache = self.nodes.lock().unwrap();
+        let mut hits = Vec::new();
+        for node in cache.values() {
+            let matched = match &node.value {
+                Some(Scalar::String(s)) => s.to_lowercase().contains(&q),
+                Some(Scalar::Number(n)) => format!("{n}").contains(&q),
+                _ => false,
+            };
+            if matched {
+                hits.push(node.clone());
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+        }
+        hits.sort_by_key(|n| n.id);
+        hits
+    }
+
+    /// Tìm node có key chứa `query` (case-insensitive) — fallback cho
+    /// `search_path` khi pattern không phải full path từ root (chain radix
+    /// luôn bắt đầu từ root nên tên key đơn lẻ không match được).
+    pub fn search_key_substring(&self, query: &str, limit: usize) -> Vec<Node> {
+        let q = query.to_lowercase();
+        let cache = self.nodes.lock().unwrap();
+        let mut hits: Vec<Node> = cache
+            .values()
+            .filter(|n| {
+                n.key
+                    .as_deref()
+                    .is_some_and(|k| k.to_lowercase().contains(&q))
+            })
+            .cloned()
+            .collect();
+        hits.sort_by_key(|n| n.id);
+        hits.truncate(limit);
+        hits
     }
 
     // ── Stats ─────────────────────────────────────────────────────────
@@ -507,27 +688,76 @@ impl DocumentGraph {
     }
 
     fn path_tokens(&mut self, node: &Node) -> Vec<DocToken> {
-        let mut tokens = vec![DocToken::root()];
+        // Thu keys từ node đi lên (node → ancestor), đảo lại thành
+        // ancestor → node rồi MỚI gắn root ở đầu: chain phải là
+        // [root, field(top), ..., field(node)] để khớp query full path.
+        let mut keys = Vec::new();
         let mut cur = node.id;
         let cache = self.nodes.lock().unwrap();
         while let Some(n) = cache.get(&cur) {
             if let Some(key) = &n.key {
                 let key_id = self.intern.intern(key.clone());
-                tokens.push(DocToken::field(key_id));
+                keys.push(DocToken::field(key_id));
             }
             cur = n.parent.unwrap_or(0);
+        }
+        keys.reverse();
+        let mut tokens = vec![DocToken::root()];
+        tokens.extend(keys);
+        tokens
+    }
+    /// Token hóa loại node theo chuỗi tổ tiên: MAP → FIELD → NUMBER ...
+    /// Payload để 0 — đây là token "kind", không mang id.
+    fn type_tokens(&mut self, node: &Node) -> Vec<DocToken> {
+        let mut tokens = Vec::new();
+        let mut cur = Some(node.clone());
+        let cache = self.nodes.lock().unwrap();
+        while let Some(n) = cur {
+            tokens.push(kind_token(&n.kind));
+            cur = n.parent.and_then(|p| cache.get(&p).cloned());
         }
         tokens.reverse();
         tokens
     }
-    fn type_tokens(&self, _node: &Node) -> Vec<DocToken> {
-        vec![DocToken::map(), DocToken::field(0)] // simplified
+    /// Token hóa giá trị scalar: Str/Num/Bool intern theo giá trị.
+    fn value_tokens(&mut self, node: &Node) -> Vec<DocToken> {
+        match &node.value {
+            Some(Scalar::String(s)) => vec![DocToken::str(self.intern.intern(s.clone()))],
+            Some(Scalar::Number(n)) => vec![DocToken::num(self.intern.intern(format!("{n}")))],
+            Some(Scalar::Bool(b)) => {
+                vec![DocToken::bool(self.intern.intern(b.to_string()))]
+            }
+            Some(Scalar::Null) => vec![DocToken::null()],
+            None => vec![],
+        }
     }
-    fn value_tokens(&self, _node: &Node) -> Vec<DocToken> {
-        vec![]
+    /// Token hóa cấu trúc: cửa sổ 2 tầng [kind cha, kind node] — ví
+    /// "FIELD NUMBER" là hình dạng điển hình của một field mang scalar.
+    fn struct_tokens(&mut self, node: &Node) -> Vec<DocToken> {
+        let parent_kind = node
+            .parent
+            .and_then(|p| self.nodes.lock().unwrap().get(&p).cloned())
+            .map(|p| kind_token(&p.kind));
+        let mut tokens = Vec::new();
+        if let Some(t) = parent_kind {
+            tokens.push(t);
+        }
+        tokens.push(kind_token(&node.kind));
+        tokens
     }
-    fn struct_tokens(&self, _node: &Node) -> Vec<DocToken> {
-        vec![]
+}
+
+fn kind_token(kind: &Kind) -> DocToken {
+    match kind {
+        Kind::Root => DocToken::root(),
+        Kind::Map => DocToken::map(),
+        Kind::Array => DocToken::arr(),
+        Kind::Index => DocToken::idx(0),
+        Kind::Field => DocToken::field(0),
+        Kind::String => DocToken::str(0),
+        Kind::Number => DocToken::num(0),
+        Kind::Bool => DocToken::bool(0),
+        Kind::Null | Kind::Reference => DocToken::null(),
     }
 }
 
@@ -539,8 +769,19 @@ pub struct NodePayload {
     pub kind: Kind,
     pub value: Option<Scalar>,
     pub key: Option<String>,
+    pub index: Option<u32>,
     pub doc: u64,
     pub children: Vec<NodePayload>,
+}
+
+/// Thông tin tóm tắt một document — trả về cho `doc list`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocInfo {
+    pub doc_id: u64,
+    pub path: String,
+    pub format: String,
+    pub root_node_id: u64,
+    pub nodes: usize,
 }
 
 /// Summary returned by `codegraph doc stats`.
@@ -604,5 +845,88 @@ mod tests {
             .await
             .unwrap();
         assert!(d3 > d1 && d3 > d2, "d3={d3} phải sau d1={d1}, d2={d2}");
+    }
+
+    /// Children phải được persist: hydrate root đi xuống được, và
+    /// `hydrate_depth` giới hạn số tầng trả về.
+    #[tokio::test]
+    async fn hydrate_descends_children_with_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.yaml");
+        std::fs::write(&p, "service:\n  name: api\n  replicas: 3\n").unwrap();
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage, DocConfig::default());
+        let _doc_id = graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
+        let root = graph.list_docs()[0].root_node_id;
+
+        let full = graph.hydrate(root).await.unwrap();
+        // root → service → {name, replicas}
+        assert_eq!(full.children.len(), 1, "root phải có 1 con `service`");
+        let service = &full.children[0];
+        assert_eq!(service.key.as_deref(), Some("service"));
+        assert_eq!(service.children.len(), 2, "service phải có name + replicas");
+
+        let shallow = graph.hydrate_depth(root, Some(1)).await.unwrap();
+        assert_eq!(shallow.children.len(), 1);
+        assert!(
+            shallow.children[0].children.is_empty(),
+            "max_depth=1 không đi xuống tầng service"
+        );
+    }
+
+    /// Sau reopen, interner phải khớp token đã ghi trong tries — search theo
+    /// key name vẫn trả kết quả.
+    #[tokio::test]
+    async fn reopen_preserves_interner_and_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.yaml");
+        std::fs::write(&p, "service:\n  replicas: 3\n").unwrap();
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage.clone(), DocConfig::default());
+        graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
+        drop(graph);
+
+        let reopened = DocumentGraph::open(storage, DocConfig::default())
+            .await
+            .unwrap();
+        let key_id = reopened
+            .intern_id("replicas")
+            .expect("key `replicas` phải còn trong interner sau reopen");
+        let tokens = vec![
+            DocToken::root(),
+            DocToken::field(reopened.intern_id("service").unwrap()),
+            DocToken::field(key_id),
+        ];
+        let ids = reopened.search_path(&tokens, None).await.unwrap();
+        assert!(!ids.is_empty(), "search `replicas` sau reopen phải match");
+    }
+
+    #[tokio::test]
+    async fn doc_ids_do_not_collide_with_node_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<_> = (0..3)
+            .map(|i| {
+                let p = dir.path().join(format!("d{i}.yaml"));
+                std::fs::write(&p, format!("svc{i}:\n  name: a{i}\n")).unwrap();
+                p
+            })
+            .collect();
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage, DocConfig::default());
+        let mut doc_ids = Vec::new();
+        for f in &files {
+            doc_ids.push(graph.ingest_file(f.to_str().unwrap(), None).await.unwrap());
+        }
+        let node_ids: Vec<u64> = graph.list_docs().iter().map(|i| i.root_node_id).collect();
+        for d in &doc_ids {
+            assert!(
+                !node_ids.contains(d),
+                "doc id {d} không được trùng node id nào"
+            );
+            assert!(
+                *d >= DOC_ID_BASE,
+                "doc id {d} phải nằm trong dải riêng ≥ DOC_ID_BASE"
+            );
+        }
     }
 }

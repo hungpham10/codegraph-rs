@@ -88,6 +88,7 @@ impl DocBuilder {
             doc: self.doc_id,
         };
         self.order.push(built_node.clone());
+        let order_idx = self.order.len() - 1;
         self.nodes.insert(id, built_node.clone());
         // Link parent → child.
         if let Some(pid) = parent
@@ -122,6 +123,11 @@ impl DocBuilder {
                 }
             }
             _ => {}
+        }
+        // Sync children vào `order` — lúc push ban đầu `children` còn rỗng,
+        // các link parent→child chỉ xuất hiện sau khi đệ quy xong.
+        if let Some(p) = self.nodes.get(&id) {
+            self.order[order_idx].children = p.children.clone();
         }
         // Return a clone of the built node (children already filled in `order`).
         self.nodes.get(&id).cloned().unwrap_or(built_node)

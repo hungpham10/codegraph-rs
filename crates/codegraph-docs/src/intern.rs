@@ -20,6 +20,20 @@ impl Interner {
         }
     }
 
+    /// Khôi phục interner từ danh sách string đã persist (id = vị trí + 1).
+    pub fn with_strings(strings: Vec<String>) -> Self {
+        let mut this = Self::new();
+        for s in strings {
+            this.intern(s);
+        }
+        this
+    }
+
+    /// Toàn bộ string theo thứ tự id — dùng để persist.
+    pub fn strings(&self) -> Vec<String> {
+        self.reverse.clone()
+    }
+
     /// Return the interned id for `s`, inserting if absent.
     pub fn intern(&mut self, s: String) -> u64 {
         if let Some(&id) = self.strings.get(&s) {

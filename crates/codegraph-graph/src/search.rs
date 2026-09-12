@@ -260,6 +260,10 @@ type PendingSplitElems = Vec<(usize, Vec<u8>)>;
 /// trait object.
 pub struct Search<T: Element = u8> {
     sharding: usize,
+    /// Shard bias — đồng bộ với `Radix::shard_bias`, dùng khi tính shard cho
+    /// shortcut lookup. Nhiều `Search` dùng chung một storage phải có bias
+    /// khác nhau (khác nhau ≥ sharding) để không đè root/shortcut của nhau.
+    shard_bias: usize,
     trie: Radix<T>,
     storage: Arc<RwLock<dyn Storage>>,
 
@@ -274,10 +278,21 @@ pub struct Search<T: Element = u8> {
 
 impl<T: Element> Search<T> {
     pub fn new(sharding: usize, storage: Arc<RwLock<dyn Storage>>) -> Self {
+        Self::with_shard_bias(sharding, storage, 0)
+    }
+
+    /// Như `new` nhưng dịch dải shard của trie sang `bias * sharding` —
+    /// dùng khi nhiều trie chia sẻ cùng một storage (document projections).
+    pub fn with_shard_bias(
+        sharding: usize,
+        storage: Arc<RwLock<dyn Storage>>,
+        bias: usize,
+    ) -> Self {
         let sharding = sharding.max(1);
         let pending_split_elems = Arc::new(Mutex::new(Vec::new()));
 
         let mut trie = Radix::new(sharding, storage.clone());
+        trie.set_shard_bias(bias * sharding);
 
         // Mặc định: mọi element có meta khi insert_chain được lưu vào node
         // stream keyed theo chính element id (chain model: element id = node
@@ -306,6 +321,7 @@ impl<T: Element> Search<T> {
 
         Self {
             sharding,
+            shard_bias: bias * sharding,
             trie,
             storage,
             pending_split_elems,
@@ -398,7 +414,7 @@ impl<T: Element> Search<T> {
             let mut storage = self.storage.write().await;
             for (leg_id, elem_bytes) in pending {
                 let elem = T::decode(&elem_bytes);
-                let si = radix::shard_of(elem, self.sharding);
+                let si = radix::shard_of(elem, self.sharding) + self.shard_bias;
                 storage.add_shortcut_node(si, &elem_bytes, leg_id).await?;
             }
             storage.set_key_len(index, key.len()).await?;
@@ -431,7 +447,7 @@ impl<T: Element> Search<T> {
         let mut storage = self.storage.write().await;
 
         for elem in key.iter().skip(breakpoint) {
-            let si = radix::shard_of(*elem, self.sharding);
+            let si = radix::shard_of(*elem, self.sharding) + self.shard_bias;
             storage
                 .add_shortcut_node(si, &elem.encode(), node_id)
                 .await?;
@@ -504,7 +520,7 @@ impl<T: Element> Search<T> {
         }
 
         let first_elem = pattern[0];
-        let si = radix::shard_of(first_elem, self.sharding);
+        let si = radix::shard_of(first_elem, self.sharding) + self.shard_bias;
 
         // Query candidates trực tiếp từ storage (deterministic per snapshot —
         // resume chỉ cần cand_idx, không cần lưu candidates).

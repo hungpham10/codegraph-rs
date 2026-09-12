@@ -288,28 +288,52 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_doc_search",
-            "Search document nodes by path pattern. Returns matching node IDs and their hydrated payloads.",
+            "Search document nodes by dotted key path (e.g. `spec.replicas` matches nodes under any `spec` → `replicas` chain across all ingested documents). Returns matching node IDs with path, key and value.",
             json!({ "type": "object", "properties": {
-                "pattern": { "type": "string", "description": "Search pattern (substring match on path tokens)." },
-                "depth": { "type": "integer", "default": 1, "description": "Search depth." }
+                "pattern": { "type": "string", "description": "Dotted key path, e.g. `spec.replicas`. Only the last segments need to match at increasing depth." },
+                "depth": { "type": "integer", "default": 1, "description": "Search depth (extra levels below the pattern where the chain may still match)." }
             }, "required": ["pattern"] }),
+        ),
+        tool(
+            "codegraph_doc_search_value",
+            "Search document nodes whose scalar value (string/number) contains the query substring, case-insensitive. Good for finding images, hosts, ports across Kubernetes manifests / Terraform files.",
+            json!({ "type": "object", "properties": {
+                "query": { "type": "string", "description": "Value substring to search, e.g. `nginx`." },
+                "limit": { "type": "integer", "default": 20, "description": "Max results." }
+            }, "required": ["query"] }),
         ),
         tool(
             "codegraph_doc_hydrate",
             "Hydrate a document node into a small payload suitable for LLM reasoning (path, kind, value, key, children).",
             json!({ "type": "object", "properties": {
-                "node_id": { "type": "integer", "description": "Node id to hydrate." }
+                "node_id": { "type": "integer", "description": "Node id to hydrate." },
+                "max_depth": { "type": "integer", "description": "Max child levels to include (omit = unlimited). Use a small value (1-3) to keep payloads small on large documents." }
             }, "required": ["node_id"] }),
         ),
         tool(
             "codegraph_doc_list",
-            "List all ingested documents with their paths and formats.",
+            "List all ingested documents with doc id, path, format, root node id and node count.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
             "codegraph_doc_stats",
             "Show document graph statistics (number of documents and nodes).",
             json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "codegraph_doc_ingest_dir",
+            "Bulk ingest every document file (.yaml/.yml/.json/.toml/.tf/.hcl) under a directory, recursively. Use `limit` to cap the number of files on large repos.",
+            json!({ "type": "object", "properties": {
+                "path": { "type": "string", "description": "Directory to walk recursively." },
+                "limit": { "type": "integer", "default": 500, "description": "Max files to ingest." }
+            }, "required": ["path"] }),
+        ),
+        tool(
+            "codegraph_doc_remove",
+            "Remove an ingested document (by doc id, see codegraph_doc_list) and its nodes from the graph and indexes.",
+            json!({ "type": "object", "properties": {
+                "doc_id": { "type": "integer", "description": "Doc id returned by codegraph_doc_ingest / codegraph_doc_list." }
+            }, "required": ["doc_id"] }),
         ),
         // ── Binary tools (dataset riêng .codegraph/binary.sqlite — lazy SQL) ──
         tool(
@@ -1086,36 +1110,111 @@ pub async fn dispatch_doc_ingest(
 
 pub async fn dispatch_doc_search(
     doc_graph: Arc<crate::SharedDocGraph>,
-    _pattern: &str,
+    pattern: &str,
     depth: usize,
 ) -> Result<String> {
-    let tokens = vec![DocToken::root()];
-    let ids = doc_graph
-        .graph()
-        .await
-        .read()
-        .await
-        .search_path(&tokens, Some(depth))
-        .await
-        .map_err(|e| Error::Other(e.to_string()))?;
-    if ids.is_empty() {
-        return Ok("no nodes matched".to_string());
-    }
     let graph = doc_graph.graph().await;
-    let mut results = Vec::new();
-    for id in &ids {
-        if let Some(payload) = graph.read().await.hydrate(*id).await {
-            results.push(json!({ "id": payload.id, "path": payload.path, "kind": format!("{:?}", payload.kind), "value": payload.value }));
+    let graph = graph.read().await;
+    // Pattern "spec.replicas" → [root, FIELD(spec), FIELD(replicas)].
+    // Chain radix luôn bắt đầu từ root nên pattern phải là full path;
+    // không match → fallback quét key chứa segment cuối (case-insensitive).
+    let mut tokens = vec![DocToken::root()];
+    let mut unknown_seg = None;
+    for seg in pattern.split('.') {
+        match graph.intern_id(seg) {
+            Some(id) => tokens.push(DocToken::field(id)),
+            None => {
+                unknown_seg = Some(seg.to_string());
+                break;
+            }
         }
     }
+    let ids = if unknown_seg.is_none() {
+        graph
+            .search_path(&tokens, Some(depth))
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if ids.is_empty() {
+        // Fallback: quét key theo segment cuối của pattern.
+        let last = pattern.rsplit('.').next().unwrap_or(pattern);
+        let hits = graph.search_key_substring(last, 100);
+        if hits.is_empty() {
+            return Ok(format!(
+                "no nodes matched — key `{last}` not seen in any ingested document"
+            ));
+        }
+        let results: Vec<Value> = hits
+            .iter()
+            .map(|n| {
+                json!({
+                    "id": n.id,
+                    "doc": n.doc,
+                    "key": n.key,
+                    "kind": format!("{:?}", n.kind),
+                    "value": n.value,
+                })
+            })
+            .collect();
+        return serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()));
+    }
+    let mut results = Vec::new();
+    for id in ids.iter().take(100) {
+        if let Some(payload) = graph.hydrate_depth(*id, Some(1)).await {
+            results.push(json!({
+                "id": payload.id,
+                "doc": payload.doc,
+                "path": payload.path,
+                "key": payload.key,
+                "index": payload.index,
+                "kind": format!("{:?}", payload.kind),
+                "value": payload.value,
+            }));
+        }
+    }
+    serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
+}
+
+pub async fn dispatch_doc_search_value(
+    doc_graph: Arc<crate::SharedDocGraph>,
+    query: &str,
+    limit: usize,
+) -> Result<String> {
+    let graph = doc_graph.graph().await;
+    let graph = graph.read().await;
+    let hits = graph.search_value_substring(query, limit);
+    if hits.is_empty() {
+        return Ok(format!("no scalar values matched `{query}`"));
+    }
+    let results: Vec<Value> = hits
+        .iter()
+        .map(|n| {
+            json!({
+                "id": n.id,
+                "doc": n.doc,
+                "key": n.key,
+                "kind": format!("{:?}", n.kind),
+                "value": n.value,
+            })
+        })
+        .collect();
     serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
 }
 
 pub async fn dispatch_doc_hydrate(
     doc_graph: Arc<crate::SharedDocGraph>,
     node_id: u64,
+    max_depth: Option<usize>,
 ) -> Result<String> {
-    let payload = doc_graph.graph().await.read().await.hydrate(node_id).await;
+    let payload = doc_graph
+        .graph()
+        .await
+        .read()
+        .await
+        .hydrate_depth(node_id, max_depth)
+        .await;
     match payload {
         Some(p) => {
             let json = serde_json::to_string_pretty(&p).map_err(|e| Error::Other(e.to_string()))?;
@@ -1126,15 +1225,82 @@ pub async fn dispatch_doc_hydrate(
 }
 
 pub async fn dispatch_doc_list(doc_graph: Arc<crate::SharedDocGraph>) -> Result<String> {
-    let stats = doc_graph
+    let graph = doc_graph.graph().await;
+    let graph = graph.read().await;
+    let infos = graph.list_docs();
+    serde_json::to_string_pretty(&infos).map_err(|e| Error::Other(e.to_string()))
+}
+
+/// Ingest hàng loạt mọi file document (theo extension) trong thư mục
+/// `path` (đệ quy). `limit` chặn số file — tránh nghẹn graph khi trỏ vào
+/// repo lớn; trả về tổng kết.
+pub async fn dispatch_doc_ingest_dir(
+    doc_graph: Arc<crate::SharedDocGraph>,
+    path: &str,
+    limit: usize,
+) -> Result<String> {
+    const EXTS: [&str; 6] = ["yaml", "yml", "json", "toml", "tf", "hcl"];
+    let mut files = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(path)];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+            {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    if files.len() > limit {
+        files.truncate(limit);
+    }
+    let total = files.len();
+    let mut ingested = 0usize;
+    let mut failed = Vec::new();
+    for f in &files {
+        let Some(p) = f.to_str() else { continue };
+        match doc_graph
+            .graph()
+            .await
+            .write()
+            .await
+            .ingest_file(p, None)
+            .await
+        {
+            Ok(_) => ingested += 1,
+            Err(e) => failed.push(format!("{}: {e}", f.display())),
+        }
+    }
+    let mut summary = json!({ "requested": total, "ingested": ingested, "failed": failed.len() });
+    if !failed.is_empty() {
+        summary["errors"] = json!(failed.iter().take(10).collect::<Vec<_>>());
+    }
+    serde_json::to_string_pretty(&summary).map_err(|e| Error::Other(e.to_string()))
+}
+
+pub async fn dispatch_doc_remove(
+    doc_graph: Arc<crate::SharedDocGraph>,
+    doc_id: u64,
+) -> Result<String> {
+    doc_graph
         .graph()
         .await
-        .read()
+        .write()
         .await
-        .stats()
+        .remove_document(doc_id)
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
-    Ok(format!("documents: {}, nodes: {}", stats.docs, stats.nodes))
+    Ok(format!("removed doc {doc_id}"))
 }
 
 pub async fn dispatch_doc_stats(doc_graph: Arc<crate::SharedDocGraph>) -> Result<String> {

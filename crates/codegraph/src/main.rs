@@ -158,9 +158,10 @@ impl OutputFormat {
 enum DocCmd {
     /// Parse and ingest a document file (HCL, YAML, JSON, TOML, XML).
     Ingest {
-        /// Path to the document file.
+        /// Path to the document file. Đặt tên `file` — positional `path` đụng
+        /// global `--path` (Utf8PathBuf parser) làm clap panic khi parse args.
         #[arg()]
-        path: String,
+        file: String,
         /// Override auto-detected format (hcl, yaml, json, toml, nginx).
         #[arg(long)]
         format: Option<String>,
@@ -730,21 +731,43 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
     let mut graph = open_doc_graph(root).await?;
 
     match cmd {
-        DocCmd::Ingest { path, format } => {
-            let inserted = graph.ingest_file(&path, format.as_deref()).await?;
-            println!("ingested {path} → doc_id={inserted}");
+        DocCmd::Ingest { file, format } => {
+            let inserted = graph.ingest_file(&file, format.as_deref()).await?;
+            println!("ingested {file} → doc_id={inserted}");
         }
-        DocCmd::Search { pattern: _, depth } => {
+        DocCmd::Search { pattern, depth } => {
             use codegraph_docs::DocToken;
-            let tokens = vec![DocToken::root(), DocToken::field(0)]; // simplified
-            let ids = graph.search_path(&tokens, Some(depth)).await?;
+            // Full path search qua trie; không match → fallback quét key.
+            let mut tokens = vec![DocToken::root()];
+            for seg in pattern.split('.') {
+                match graph.intern_id(seg) {
+                    Some(id) => tokens.push(DocToken::field(id)),
+                    None => break,
+                }
+            }
+            let ids = graph
+                .search_path(&tokens, Some(depth))
+                .await
+                .unwrap_or_default();
             if ids.is_empty() {
-                println!("no nodes matched");
-            } else {
-                for id in &ids {
-                    if let Some(payload) = graph.hydrate(*id).await {
-                        println!("{}: {:?}", id, payload);
-                    }
+                let last = pattern.rsplit('.').next().unwrap_or(&pattern);
+                let hits = graph.search_key_substring(last, 100);
+                if hits.is_empty() {
+                    println!("no nodes matched — key `{last}` not seen in any ingested document");
+                    return Ok(());
+                }
+                for n in hits {
+                    println!(
+                        "node {} doc={} key={:?} kind={:?} value={:?}",
+                        n.id, n.doc, n.key, n.kind, n.value
+                    );
+                }
+                return Ok(());
+            }
+            for id in ids.iter().take(100) {
+                if let Some(payload) = graph.hydrate_depth(*id, Some(1)).await {
+                    let json = serde_json::to_string_pretty(&payload)?;
+                    println!("{json}");
                 }
             }
         }

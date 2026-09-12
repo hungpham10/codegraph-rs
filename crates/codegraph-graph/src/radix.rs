@@ -172,6 +172,9 @@ pub fn shard_of<T: Element>(elem: T, sharding: usize) -> usize {
 
 pub struct Radix<T: Element = u8> {
     sharding: usize,
+    /// Shard bias — dịch dải shard của trie này sang một vùng khác để nhiều
+    /// trie dùng chung một storage không đè root/shortcut của nhau.
+    shard_bias: usize,
     /// Storage handle. `Radix` chỉ gọi method của `CategoryStorage` + một vài
     /// method của `NodeMetaStorage` / `ShortcutsStorage` / `BloomStorage`; nhưng
     /// cùng một `Arc` được `Search` dùng cho 5 trait phụ — nhận `Storage` (umbrella)
@@ -182,9 +185,15 @@ pub struct Radix<T: Element = u8> {
 }
 
 impl<T: Element> Radix<T> {
+    /// Gán shard bias (phải gọi trước khi insert/search bất kỳ).
+    pub fn set_shard_bias(&mut self, bias: usize) {
+        self.shard_bias = bias;
+    }
+
     pub fn new(sharding: usize, storage: Arc<RwLock<dyn Storage>>) -> Self {
         Self {
             sharding: sharding.max(1),
+            shard_bias: 0,
             storage,
             on_node: None,
             on_split: None,
@@ -253,7 +262,7 @@ impl<T: Element> Radix<T> {
             .storage
             .read()
             .await
-            .get_root(shard_of(prefix[0], self.sharding))
+            .get_root(shard_of(prefix[0], self.sharding) + self.shard_bias)
             .await?;
 
         while node_id != storage::EMPTY {
@@ -326,7 +335,7 @@ impl<T: Element> Radix<T> {
                 .await
                 .new_node(Self::from_vec(&prefix[..1]), storage::EMPTY)
                 .await?;
-            let si = shard_of(prefix[0], self.sharding);
+            let si = shard_of(prefix[0], self.sharding) + self.shard_bias;
             self.storage.write().await.set_root(si, root).await?;
             let leaf = self.extend(root, &prefix[1..], index).await?;
             self.storage
@@ -343,7 +352,7 @@ impl<T: Element> Radix<T> {
             .await
             .new_node(Self::from_vec(prefix), index)
             .await?;
-        let si = shard_of(prefix[0], self.sharding);
+        let si = shard_of(prefix[0], self.sharding) + self.shard_bias;
         self.storage.write().await.set_root(si, id).await?;
         self.maintain_bloom(prefix).await?;
         Ok((id, 0))
@@ -403,7 +412,7 @@ impl<T: Element> Radix<T> {
             self.storage
                 .read()
                 .await
-                .get_root(shard_of(prefix[0], self.sharding))
+                .get_root(shard_of(prefix[0], self.sharding) + self.shard_bias)
                 .await?
         } else {
             begin
@@ -466,7 +475,7 @@ impl<T: Element> Radix<T> {
             .storage
             .read()
             .await
-            .get_root(shard_of(key[0], self.sharding))
+            .get_root(shard_of(key[0], self.sharding) + self.shard_bias)
             .await?;
         if node_id == storage::EMPTY {
             return Ok(Vec::new());
@@ -518,7 +527,7 @@ impl<T: Element> Radix<T> {
             self.storage
                 .read()
                 .await
-                .get_root(shard_of(prefix[0], self.sharding))
+                .get_root(shard_of(prefix[0], self.sharding) + self.shard_bias)
                 .await?
         } else {
             begin
@@ -628,7 +637,7 @@ impl<T: Element> Radix<T> {
                 self.storage
                     .read()
                     .await
-                    .get_root(shard_of(pattern[0], self.sharding))
+                    .get_root(shard_of(pattern[0], self.sharding) + self.shard_bias)
                     .await?
             } else {
                 begin
