@@ -1035,42 +1035,10 @@ pub async fn dispatch_doc_ingest(
     path: &str,
     format: Option<String>,
 ) -> Result<String> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| Error::Invalid(format!("failed to read {path}: {e}")))?;
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-    let fmt: String = match format {
-        Some(f) => f,
-        None => match ext.as_str() {
-            "tf" | "hcl" => "hcl".to_string(),
-            "yaml" | "yml" => "yaml".to_string(),
-            "json" => "json".to_string(),
-            "toml" => "toml".to_string(),
-            _ => {
-                return Err(Error::Invalid(format!(
-                    "unknown format for extension .{ext}"
-                )))
-            }
-        },
-    };
-    let parser: Box<dyn codegraph_docs::DocParser> = match fmt.as_str() {
-        "hcl" => Box::new(codegraph_docs::parsers::HclParser),
-        "yaml" => Box::new(codegraph_docs::parsers::YamlParser),
-        "json" => Box::new(codegraph_docs::parsers::JsonParser),
-        "toml" => Box::new(codegraph_docs::parsers::TomlParser),
-        _ => return Err(Error::Invalid(format!("unsupported format: {fmt}"))),
-    };
-    let doc_id = doc_graph.read().await.stats().docs as u64 + 1;
-    let doc = parser
-        .parse(path, &source, doc_id)
-        .map_err(|e| Error::Other(e.to_string()))?;
     let inserted = doc_graph
         .write()
         .await
-        .upsert_document(doc)
+        .ingest_file(path, format.as_deref())
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
     Ok(format!("ingested {path} → doc_id={inserted}"))

@@ -720,7 +720,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codegraph"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-api"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-bench"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-binary"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "camino",
  "codegraph-core",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-context"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-core"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "async-graphql",
  "camino",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-docs"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "codegraph-core",
@@ -827,6 +827,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tokio",
  "toml",
  "toml_edit 0.22.27",
@@ -834,13 +835,15 @@ dependencies = [
 
 [[package]]
 name = "codegraph-extract"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "camino",
  "codegraph-binary",
  "codegraph-core",
+ "codegraph-docs",
  "codegraph-graph",
  "getrandom 0.2.17",
+ "glob",
  "ignore",
  "indicatif",
  "rayon",
@@ -869,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graph"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "bincode",
@@ -899,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graphql"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "async-graphql",
@@ -922,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-installer"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -938,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-mcp"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -961,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-sboxes"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "camino",
  "codegraph-core",

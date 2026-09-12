@@ -95,6 +95,18 @@ pub struct SymEntry {
     pub is_imported: Option<bool>,
 }
 
+/// Symbol xuất khẩu từ `iEj`.
+#[derive(Debug, Deserialize)]
+pub struct ExportEntry {
+    pub name: Option<String>,
+    pub vaddr: Option<u64>,
+    pub paddr: Option<u64>,
+    pub size: Option<u64>,
+    pub bind: Option<String>,
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
+}
+
 /// String từ `izj` / `izzj`.
 #[derive(Debug, Deserialize)]
 pub struct StrEntry {

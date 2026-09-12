@@ -42,7 +42,12 @@ pub struct DocumentGraph {
     type_trie: Search<DocToken>,
     value_trie: Search<DocToken>,
     struct_trie: Search<DocToken>,
+    /// Pattern-mining trie — reserve cho tính năng mined patterns, chưa có
+    /// reader (trước đây chỉ được clear trong rebuild).
+    #[allow(dead_code)]
     pattern_trie: Search<DocToken>,
+    /// Base id global cho node/doc — id nhỏ hơn đây là id local của parser.
+    doc_base: u64,
     next_doc_id: u64,
     next_node_id: u64,
 }
@@ -63,6 +68,7 @@ impl DocumentGraph {
             value_trie: Search::new(sharding, storage.clone()),
             struct_trie: Search::new(sharding, storage.clone()),
             pattern_trie: Search::new(sharding, storage.clone()),
+            doc_base,
             next_doc_id: doc_base,
             next_node_id: doc_base,
         }
@@ -72,7 +78,30 @@ impl DocumentGraph {
     pub async fn open(storage: Arc<TokioRwLock<dyn Storage>>, config: DocConfig) -> Result<Self> {
         let mut graph = Self::new(storage, config);
         graph.rebuild().await?;
+        // Resume id counters từ trạng thái đã persist — reset về `doc_base`
+        // sẽ đè lên id cũ khi ingest tiếp.
+        let max_doc = graph.docs.keys().copied().max().unwrap_or(0);
+        let max_node = graph.nodes.keys().copied().max().unwrap_or(0);
+        graph.next_doc_id = graph.next_doc_id.max(max_doc + 1);
+        graph.next_node_id = graph.next_node_id.max(max_node + 1);
         Ok(graph)
+    }
+
+    /// Ingest một file từ disk: đọc, detect format theo extension (override
+    /// bằng `format`), parse rồi upsert. Trùng `path` với doc đã có → thay thế
+    /// tại chỗ (re-ingest khi chạy lại `codegraph init` là idempotent).
+    pub async fn ingest_file(&mut self, path: &str, format: Option<&str>) -> Result<u64> {
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
+        let format = match format {
+            Some(f) => f.to_string(),
+            None => crate::parsers::detect_format(path)?,
+        };
+        let existing = self.docs.values().find(|d| d.path == path).map(|d| d.id);
+        let doc_id = existing.unwrap_or(0);
+        let parser = crate::parsers::parser_for(&format)?;
+        let doc = parser.parse(path, &source, doc_id)?;
+        self.upsert_document(doc).await
     }
 
     /// Rebuild all materialized tries from persisted node/doc metadata.
@@ -120,12 +149,10 @@ impl DocumentGraph {
                 self.docs.insert(doc.id, doc);
             }
         }
-        // Rebuild tries.
-        self.path_trie.clear().await?;
-        self.type_trie.clear().await?;
-        self.value_trie.clear().await?;
-        self.struct_trie.clear().await?;
-        self.pattern_trie.clear().await?;
+        // Rebuild tries (in-memory từ node metadata). KHÔNG dùng `Search::clear`
+        // — nó xoá toàn bộ `clear_node_meta`/`clear_chains` của storage, xoá cả
+        // node/doc JSON vừa đọc lên (tries của docs start rỗng từ `new()` nên
+        // không cần clear persistent state).
         let nodes: Vec<Node> = self.nodes.values().cloned().collect();
         for node in nodes {
             self.insert_node_into_tries(&node).await?;
@@ -166,9 +193,15 @@ impl DocumentGraph {
             .await?;
         // Update lists.
         self.add_doc_id(doc_id).await?;
+        let node_ids: Vec<u64> = doc.nodes.iter().map(|n| n.id).collect();
+        self.add_node_ids(&node_ids).await?;
         // Insert into tries.
         for node in &doc.nodes {
             self.insert_node_into_tries(node).await?;
+        }
+        // Materialize nodes vào map in-memory (hydrate/stats đọc từ đây).
+        for node in &doc.nodes {
+            self.nodes.insert(node.id, node.clone());
         }
         self.docs.insert(doc_id, doc.clone());
         Ok(doc_id)
@@ -293,7 +326,49 @@ impl DocumentGraph {
             Ok(Vec::new())
         }
     }
+    /// Ghi danh sách node id vào chain sentinel — `rebuild()` đọc từ đây để
+    /// khôi phục `nodes` map khi mở lại graph từ storage.
+    async fn add_node_ids(&self, node_ids: &[u64]) -> Result<()> {
+        let mut list = {
+            let chain = {
+                let guard = self.storage.read().await;
+                guard.get_chain(DOC_NODE_LIST_RECORD as usize).await?
+            };
+            chain.map(|c| c.to_vec()).unwrap_or_default()
+        };
+        list.extend_from_slice(node_ids);
+        self.storage
+            .write()
+            .await
+            .set_chain(DOC_NODE_LIST_RECORD as usize, &list)
+            .await?;
+        Ok(())
+    }
     fn assign_node_ids(&mut self, mut doc: Document) -> Document {
+        // Parser sinh id local (1..N) — remap toàn bộ (kèm parent/children/root)
+        // sang dải global (≥ `doc_base`) để nhiều doc trong cùng graph không
+        // đè node của nhau. Doc đã có id global (rebuild/re-upsert) giữ nguyên.
+        let is_local = doc
+            .nodes
+            .first()
+            .map(|n| n.id < self.doc_base)
+            .unwrap_or(false);
+        if is_local {
+            let offset = self.next_node_id.saturating_sub(1);
+            if offset > 0 {
+                for node in &mut doc.nodes {
+                    node.id += offset;
+                    if let Some(p) = node.parent.as_mut() {
+                        *p += offset;
+                    }
+                    for c in &mut node.children {
+                        *c += offset;
+                    }
+                }
+                doc.root += offset;
+            }
+            self.next_node_id += doc.nodes.len() as u64;
+        }
         for node in &mut doc.nodes {
             if node.id == 0 {
                 node.id = self.next_node_id;
@@ -332,36 +407,56 @@ impl DocumentGraph {
         path.reverse();
         path
     }
+    /// Insert một token chain vào trie — token rỗng bỏ qua (`insert_chain` với
+    /// key rỗng là lỗi NotFound), key trùng coi như OK (node trùng path/token
+    /// với node khác, hoặc re-ingest cùng path — record cũ giữ nguyên).
+    async fn insert_chain_allow_dup(
+        trie: &mut Search<DocToken>,
+        record: usize,
+        tokens: &[DocToken],
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        let metas: Vec<Option<&[u8]>> = vec![None; tokens.len()];
+        if let Err(e) = trie.insert_chain(record, tokens, &metas).await
+            && !matches!(e, codegraph_graph::SearchError::Duplicated)
+        {
+            return Err(anyhow::anyhow!(e.to_string()));
+        }
+        Ok(())
+    }
+
     async fn insert_node_into_tries(&mut self, node: &Node) -> Result<()> {
         let path_tokens = self.path_tokens(node);
         let type_tokens = self.type_tokens(node);
         let value_tokens = self.value_tokens(node);
         let struct_tokens = self.struct_tokens(node);
         let node_id = node.id;
-        {
-            let trie = &mut self.path_trie;
-            let record = (PATH_RECORD_BASE + node_id) as usize;
-            let metas: Vec<Option<&[u8]>> = vec![None; path_tokens.len()];
-            trie.insert_chain(record, &path_tokens, &metas).await?;
-        }
-        {
-            let trie = &mut self.type_trie;
-            let record = (TYPE_RECORD_BASE + node_id) as usize;
-            let metas: Vec<Option<&[u8]>> = vec![None; type_tokens.len()];
-            trie.insert_chain(record, &type_tokens, &metas).await?;
-        }
-        {
-            let trie = &mut self.value_trie;
-            let record = (VALUE_RECORD_BASE + node_id) as usize;
-            let metas: Vec<Option<&[u8]>> = vec![None; value_tokens.len()];
-            trie.insert_chain(record, &value_tokens, &metas).await?;
-        }
-        {
-            let trie = &mut self.struct_trie;
-            let record = (STRUCT_RECORD_BASE + node_id) as usize;
-            let metas: Vec<Option<&[u8]>> = vec![None; struct_tokens.len()];
-            trie.insert_chain(record, &struct_tokens, &metas).await?;
-        }
+        Self::insert_chain_allow_dup(
+            &mut self.path_trie,
+            (PATH_RECORD_BASE + node_id) as usize,
+            &path_tokens,
+        )
+        .await?;
+        Self::insert_chain_allow_dup(
+            &mut self.type_trie,
+            (TYPE_RECORD_BASE + node_id) as usize,
+            &type_tokens,
+        )
+        .await?;
+        Self::insert_chain_allow_dup(
+            &mut self.value_trie,
+            (VALUE_RECORD_BASE + node_id) as usize,
+            &value_tokens,
+        )
+        .await?;
+        Self::insert_chain_allow_dup(
+            &mut self.struct_trie,
+            (STRUCT_RECORD_BASE + node_id) as usize,
+            &struct_tokens,
+        )
+        .await?;
         Ok(())
     }
 
@@ -435,5 +530,48 @@ mod tests {
         let config = DocConfig::default();
         let graph = DocumentGraph::new(storage, config);
         assert_eq!(graph.stats().docs, 0);
+    }
+
+    /// `ingest_file` hai file khác nhau → doc id khác nhau, node không đè nhau;
+    /// re-ingest cùng path → cùng doc id (thay thế tại chỗ); `open()` lại từ
+    /// storage → docs còn nguyên và counter id tiếp tục sau max id cũ.
+    #[tokio::test]
+    async fn ingest_file_resume_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("a.yaml");
+        let p2 = dir.path().join("b.toml");
+        let p3 = dir.path().join("c.json");
+        std::fs::write(&p1, "service:\n  name: api\n  replicas: 3\n").unwrap();
+        std::fs::write(&p2, "[service]\nname = \"db\"\n").unwrap();
+        std::fs::write(&p3, r#"{"service": {"name": "web"}}"#).unwrap();
+
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage.clone(), DocConfig::default());
+        let d1 = graph.ingest_file(p1.to_str().unwrap(), None).await.unwrap();
+        let d2 = graph.ingest_file(p2.to_str().unwrap(), None).await.unwrap();
+        assert_ne!(d1, d2);
+        assert_eq!(graph.stats().docs, 2);
+        // a.yaml: root+service+name+replicas = 4; b.toml: root+service+name = 3.
+        // Nếu remap local-id sai thì 2 doc đè node nhau → tổng < 7.
+        assert_eq!(graph.stats().nodes, 7);
+
+        // Re-ingest cùng path → id giữ nguyên.
+        assert_eq!(
+            graph.ingest_file(p1.to_str().unwrap(), None).await.unwrap(),
+            d1
+        );
+
+        // Reopen từ storage — docs phục hồi, ingest tiếp có id mới (không đè).
+        let mut reopened = DocumentGraph::open(storage, DocConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(reopened.stats().docs, 2);
+        // Node list được persist — mở lại phải khôi phục đủ node.
+        assert_eq!(reopened.stats().nodes, 7);
+        let d3 = reopened
+            .ingest_file(p3.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        assert!(d3 > d1 && d3 > d2, "d3={d3} phải sau d1={d1}, d2={d2}");
     }
 }
