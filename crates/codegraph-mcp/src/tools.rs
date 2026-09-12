@@ -1160,7 +1160,7 @@ pub async fn dispatch_doc_search(
     }
     // depth = số tầng thừa BÊN DƯỚI pattern; radix filter theo tổng chiều dài
     // key nên phải cộng với độ dài pattern (depth=1 cho phép 1 segment kế tiếp).
-    let mut ids = if !unknown_seg && fuzzy_seg.is_none() {
+    let ids = if !unknown_seg && fuzzy_seg.is_none() {
         // Trie trả nhanh node đại diện; scan bổ sung ĐỦ node trùng path ở
         // các doc khác (radix leaf chỉ giữ 1 record/chain).
         let mut ids = graph

@@ -779,7 +779,7 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
             }
             // Có segment `~` → bỏ qua full-path, đi thẳng fuzzy.
             // depth = số tầng thừa dưới pattern; radix filter theo tổng key len.
-            let mut ids = if fuzzy_seg.is_none() {
+            let ids = if fuzzy_seg.is_none() {
                 let mut ids = graph
                     .search_path(&tokens, Some(tokens.len() - 1 + depth))
                     .await
