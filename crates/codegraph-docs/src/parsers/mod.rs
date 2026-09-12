@@ -414,8 +414,7 @@ fn tokenize_nginx(source: &str) -> Result<Vec<NginxToken>> {
     let mut i = 0usize;
     let mut line = 1u32;
     let mut last_word = String::new();
-    while i < chars.len() {
-        let c = chars[i];
+    while let Some(&c) = chars.get(i) {
         match c {
             '\n' => {
                 line += 1;
@@ -473,8 +472,7 @@ fn tokenize_nginx(source: &str) -> Result<Vec<NginxToken>> {
                 let mut word = String::new();
                 let mut in_var_ref = false;
                 let mut prev = '\0';
-                loop {
-                    let Some(&c2) = chars.get(i) else { break };
+                while let Some(&c2) = chars.get(i) {
                     if in_var_ref {
                         if c2 == '}' {
                             in_var_ref = false;
@@ -690,6 +688,38 @@ fn push_nginx_entry(
     }
 }
 
+/// Detect document format từ extension: `tf`/`hcl` → hcl, `yaml`/`yml`,
+/// `json`, `toml`. Lỗi khi extension không nhận diện được.
+pub fn detect_format(path: &str) -> Result<String> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "tf" | "hcl" => Ok("hcl".to_string()),
+        "yaml" | "yml" => Ok("yaml".to_string()),
+        "json" => Ok("json".to_string()),
+        "toml" => Ok("toml".to_string()),
+        "conf" | "nginx" => Ok("nginx".to_string()),
+        _ => Err(anyhow::anyhow!(
+            "unknown format for extension .{ext}; specify --format to override"
+        )),
+    }
+}
+
+/// Chọn parser theo format name (`"hcl"`, `"yaml"`, `"json"`, `"toml"`).
+pub fn parser_for(format: &str) -> Result<Box<dyn DocParser>> {
+    match format {
+        "hcl" => Ok(Box::new(HclParser)),
+        "yaml" => Ok(Box::new(YamlParser)),
+        "json" => Ok(Box::new(JsonParser)),
+        "toml" => Ok(Box::new(TomlParser)),
+        "nginx" => Ok(Box::new(NginxParser)),
+        _ => Err(anyhow::anyhow!("unsupported document format: {format}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,9 +829,7 @@ http {
         // 2 args → Array; `${uri}` giữ nguyên trong arg thứ 2.
         let last = doc
             .nodes
-            .iter()
-            .filter(|n| n.parent == Some(set.id))
-            .last()
+            .iter().rfind(|n| n.parent == Some(set.id))
             .unwrap();
         assert_eq!(
             last.value,
@@ -880,37 +908,5 @@ http {
         // root + events + worker_connections = 3.
         assert_eq!(graph.stats().nodes, 3);
         assert_eq!(graph.stats().docs, 1);
-    }
-}
-
-/// Detect document format từ extension: `tf`/`hcl` → hcl, `yaml`/`yml`,
-/// `json`, `toml`. Lỗi khi extension không nhận diện được.
-pub fn detect_format(path: &str) -> Result<String> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "tf" | "hcl" => Ok("hcl".to_string()),
-        "yaml" | "yml" => Ok("yaml".to_string()),
-        "json" => Ok("json".to_string()),
-        "toml" => Ok("toml".to_string()),
-        "conf" | "nginx" => Ok("nginx".to_string()),
-        _ => Err(anyhow::anyhow!(
-            "unknown format for extension .{ext}; specify --format to override"
-        )),
-    }
-}
-
-/// Chọn parser theo format name (`"hcl"`, `"yaml"`, `"json"`, `"toml"`).
-pub fn parser_for(format: &str) -> Result<Box<dyn DocParser>> {
-    match format {
-        "hcl" => Ok(Box::new(HclParser)),
-        "yaml" => Ok(Box::new(YamlParser)),
-        "json" => Ok(Box::new(JsonParser)),
-        "toml" => Ok(Box::new(TomlParser)),
-        "nginx" => Ok(Box::new(NginxParser)),
-        _ => Err(anyhow::anyhow!("unsupported document format: {format}")),
     }
 }

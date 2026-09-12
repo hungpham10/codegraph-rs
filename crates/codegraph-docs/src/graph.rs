@@ -419,11 +419,10 @@ impl DocumentGraph {
             return Ok(());
         }
         let metas: Vec<Option<&[u8]>> = vec![None; tokens.len()];
-        if let Err(e) = trie.insert_chain(record, tokens, &metas).await {
-            if !matches!(e, codegraph_graph::SearchError::Duplicated) {
+        if let Err(e) = trie.insert_chain(record, tokens, &metas).await
+            && !matches!(e, codegraph_graph::SearchError::Duplicated) {
                 return Err(anyhow::anyhow!(e.to_string()));
             }
-        }
         Ok(())
     }
 

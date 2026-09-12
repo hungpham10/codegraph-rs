@@ -211,6 +211,13 @@ pub struct StorageConfig {
     pub dsns: Vec<String>,
 }
 
+/// Một file docs khớp glob `[docgraph] paths`: path + format override
+/// (từ suffix `:<format>` của entry, nếu có).
+pub type DocFile = (Utf8PathBuf, Option<String>);
+
+/// Config document graph + danh sách file docs cần ingest lúc `codegraph init`.
+pub type DocFiles = (codegraph_docs::DocConfig, Vec<DocFile>);
+
 impl ExtractConfig {
     pub fn load(root: &Utf8Path) -> Self {
         let path = root.join(".codegraph").join("config.toml");
@@ -381,17 +388,11 @@ impl ExtractConfig {
     /// Config document graph + danh sách file khớp glob `[docgraph] paths`
     /// (path kèm format override). Trả `None` khi `[docgraph]` không bật /
     /// không khai báo `paths`.
-    pub fn doc_config(
-        &self,
-        root: &Utf8Path,
-    ) -> Option<(
-        codegraph_docs::DocConfig,
-        Vec<(Utf8PathBuf, Option<String>)>,
-    )> {
+    pub fn doc_config(&self, root: &Utf8Path) -> Option<DocFiles> {
         if !self.docgraph.is_enabled() {
             return None;
         }
-        let mut files: Vec<(Utf8PathBuf, Option<String>)> = Vec::new();
+        let mut files: Vec<DocFile> = Vec::new();
         for entry in &self.docgraph.paths {
             let (pattern, format) = split_format_override(entry);
             let full = root.join(pattern).to_string();
