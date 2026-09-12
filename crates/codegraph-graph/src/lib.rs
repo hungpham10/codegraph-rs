@@ -117,6 +117,15 @@ fn backend_unavailable(name: &str) -> Error {
     ))
 }
 
+/// Capacity mỗi LRU cache trong `CachedStorage` cho keyspace datasets
+/// (docs/binary). Node meta ~vài trăm bytes/entry → 4096 entry ≈ vài MB.
+/// Build không bật backend nào → các nhánh dùng nó bị cfg out.
+#[cfg_attr(
+    not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
+    allow(dead_code)
+)]
+const DEFAULT_CACHE_CAPACITY: usize = 4096;
+
 /// Map `search::Error` → `Error::Search`.
 fn serr_search(e: crate::search::Error) -> Error {
     Error::Search(e.to_string())
@@ -144,7 +153,12 @@ pub async fn open_keyspace_storage(dsn: &str, keyspace: &str) -> Result<Arc<RwLo
             let storage = crate::storage::sqlite::SqliteStorage::open(path)
                 .await
                 .map_err(serr)?;
-            return Ok(Arc::new(RwLock::new(storage)));
+            // LRU cache phía trước backend — per-node meta reads (doc graph
+            // lazy hydrate) và hot tries đỡ round-trip sqlite.
+            return Ok(crate::storage::cached::CachedStorage::wrap(
+                Box::new(storage),
+                DEFAULT_CACHE_CAPACITY,
+            ));
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -158,7 +172,10 @@ pub async fn open_keyspace_storage(dsn: &str, keyspace: &str) -> Result<Arc<RwLo
             let storage = crate::storage::lmdb::LmdbStorage::open(path)
                 .await
                 .map_err(serr)?;
-            return Ok(Arc::new(RwLock::new(storage)));
+            return Ok(crate::storage::cached::CachedStorage::wrap(
+                Box::new(storage),
+                DEFAULT_CACHE_CAPACITY,
+            ));
         }
         #[cfg(not(feature = "lmdb"))]
         {
@@ -174,7 +191,10 @@ pub async fn open_keyspace_storage(dsn: &str, keyspace: &str) -> Result<Arc<RwLo
             let storage = crate::storage::redis::RedisStorage::new(client, keyspace)
                 .await
                 .map_err(serr)?;
-            return Ok(Arc::new(RwLock::new(storage)));
+            return Ok(crate::storage::cached::CachedStorage::wrap(
+                Box::new(storage),
+                DEFAULT_CACHE_CAPACITY,
+            ));
         }
         #[cfg(not(feature = "redis"))]
         {

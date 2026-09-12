@@ -328,13 +328,25 @@ async fn ingest_configured_docs(root: &Utf8Path) -> Result<()> {
         return Ok(());
     }
     let mut graph = open_doc_graph(root).await?;
+    let bar = indicatif::ProgressBar::new(files.len() as u64);
+    bar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%) {msg}")
+            .expect("valid progress bar template")
+            .progress_chars("#>-"),
+    );
     let mut ingested = 0usize;
     for (path, format) in &files {
+        bar.set_message(path.to_string());
         match graph.ingest_file(path.as_str(), format.as_deref()).await {
             Ok(_) => ingested += 1,
-            Err(e) => eprintln!("doc ingest failed for {path}: {e}"),
+            Err(e) => {
+                bar.suspend(|| eprintln!("doc ingest failed for {path}: {e}"));
+            }
         }
+        bar.inc(1);
     }
+    bar.finish_and_clear();
     eprintln!("ingested {ingested}/{} documents", files.len());
     Ok(())
 }
@@ -703,6 +715,11 @@ async fn cmd_serve(
     } else {
         CodegraphServer::new_with_format(format, mermaid)
     };
+    if use_root {
+        // Build symbol index ngầm sau khi server nhận request — call tool đầu
+        // không block cả phút trên repo lớn (initialize không bao giờ chờ).
+        server.prewarm_symbol_index();
+    }
     codegraph_mcp::serve_stdio(server).await
 }
 
@@ -725,13 +742,13 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
                 println!("no nodes matched");
             } else {
                 for id in &ids {
-                    if let Some(payload) = graph.hydrate(*id) {
+                    if let Some(payload) = graph.hydrate(*id).await {
                         println!("{}: {:?}", id, payload);
                     }
                 }
             }
         }
-        DocCmd::Hydrate { node_id } => match graph.hydrate(node_id) {
+        DocCmd::Hydrate { node_id } => match graph.hydrate(node_id).await {
             Some(payload) => {
                 let json = serde_json::to_string_pretty(&payload)?;
                 println!("{json}");
@@ -739,11 +756,11 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
             None => println!("node {node_id} not found"),
         },
         DocCmd::List => {
-            let stats = graph.stats();
+            let stats = graph.stats().await?;
             println!("documents: {}, nodes: {}", stats.docs, stats.nodes);
         }
         DocCmd::Stats => {
-            let stats = graph.stats();
+            let stats = graph.stats().await?;
             println!("documents: {}", stats.docs);
             println!("nodes: {}", stats.nodes);
         }

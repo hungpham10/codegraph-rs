@@ -36,7 +36,9 @@ const DEFAULT_SHARDING: usize = 64;
 pub struct DocumentGraph {
     storage: Arc<TokioRwLock<dyn Storage>>,
     docs: HashMap<u64, Document>,
-    nodes: HashMap<u64, Node>,
+    /// Cache node đọc theo nhu cầu (`node()`) — KHÔNG load sẵn toàn bộ khi
+    /// open. Mutex (không tokio) vì chỉ giữ trong RAM, không span await.
+    nodes: std::sync::Mutex<HashMap<u64, Node>>,
     intern: Interner,
     path_trie: Search<DocToken>,
     type_trie: Search<DocToken>,
@@ -61,7 +63,7 @@ impl DocumentGraph {
         Self {
             storage: storage.clone(),
             docs: HashMap::new(),
-            nodes: HashMap::new(),
+            nodes: std::sync::Mutex::new(HashMap::new()),
             intern: Interner::new(),
             path_trie: Search::new(sharding, storage.clone()),
             type_trie: Search::new(sharding, storage.clone()),
@@ -74,14 +76,39 @@ impl DocumentGraph {
         }
     }
 
-    /// Open an existing graph from persistent storage and rebuild the tries.
+    /// Open an existing graph from persistent storage — **lazy**: chỉ load
+    /// doc list + doc metadata (số lượng file, nhỏ) và resume id counters.
+    /// KHÔNG materialize toàn bộ node metadata — 186k nodes ở repo document
+    /// lớn làm open chờ hàng chục giây. Node được đọc **theo nhu cầu** từng
+    /// cái (`node()` — hydrate/collect_path), có cache LRU ở storage layer
+    /// (`CachedStorage`) và cache in-memory trong `self.nodes`.
     pub async fn open(storage: Arc<TokioRwLock<dyn Storage>>, config: DocConfig) -> Result<Self> {
         let mut graph = Self::new(storage, config);
-        graph.rebuild().await?;
+        // Load docs list + metadata (theo doc, không theo node).
+        let doc_ids = graph.load_doc_list().await?;
+        for id in doc_ids {
+            let bytes = {
+                let guard = graph.storage.read().await;
+                guard.get_node_meta((DOC_META_BASE + id) as usize).await?
+            };
+            if let Some(bytes) = bytes
+                && let Ok(doc) = serde_json::from_slice::<Document>(&bytes)
+            {
+                graph.docs.insert(doc.id, doc);
+            }
+        }
         // Resume id counters từ trạng thái đã persist — reset về `doc_base`
-        // sẽ đè lên id cũ khi ingest tiếp.
+        // sẽ đè lên id cũ khi ingest tiếp. next_node_id lấy từ max node id
+        // trong chain (1 lần đọc chain id, không đọc từng meta).
         let max_doc = graph.docs.keys().copied().max().unwrap_or(0);
-        let max_node = graph.nodes.keys().copied().max().unwrap_or(0);
+        let max_node = {
+            let guard = graph.storage.read().await;
+            guard
+                .get_chain(DOC_NODE_LIST_RECORD as usize)
+                .await?
+                .map(|c| c.iter().copied().max().unwrap_or(0))
+                .unwrap_or(0)
+        };
         graph.next_doc_id = graph.next_doc_id.max(max_doc + 1);
         graph.next_node_id = graph.next_node_id.max(max_node + 1);
         Ok(graph)
@@ -102,62 +129,6 @@ impl DocumentGraph {
         let parser = crate::parsers::parser_for(&format)?;
         let doc = parser.parse(path, &source, doc_id)?;
         self.upsert_document(doc).await
-    }
-
-    /// Rebuild all materialized tries from persisted node/doc metadata.
-    pub async fn rebuild(&mut self) -> Result<()> {
-        // Load node list.
-        let node_ids = {
-            let guard = self.storage.read().await;
-            if let Some(chain) = guard.get_chain(DOC_NODE_LIST_RECORD as usize).await? {
-                chain.to_vec()
-            } else {
-                Vec::new()
-            }
-        };
-        // Load docs list.
-        let doc_ids = {
-            let guard = self.storage.read().await;
-            if let Some(chain) = guard.get_chain(DOC_LIST_RECORD as usize).await? {
-                chain.to_vec()
-            } else {
-                Vec::new()
-            }
-        };
-        // Load nodes.
-        for id in &node_ids {
-            let bytes = {
-                let guard = self.storage.read().await;
-                guard.get_node_meta(*id as usize).await?
-            };
-            if let Some(bytes) = bytes
-                && let Ok(node) = serde_json::from_slice::<Node>(&bytes)
-            {
-                self.nodes.insert(node.id, node);
-            }
-        }
-        // Load docs.
-        for id in &doc_ids {
-            let meta_id = DOC_META_BASE + id;
-            let bytes = {
-                let guard = self.storage.read().await;
-                guard.get_node_meta(meta_id as usize).await?
-            };
-            if let Some(bytes) = bytes
-                && let Ok(doc) = serde_json::from_slice::<Document>(&bytes)
-            {
-                self.docs.insert(doc.id, doc);
-            }
-        }
-        // Rebuild tries (in-memory từ node metadata). KHÔNG dùng `Search::clear`
-        // — nó xoá toàn bộ `clear_node_meta`/`clear_chains` của storage, xoá cả
-        // node/doc JSON vừa đọc lên (tries của docs start rỗng từ `new()` nên
-        // không cần clear persistent state).
-        let nodes: Vec<Node> = self.nodes.values().cloned().collect();
-        for node in nodes {
-            self.insert_node_into_tries(&node).await?;
-        }
-        Ok(())
     }
 
     /// Ingest a document, replacing any previous version with the same id.
@@ -199,9 +170,13 @@ impl DocumentGraph {
         for node in &doc.nodes {
             self.insert_node_into_tries(node).await?;
         }
-        // Materialize nodes vào map in-memory (hydrate/stats đọc từ đây).
-        for node in &doc.nodes {
-            self.nodes.insert(node.id, node.clone());
+        // Materialize nodes vào cache in-memory (hydrate/collect_path đọc từ
+        // đây trước, thiếu thì mới xuống storage).
+        {
+            let mut cache = self.nodes.lock().unwrap();
+            for node in &doc.nodes {
+                cache.insert(node.id, node.clone());
+            }
         }
         self.docs.insert(doc_id, doc.clone());
         Ok(doc_id)
@@ -221,15 +196,41 @@ impl DocumentGraph {
         Ok(())
     }
 
+    /// Đọc một node theo nhu cầu: cache in-memory trước, thiếu thì xuống
+    /// storage (`CachedStorage` LRU ở giữa). Trả `None` nếu id không tồn tại.
+    async fn node(&self, node_id: u64) -> Option<Node> {
+        if let Some(n) = self.nodes.lock().unwrap().get(&node_id) {
+            return Some(n.clone());
+        }
+        let bytes = {
+            let guard = self.storage.read().await;
+            guard.get_node_meta(node_id as usize).await.ok().flatten()?
+        };
+        if bytes.is_empty() {
+            return None; // meta đã bị clear (node removed).
+        }
+        let node = serde_json::from_slice::<Node>(&bytes).ok()?;
+        self.nodes.lock().unwrap().insert(node_id, node.clone());
+        Some(node)
+    }
+
     /// Return the document owning `node_id`, if any.
-    pub fn doc_of(&self, node_id: u64) -> Option<&Document> {
-        self.nodes.get(&node_id).and_then(|n| self.docs.get(&n.doc))
+    pub async fn doc_of(&self, node_id: u64) -> Option<&Document> {
+        let node = self.node(node_id).await?;
+        self.docs.get(&node.doc)
     }
 
     /// Hydrate a node into a small payload suitable for LLM reasoning.
-    pub fn hydrate(&self, node_id: u64) -> Option<NodePayload> {
-        let node = self.nodes.get(&node_id)?;
-        let path = self.collect_path(node_id);
+    /// Đọc node + tổ tiên (cho path) + con theo nhu cầu từ storage.
+    pub async fn hydrate(&self, node_id: u64) -> Option<NodePayload> {
+        let node = self.node(node_id).await?;
+        let path = self.collect_path(node_id).await;
+        let mut children = Vec::new();
+        for c in &node.children {
+            if let Some(payload) = Box::pin(self.hydrate(*c)).await {
+                children.push(payload);
+            }
+        }
         Some(NodePayload {
             id: node.id,
             path,
@@ -237,11 +238,7 @@ impl DocumentGraph {
             value: node.value.clone(),
             key: node.key.clone(),
             doc: node.doc,
-            children: node
-                .children
-                .iter()
-                .filter_map(|c| self.hydrate(*c))
-                .collect(),
+            children,
         })
     }
 
@@ -294,11 +291,20 @@ impl DocumentGraph {
 
     // ── Stats ─────────────────────────────────────────────────────────
 
-    pub fn stats(&self) -> DocStats {
-        DocStats {
+    pub async fn stats(&self) -> Result<DocStats> {
+        // nodes đếm từ chain node id (1 lần đọc chain, không đọc từng meta).
+        let nodes = {
+            let guard = self.storage.read().await;
+            guard
+                .get_chain(DOC_NODE_LIST_RECORD as usize)
+                .await?
+                .map(|c| c.len())
+                .unwrap_or(0)
+        };
+        Ok(DocStats {
             docs: self.docs.len(),
-            nodes: self.nodes.len(),
-        }
+            nodes,
+        })
     }
 
     // ── Internal helpers ──────────────────────────────────────
@@ -386,6 +392,7 @@ impl DocumentGraph {
     }
 
     async fn remove_document_nodes(&self, doc: &Document) -> Result<()> {
+        let removed: Vec<u64> = doc.nodes.iter().map(|n| n.id).collect();
         for node in &doc.nodes {
             self.storage
                 .write()
@@ -393,12 +400,35 @@ impl DocumentGraph {
                 .set_node_meta(node.id as usize, &[])
                 .await?;
         }
+        // Bỏ node id khỏi chain sentinel — stats đếm từ chain nên id cũ
+        // (doc bị replace/remove) phải ra khỏi danh sách.
+        let mut list = {
+            let guard = self.storage.read().await;
+            guard
+                .get_chain(DOC_NODE_LIST_RECORD as usize)
+                .await?
+                .map(|c| c.to_vec())
+                .unwrap_or_default()
+        };
+        list.retain(|id| !removed.contains(id));
+        self.storage
+            .write()
+            .await
+            .set_chain(DOC_NODE_LIST_RECORD as usize, &list)
+            .await?;
+        // Cache in-memory cũng bỏ theo.
+        {
+            let mut cache = self.nodes.lock().unwrap();
+            for id in removed {
+                cache.remove(&id);
+            }
+        }
         Ok(())
     }
 
-    fn collect_path(&self, mut node_id: u64) -> Vec<String> {
+    async fn collect_path(&self, mut node_id: u64) -> Vec<String> {
         let mut path = Vec::new();
-        while let Some(node) = self.nodes.get(&node_id) {
+        while let Some(node) = self.node(node_id).await {
             if let Some(key) = &node.key {
                 path.push(key.clone());
             }
@@ -479,7 +509,8 @@ impl DocumentGraph {
     fn path_tokens(&mut self, node: &Node) -> Vec<DocToken> {
         let mut tokens = vec![DocToken::root()];
         let mut cur = node.id;
-        while let Some(n) = self.nodes.get(&cur) {
+        let cache = self.nodes.lock().unwrap();
+        while let Some(n) = cache.get(&cur) {
             if let Some(key) = &n.key {
                 let key_id = self.intern.intern(key.clone());
                 tokens.push(DocToken::field(key_id));
@@ -524,12 +555,12 @@ mod tests {
     use super::*;
     use codegraph_graph::InMemoryStorage;
 
-    #[test]
-    fn new_graph() {
+    #[tokio::test]
+    async fn new_graph() {
         let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
         let config = DocConfig::default();
         let graph = DocumentGraph::new(storage, config);
-        assert_eq!(graph.stats().docs, 0);
+        assert_eq!(graph.stats().await.unwrap_or_default().docs, 0);
     }
 
     /// `ingest_file` hai file khác nhau → doc id khác nhau, node không đè nhau;
@@ -550,10 +581,10 @@ mod tests {
         let d1 = graph.ingest_file(p1.to_str().unwrap(), None).await.unwrap();
         let d2 = graph.ingest_file(p2.to_str().unwrap(), None).await.unwrap();
         assert_ne!(d1, d2);
-        assert_eq!(graph.stats().docs, 2);
+        assert_eq!(graph.stats().await.unwrap_or_default().docs, 2);
         // a.yaml: root+service+name+replicas = 4; b.toml: root+service+name = 3.
         // Nếu remap local-id sai thì 2 doc đè node nhau → tổng < 7.
-        assert_eq!(graph.stats().nodes, 7);
+        assert_eq!(graph.stats().await.unwrap_or_default().nodes, 7);
 
         // Re-ingest cùng path → id giữ nguyên.
         assert_eq!(
@@ -565,9 +596,9 @@ mod tests {
         let mut reopened = DocumentGraph::open(storage, DocConfig::default())
             .await
             .unwrap();
-        assert_eq!(reopened.stats().docs, 2);
+        assert_eq!(reopened.stats().await.unwrap_or_default().docs, 2);
         // Node list được persist — mở lại phải khôi phục đủ node.
-        assert_eq!(reopened.stats().nodes, 7);
+        assert_eq!(reopened.stats().await.unwrap_or_default().nodes, 7);
         let d3 = reopened
             .ingest_file(p3.to_str().unwrap(), None)
             .await

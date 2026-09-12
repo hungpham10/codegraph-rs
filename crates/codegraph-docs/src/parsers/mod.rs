@@ -934,7 +934,7 @@ http {
         let mut graph = DocumentGraph::new(storage, DocConfig::default());
         let _doc_id = graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
         // root + events + worker_connections = 3.
-        assert_eq!(graph.stats().nodes, 3);
-        assert_eq!(graph.stats().docs, 1);
+        assert_eq!(graph.stats().await.unwrap_or_default().nodes, 3);
+        assert_eq!(graph.stats().await.unwrap_or_default().docs, 1);
     }
 }
