@@ -758,7 +758,10 @@ service:
         // root (Array của 2 doc) + 2 doc + 4 trường con
         assert_eq!(doc.nodes.len(), 7);
         assert_eq!(
-            doc.nodes.iter().filter(|n| n.key == Some("kind".into())).count(),
+            doc.nodes
+                .iter()
+                .filter(|n| n.key == Some("kind".into()))
+                .count(),
             2
         );
     }
