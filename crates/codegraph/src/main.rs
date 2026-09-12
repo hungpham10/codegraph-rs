@@ -185,6 +185,33 @@ enum DocCmd {
     List,
     /// Show document graph statistics.
     Stats,
+    /// Mine structural patterns (kind chains ending at scalar leaves) across
+    /// all ingested documents and list them sorted by doc frequency ascending
+    /// — rare/characteristic patterns first, background noise last.
+    Patterns {
+        /// Max patterns to keep.
+        #[arg(long, default_value_t = 20)]
+        top_k: usize,
+        /// Min node occurrences for a pattern to be kept.
+        #[arg(long, default_value_t = 3)]
+        min_count: usize,
+        /// Max kind-chain window length ending at the leaf.
+        #[arg(long, default_value_t = 4)]
+        max_depth: usize,
+    },
+    /// Search nodes by structural kind chain, ranked by IDF (rare structures
+    /// first), e.g. `codegraph doc struct "MAP, FIELD, NUMBER"`.
+    Struct {
+        /// Comma-separated kind labels: MAP, ARRAY, FIELD, INDEX, STRING, NUMBER, BOOL, NULL, ROOT.
+        #[arg()]
+        pattern: String,
+        /// Search depth (default: 1).
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+        /// Max results (default: 20).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
@@ -739,27 +766,44 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
             use codegraph_docs::DocToken;
             // Full path search qua trie; không match → fallback quét key.
             let mut tokens = vec![DocToken::root()];
+            let mut fuzzy_seg: Option<String> = None;
             for seg in pattern.split('.') {
+                if let Some(fz) = seg.strip_prefix('~') {
+                    fuzzy_seg = Some(fz.to_string());
+                    break;
+                }
                 match graph.intern_id(seg) {
                     Some(id) => tokens.push(DocToken::field(id)),
                     None => break,
                 }
             }
-            let ids = graph
-                .search_path(&tokens, Some(depth))
-                .await
-                .unwrap_or_default();
+            // Có segment `~` → bỏ qua full-path, đi thẳng fuzzy.
+            // depth = số tầng thừa dưới pattern; radix filter theo tổng key len.
+            let mut ids = if fuzzy_seg.is_none() {
+                let mut ids = graph
+                    .search_path(&tokens, Some(tokens.len() - 1 + depth))
+                    .await
+                    .unwrap_or_default();
+                ids.extend(graph.search_path_scan(&tokens, 100));
+                ids.sort_unstable();
+                ids.dedup();
+                ids
+            } else {
+                Vec::new()
+            };
             if ids.is_empty() {
-                let last = pattern.rsplit('.').next().unwrap_or(&pattern);
-                let hits = graph.search_key_substring(last, 100);
+                let last = fuzzy_seg.unwrap_or_else(|| {
+                    pattern.rsplit('.').next().unwrap_or(&pattern).to_string()
+                });
+                let hits = graph.search_key_fuzzy(&last, 50);
                 if hits.is_empty() {
                     println!("no nodes matched — key `{last}` not seen in any ingested document");
                     return Ok(());
                 }
-                for n in hits {
+                for h in hits {
                     println!(
-                        "node {} doc={} key={:?} kind={:?} value={:?}",
-                        n.id, n.doc, n.key, n.kind, n.value
+                        "node {} doc={} key={:?} score={:.3} kind={:?} value={:?}",
+                        h.node.id, h.node.doc, h.matched_key, h.score, h.node.kind, h.node.value
                     );
                 }
                 return Ok(());
@@ -786,6 +830,59 @@ async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
             let stats = graph.stats().await?;
             println!("documents: {}", stats.docs);
             println!("nodes: {}", stats.nodes);
+        }
+        DocCmd::Patterns {
+            top_k,
+            min_count,
+            max_depth,
+        } => {
+            let mined = graph.mine_patterns(top_k, min_count, max_depth).await?;
+            if mined.is_empty() {
+                println!("no patterns matched (min_count={min_count})");
+            }
+            for p in mined {
+                println!(
+                    "P#{:<4} docs={:.1}% nodes={} chain={}",
+                    p.pattern_id,
+                    p.doc_freq * 100.0,
+                    p.node_count,
+                    p.tokens.join(" → ")
+                );
+            }
+        }
+        DocCmd::Struct {
+            pattern,
+            depth,
+            limit,
+        } => {
+            let tokens: Vec<codegraph_docs::DocToken> = pattern
+                .split(',')
+                .filter_map(|s| {
+                    let s = s.trim();
+                    (!s.is_empty()).then(|| codegraph_docs::parse_kind_label(s))
+                })
+                .collect();
+            let ids = graph.search_kind_chain(&tokens, Some(depth));
+            if ids.is_empty() {
+                println!("no nodes matched this structural pattern");
+                return Ok(());
+            }
+            let total_docs = graph.list_docs().len();
+            let mut rows: Vec<(f64, u64)> = ids
+                .iter()
+                .take(limit * 5)
+                .map(|id| (graph.pattern_uniqueness(*id, total_docs), *id))
+                .collect();
+            rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            for (idf, id) in rows.iter().take(limit) {
+                match graph.hydrate_depth(*id, Some(1)).await {
+                    Some(p) => println!(
+                        "node {} doc={} idf={:.3} path={:?} key={:?} value={:?}",
+                        p.id, p.doc, idf, p.path, p.key, p.value
+                    ),
+                    None => continue,
+                }
+            }
         }
     }
     Ok(())
