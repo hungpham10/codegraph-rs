@@ -84,11 +84,38 @@ impl Orchestrator {
         let (mut parsed, mut skipped) =
             self.parse_files(&files, progress.clone(), config.effect_classifier.clone());
 
+        // Binary đi dataset riêng (`[bingraph]` → binary.sqlite) — KHÔNG ingest
+        // vào code index nữa (tránh n_symbol binary làm phình trie/RAM của
+        // GraphIndex). `[bingraph]` tắt → giữ hành vi cũ (đẩy vào code index).
+        #[cfg(feature = "binary")]
+        let mut bin_stats: Vec<ParseResult> = Vec::new();
         #[cfg(feature = "binary")]
         {
             let (bin, bin_skipped) = codegraph_binary::collect_binaries(root, &config.binary);
-            parsed.extend(bin);
             skipped += bin_skipped;
+            if config.bingraph.is_enabled() && !bin.is_empty() {
+                let bin_base = config.bin_base();
+                let dsn = config.bingraph_dsn(root);
+                if dsn.is_none() {
+                    tracing::warn!("[bingraph] backend không phải sqlite — fallback in-memory");
+                }
+                match crate::bingraph::BinaryGraph::open(dsn.as_deref(), bin_base).await {
+                    Ok(bg) => {
+                        for r in &bin {
+                            if let Err(e) = bg.ingest(r, bin_base).await {
+                                tracing::warn!("binary ingest {} thất bại: {e}", r.path);
+                            }
+                        }
+                        bin_stats = bin;
+                    }
+                    Err(e) => {
+                        tracing::warn!("mở binary graph thất bại: {e} — fallback code index");
+                        parsed.extend(bin);
+                    }
+                }
+            } else {
+                parsed.extend(bin);
+            }
         }
 
         // Đưa ProgressBar vào ingest (register → edges → files → engines) — phase
@@ -102,7 +129,11 @@ impl Orchestrator {
         if let Some(bar) = progress {
             bar.finish_with_message("Indexing complete");
         }
-        Ok(stats_of(&parsed, skipped))
+        #[allow(unused_mut)]
+        let mut all_for_stats = parsed;
+        #[cfg(feature = "binary")]
+        all_for_stats.extend(bin_stats);
+        Ok(stats_of(&all_for_stats, skipped))
     }
 
     /// Parse song song một danh sách file — trả về parsed + số file bị skip.

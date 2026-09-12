@@ -107,6 +107,14 @@ pub struct ExportEntry {
     pub type_: Option<String>,
 }
 
+/// Entry point từ `iej` (entry addresses của executable).
+#[derive(Debug, Deserialize)]
+pub struct EntryPoint {
+    pub vaddr: Option<u64>,
+    pub paddr: Option<u64>,
+    pub name: Option<String>,
+}
+
 /// String từ `izj` / `izzj`.
 #[derive(Debug, Deserialize)]
 pub struct StrEntry {

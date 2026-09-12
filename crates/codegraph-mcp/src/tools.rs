@@ -312,6 +312,45 @@ fn tool_defs() -> Vec<ToolDef> {
             "Show document graph statistics (number of documents and nodes).",
             json!({ "type": "object", "properties": {} }),
         ),
+        // ── Binary tools (dataset riêng .codegraph/binary.sqlite — lazy SQL) ──
+        tool(
+            "codegraph_binary_list",
+            "List binary symbols from the separate binary graph (entrypoints/exports/imports/functions/strings). Fast SQL-indexed listing with pagination — the starting point for binary analysis (entrypoints replace grep as the anchor).",
+            json!({ "type": "object", "properties": {
+                "flag": { "type": "string", "enum": ["entrypoint", "export", "import", "jni"], "description": "Filter by flag. Omit to list all symbols." },
+                "kind": { "type": "string", "description": "Filter by symbol kind (Function, Method, Class, Module, Enum, Constant)." },
+                "path": { "type": "string", "description": "Filter by binary file path." },
+                "order": { "type": "string", "enum": ["name", "addr", "id"], "default": "name" },
+                "offset": { "type": "integer", "default": 0 },
+                "limit": { "type": "integer", "default": 50, "description": "Max rows per page." }
+            } }),
+        ),
+        tool(
+            "codegraph_binary_search",
+            "Search binary symbols by name (exact/prefix/suffix/contains), optionally filtered by kind/flag. Backed by SQL indexes on the separate binary dataset — no in-memory rebuild.",
+            json!({ "type": "object", "properties": {
+                "pattern": { "type": "string", "description": "Name pattern to search." },
+                "match": { "type": "string", "enum": ["exact", "prefix", "suffix", "contains"], "default": "contains" },
+                "kind": { "type": "string", "description": "Optional kind filter (Function, Method, Class, Module, Enum, Constant)." },
+                "flag": { "type": "string", "enum": ["entrypoint", "export", "import", "jni"], "description": "Optional flag filter." },
+                "offset": { "type": "integer", "default": 0 },
+                "limit": { "type": "integer", "default": 50 }
+            }, "required": ["pattern"] }),
+        ),
+        tool(
+            "codegraph_binary_addr",
+            "Look up binary symbols at an address (O(1) point query) and list known entrypoints of a binary. Use to anchor binary analysis at entry addresses.",
+            json!({ "type": "object", "properties": {
+                "addr": { "type": "integer", "description": "Virtual address to look up (omit to list entrypoints)." },
+                "path": { "type": "string", "description": "Binary path for entrypoint listing." },
+                "limit": { "type": "integer", "default": 20 }
+            } }),
+        ),
+        tool(
+            "codegraph_binary_stats",
+            "Show binary graph statistics (symbols, entrypoints, imports, exports, binaries).",
+            json!({ "type": "object", "properties": {} }),
+        ),
     ]
 }
 
@@ -1090,4 +1129,126 @@ pub async fn dispatch_doc_list(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Re
 pub async fn dispatch_doc_stats(doc_graph: Arc<TokioRwLock<DocumentGraph>>) -> Result<String> {
     let stats = doc_graph.read().await.stats();
     Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
+}
+
+// ── Binary tool dispatch ──
+// Dataset riêng `.codegraph/binary.sqlite` — query lazy trên SQL index, không
+// đụng GraphIndex (code search). Sync rusqlite: open O(1) + query có LIMIT.
+
+fn parse_bin_kind(s: &str) -> Option<SymbolKind> {
+    match s.to_ascii_lowercase().as_str() {
+        "function" => Some(SymbolKind::Function),
+        "method" => Some(SymbolKind::Method),
+        "class" => Some(SymbolKind::Class),
+        "interface" => Some(SymbolKind::Interface),
+        "enum" => Some(SymbolKind::Enum),
+        "variable" => Some(SymbolKind::Variable),
+        "constant" => Some(SymbolKind::Constant),
+        "parameter" => Some(SymbolKind::Parameter),
+        "field" => Some(SymbolKind::Field),
+        "module" => Some(SymbolKind::Module),
+        "file" => Some(SymbolKind::File),
+        _ => None,
+    }
+}
+
+pub async fn dispatch_binary(root: &Utf8Path, name: &str, args: Value) -> Result<String> {
+    let graph = codegraph_extract::BinaryGraph::open_from_config(root)
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
+    match name {
+        "codegraph_binary_list" => {
+            let kind = args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .and_then(parse_bin_kind);
+            let flag = args
+                .get("flag")
+                .and_then(|v| v.as_str())
+                .and_then(codegraph_extract::BinFlag::parse);
+            let path = args.get("path").and_then(|v| v.as_str());
+            let order = match args.get("order").and_then(|v| v.as_str()) {
+                Some("addr") => codegraph_extract::ListOrder::Addr,
+                Some("id") => codegraph_extract::ListOrder::Id,
+                _ => codegraph_extract::ListOrder::Name,
+            };
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50)
+                .min(500);
+            let page = graph
+                .list(kind, flag, path, order, offset, limit)
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            serde_json::to_string_pretty(&page).map_err(|e| Error::Other(e.to_string()))
+        }
+        "codegraph_binary_search" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    Error::Invalid("codegraph_binary_search requires `pattern`".into())
+                })?;
+            let mode = match args.get("match").and_then(|v| v.as_str()) {
+                Some("exact") => codegraph_extract::NameMatch::Exact,
+                Some("prefix") => codegraph_extract::NameMatch::Prefix,
+                Some("suffix") => codegraph_extract::NameMatch::Suffix,
+                _ => codegraph_extract::NameMatch::Contains,
+            };
+            let kind = args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .and_then(parse_bin_kind);
+            let flag = args
+                .get("flag")
+                .and_then(|v| v.as_str())
+                .and_then(codegraph_extract::BinFlag::parse);
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50)
+                .min(500);
+            let page = graph
+                .search_name(pattern, mode, kind, flag, offset, limit)
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            serde_json::to_string_pretty(&page).map_err(|e| Error::Other(e.to_string()))
+        }
+        "codegraph_binary_addr" => {
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20)
+                .min(500);
+            let path = args.get("path").and_then(|v| v.as_str());
+            if let Some(addr) = args.get("addr").and_then(|v| v.as_u64()) {
+                let rows = graph
+                    .by_addr(addr, limit)
+                    .await
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                serde_json::to_string_pretty(&rows).map_err(|e| Error::Other(e.to_string()))
+            } else {
+                let eps = graph
+                    .entrypoints(path, limit)
+                    .await
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let list: Vec<_> = eps
+                    .iter()
+                    .map(|(p, n)| json!({ "path": p, "name": n }))
+                    .collect();
+                serde_json::to_string_pretty(&list).map_err(|e| Error::Other(e.to_string()))
+            }
+        }
+        "codegraph_binary_stats" => {
+            let stats = graph
+                .stats()
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            serde_json::to_string_pretty(&stats).map_err(|e| Error::Other(e.to_string()))
+        }
+        _ => Err(Error::Invalid(format!("unknown binary tool: {name}"))),
+    }
 }
