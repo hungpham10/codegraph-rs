@@ -70,7 +70,7 @@ CodeGraph supports parsing both **source code** (via tree-sitter) and **configur
 
 Document files can be ingested into a **document graph** and queried via:
 - **CLI**: `codegraph doc ingest <path>`, `codegraph doc search`, `codegraph doc stats`
-- **MCP**: `codegraph_doc_ingest`, `codegraph_doc_search`, `codegraph_doc_hydrate`, `codegraph_doc_list`, `codegraph_doc_stats`
+- **MCP**: `codegraph_graphdoc_ingest`, `codegraph_graphdoc_search`, `codegraph_graphdoc_hydrate`, `codegraph_graphdoc_list`, `codegraph_graphdoc_stats`
 - **GraphQL**: `docList`, `docSearch`, `docStats` queries and `docIngest`, `docSearch`, `docStats` mutations
 
 ## 🎯 Key Features

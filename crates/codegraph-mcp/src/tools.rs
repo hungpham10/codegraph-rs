@@ -10,6 +10,15 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// Định nghĩa một MCP tool — single source of truth cho `tools/list`.
+///
+/// Quy ước đặt tên theo dataset: `codegraph_graphcode_*` (code index),
+/// `codegraph_graphdoc_*` (document graph), `codegraph_graphbin_*` (binary
+/// graph). Tool dùng chung nhiều dataset hoặc thao tác trên session giữ tên
+/// riêng: `codegraph_symbol`, `codegraph_search_symbol` (search gộp code +
+/// binary), `codegraph_callers/callees/impact/flow` (route cả binary qua
+/// `bin_base`), `codegraph_context`, `codegraph_search_flow`,
+/// `codegraph_references`, `codegraph_mermaid`, `codegraph_status` (stats gộp
+/// cả 3 dataset), `codegraph_init/deinit/index`, `codegraph_query_usage_report`.
 struct ToolDef {
     name: &'static str,
     desc: &'static str,
@@ -125,13 +134,18 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["query"] }),
         ),
         tool(
-            "codegraph_files",
+            "codegraph_graphcode_files",
             "List indexed files under a path prefix.",
             json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
         ),
         tool(
             "codegraph_status",
-            "Index health: symbol / chain / edge / file counts.",
+            "Full statistics across all three datasets: code graph (symbols/chains/edges/files), document graph (docs/nodes) and binary graph (symbols/entrypoints/imports/exports/binaries). A section is null when that dataset is not present in the workspace.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "codegraph_graphcode_stats",
+            "Code graph statistics only: symbol / chain / edge / file counts for the main code index.",
             json!({ "type": "object", "properties": {} }),
         ),
         // ── Admin tools (init / deinit / index) — thao tác trên session slot ──
@@ -155,12 +169,13 @@ fn tool_defs() -> Vec<ToolDef> {
             "Full re-index of the workspace into .codegraph/db.sqlite. Requires the workspace to be initialized (run codegraph_init first).",
             json!({ "type": "object", "properties": {} }),
         ),
-        // ── Enhanced symbol search (semgraph_search_symbol) ──
+        // ── Shared symbol search (code + binary datasets gộp trong một call) ──
         tool(
             "codegraph_search_symbol",
-            "Search symbols by name with optional kind filter, match mode, and pagination. match: 'contains' (substring anywhere, default), 'prefix' (name starts with), 'suffix' (name ENDS with — e.g. query=\"Service\" finds every *Service class), 'exact' (exact name, case-insensitive), 'semantic' (vector KNN over symbol embeddings — find symbols by similar/approximate names when you don't remember the exact spelling), 'hybrid' (merge 'contains' + 'semantic' via Reciprocal Rank Fusion). Use 'total' with 'offset' to fetch further pages until offset >= total. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue. When more results remain, the response includes a resume id you can pass to page further without re-scanning.",
+            "Search symbols by name across the code index AND the binary graph (see `source`) with optional kind filter, match mode, and pagination. match: 'contains' (substring anywhere, default), 'prefix' (name starts with), 'suffix' (name ENDS with — e.g. query=\"Service\" finds every *Service class), 'exact' (exact name, case-insensitive), 'semantic' (vector KNN over symbol embeddings — find symbols by similar/approximate names when you don't remember the exact spelling), 'hybrid' (merge 'contains' + 'semantic' via Reciprocal Rank Fusion; binary hits fall back to 'contains'). source: 'all' (default) searches both datasets — binary hits come back in the separate `binary` section; 'code' or 'binary' restricts to one dataset. Use 'total' with 'offset' to fetch further pages until offset >= total. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue. When more results remain, the response includes a resume id you can pass to page further without re-scanning.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string" },
+                "source": { "type": "string", "enum": ["all", "code", "binary"], "default": "all", "description": "Which dataset(s) to search: 'all' = code index + binary graph, 'code' = code index only, 'binary' = binary graph only." },
                 "kind": { "type": "string", "enum": ["function", "method", "class", "interface", "enum", "variable", "constant", "parameter", "field", "module", "file"] },
                 "match": { "type": "string", "enum": ["contains", "prefix", "suffix", "exact", "semantic", "hybrid"], "default": "contains" },
                 "limit": { "type": "integer", "default": 20 },
@@ -168,12 +183,12 @@ fn tool_defs() -> Vec<ToolDef> {
                 "resume": { "type": "string", "description": "Resume id from a previous timeout (or from a previous response with more pages) — retry the same call with this to continue where it stopped." },
                 "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["query"] }),
         ),
-        // ── Class queries (codegraph_class / codegraph_list_types) ──
+        // ── Class queries (codegraph_graphcode_class / codegraph_graphcode_list_types) ──
         tool(
-            "codegraph_class",
+            "codegraph_graphcode_class",
             "Get class/interface/enum details with fields and methods as separate lists.",
             json!({ "type": "object", "properties": {
                 "class_name": { "type": "string" },
@@ -182,7 +197,7 @@ fn tool_defs() -> Vec<ToolDef> {
             } }),
         ),
         tool(
-            "codegraph_list_types",
+            "codegraph_graphcode_list_types",
             "List all class/interface/enum symbols in the index (paginated). `kind` selects which: 'class', 'interface', or 'enum'. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
                 "kind": { "type": "string", "enum": ["class", "interface", "enum"], "default": "class", "description": "Which type symbols to list: class, interface, or enum." },
@@ -195,8 +210,8 @@ fn tool_defs() -> Vec<ToolDef> {
             } }),
         ),
         tool(
-            "codegraph_function_scope",
-            "Get a function's parameters and local variables. Disambiguate duplicate function names with 'id' from codegraph_search (pass 'id' alone).",
+            "codegraph_graphcode_function_scope",
+            "Get a function's parameters and local variables. Disambiguate duplicate function names with 'id' from codegraph_search_symbol (pass 'id' alone).",
             json!({ "type": "object", "properties": {
                 "func_name": { "type": "string" },
                 "id": { "type": "integer" },
@@ -205,7 +220,7 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         // ── Annotation / call / dependency queries ──
         tool(
-            "codegraph_search_by_annotation",
+            "codegraph_graphcode_search_by_annotation",
             "Search symbols by annotation (e.g. @RestController, @GetMapping, @Autowired, @Override). Case-insensitive substring match. Optional kind filter. On large indexes pass timeout_ms (default 20000); if the call returns a timeout error containing \"resume\": \"<id>\", retry the SAME call with that resume id to continue.",
             json!({ "type": "object", "properties": {
                 "annotation": { "type": "string" },
@@ -219,7 +234,7 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["annotation"] }),
         ),
         tool(
-            "codegraph_dependencies",
+            "codegraph_graphcode_dependencies",
             "List dependencies (module prefixes) derived from indexed call names: internal (modules that resolve to in-repo symbols) vs external (e.g. fmt, requests, java.util). Sorted by call-site count.",
             json!({ "type": "object", "properties": {} }),
         ),
@@ -233,7 +248,7 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         // ── Behavior sandbox (compile a flow to machine code + run with mocks) ──
         tool(
-            "codegraph_sandbox",
+            "codegraph_graphcode_sandbox",
             "Run a sandbox simulation of a function's flow: compile the entry function + its in-flow callees into machine code (Cranelift JIT) and run it with Rhai mocks. `mocks` maps a callee name to a Rhai body (auto-wrapped into `fn <name>(args) { … }` where `args` is the call's i64 array) or a full `fn <name>(args) { … }` script; inline mocks override `[sandbox].mock_dirs` files. Before compiling, every callee that will be mock-dispatched must have a mock (file or `mocks`); if any is unconfigured the call fails with `link failed: no mock configured for callee(s): …`. Returns the entry return value, the ordered mock invocations, control-flow decisions (if/loop/switch taken/skipped), and any callees that still ran without a mock (`missing_mocks`).",
             json!({ "type": "object", "properties": {
                 "node": { "type": "integer", "description": "Entry function symbol id (from codegraph_search / codegraph_flow)." },
@@ -246,14 +261,14 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         // ── Diff draft (unified diff → graph impact, read-only) ──
         tool(
-            "codegraph_diff",
+            "codegraph_graphcode_diff",
             "Analyze a unified diff (MR / patch file / `git diff` output) against the indexed graph and produce a DRAFT report of what would change in codegraph-graph: which symbols (functions/methods/classes) are touched (by line overlap), which flows contain call sites on changed lines, the control-flow marker window around each affected call (IF_TRUE/LOOP/BRANCH_END…), and which flows call the touched functions. The index itself is NOT mutated — this is a dry-run assessment you can review before applying the diff.",
             json!({ "type": "object", "properties": {
                 "diff": { "type": "string", "description": "Unified diff text: `git diff` output, a .patch file content, or the diff from an MR. Supports multi-file diffs, added/removed/renamed files, and `\\ No newline at end of file`." }
             }, "required": ["diff"] }),
         ),
         tool(
-            "codegraph_diff_simulate",
+            "codegraph_graphcode_diff_simulate",
             "Diff → behavior simulation (draft): take a unified diff, find the functions it touches, then run the sboxes sandbox on the entry flow BOTH on the current index (post-MR) and on a temporary index built from a git ref (`base_ref`, default HEAD = pre-MR), and compare the observed traces (ordered mock calls, condition decisions). The sandbox follows flow STRUCTURE: branch decisions follow `branch_policy` (if_true/if_false, it does not read the guard text), loops run up to `loop_cap`, and mock call order reflects the flow — numeric arithmetic on values is NOT modeled. Requires the workspace to be a git repo (pre-MR tree comes from `git archive`) and the entry flow to be sandbox-friendly (primitive args, library callees mocked via `mocks`). Read-only — the index is never mutated.",
             json!({ "type": "object", "properties": {
                 "diff": { "type": "string", "description": "Unified diff text (MR / patch / git diff)." },
@@ -266,7 +281,7 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["diff"] }),
         ),
         tool(
-            "codegraph_origin_simulate",
+            "codegraph_graphcode_origin_simulate",
             "Ref vs working tree simulation (draft): run the sboxes sandbox on an entry flow at a git ref (default HEAD, e.g. `origin/main`) — a temporary index built from `git archive <ref>` — AND on the current index (working tree), then compare the observed traces (ordered mock calls, condition decisions). No diff needed: you pick any entry function and immediately see whether local uncommitted edits change its flow's behavior. The sandbox follows flow STRUCTURE: branch decisions follow `branch_policy` (if_true/if_false, guard text is not read), loops run up to `loop_cap`, mock call order reflects the flow — numeric arithmetic on values is NOT modeled. Entry is resolved by NAME in each index (symbol ids differ between ref and working tree). Requires a git repo. Read-only — the index is never mutated.",
             json!({ "type": "object", "properties": {
                 "entry": { "type": "string", "description": "Entry function name (substring → first function match in each index)." },
@@ -277,9 +292,9 @@ fn tool_defs() -> Vec<ToolDef> {
                 "loop_cap": { "type": "integer", "description": "Override config loop_cap." }
             }, "required": ["entry"] }),
         ),
-        // ── Document tools ──
+        // ── Document tools (codegraph_graphdoc_*) ──
         tool(
-            "codegraph_doc_ingest",
+            "codegraph_graphdoc_ingest",
             "Parse and ingest a document file (HCL/Terraform, YAML, JSON, TOML). The file is read, parsed by the appropriate format parser, and added to the document graph.",
             json!({ "type": "object", "properties": {
                 "path": { "type": "string", "description": "Path to the document file." },
@@ -287,7 +302,7 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["path"] }),
         ),
         tool(
-            "codegraph_doc_search",
+            "codegraph_graphdoc_search",
             "Search document nodes by dotted key path (e.g. `spec.replicas` matches nodes under any `spec` → `replicas` chain across all ingested documents). Returns matching node IDs with path, key and value.",
             json!({ "type": "object", "properties": {
                 "pattern": { "type": "string", "description": "Dotted key path, e.g. `spec.replicas`. Only the last segments need to match at increasing depth." },
@@ -295,7 +310,7 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["pattern"] }),
         ),
         tool(
-            "codegraph_doc_search_value",
+            "codegraph_graphdoc_search_value",
             "Search document nodes whose scalar value (string/number) contains the query substring, case-insensitive. Good for finding images, hosts, ports across Kubernetes manifests / Terraform files.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string", "description": "Value substring to search, e.g. `nginx`." },
@@ -303,7 +318,7 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["query"] }),
         ),
         tool(
-            "codegraph_doc_hydrate",
+            "codegraph_graphdoc_hydrate",
             "Hydrate a document node into a small payload suitable for LLM reasoning (path, kind, value, key, children).",
             json!({ "type": "object", "properties": {
                 "node_id": { "type": "integer", "description": "Node id to hydrate." },
@@ -311,17 +326,17 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["node_id"] }),
         ),
         tool(
-            "codegraph_doc_list",
+            "codegraph_graphdoc_list",
             "List all ingested documents with doc id, path, format, root node id and node count.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
-            "codegraph_doc_stats",
+            "codegraph_graphdoc_stats",
             "Show document graph statistics (number of documents and nodes).",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
-            "codegraph_doc_ingest_dir",
+            "codegraph_graphdoc_ingest_dir",
             "Bulk ingest every document file (.yaml/.yml/.json/.toml/.tf/.hcl) under a directory, recursively. Use `limit` to cap the number of files on large repos.",
             json!({ "type": "object", "properties": {
                 "path": { "type": "string", "description": "Directory to walk recursively." },
@@ -329,14 +344,14 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["path"] }),
         ),
         tool(
-            "codegraph_doc_remove",
-            "Remove an ingested document (by doc id, see codegraph_doc_list) and its nodes from the graph and indexes.",
+            "codegraph_graphdoc_remove",
+            "Remove an ingested document (by doc id, see codegraph_graphdoc_list) and its nodes from the graph and indexes.",
             json!({ "type": "object", "properties": {
-                "doc_id": { "type": "integer", "description": "Doc id returned by codegraph_doc_ingest / codegraph_doc_list." }
+                "doc_id": { "type": "integer", "description": "Doc id returned by codegraph_graphdoc_ingest / codegraph_graphdoc_list." }
             }, "required": ["doc_id"] }),
         ),
         tool(
-            "codegraph_doc_mine_patterns",
+            "codegraph_graphdoc_mine_patterns",
             "Mine structural patterns across all ingested documents: counts kind chains (e.g. MAP → FIELD → NUMBER) ending at scalar leaves, assigns stable pattern ids (P#) and indexes them. Results are sorted by document frequency ascending — rare/characteristic patterns first, background noise (freq ≈ 1.0) last.",
             json!({ "type": "object", "properties": {
                 "top_k": { "type": "integer", "default": 20, "description": "Max patterns to keep." },
@@ -345,12 +360,12 @@ fn tool_defs() -> Vec<ToolDef> {
             } }),
         ),
         tool(
-            "codegraph_doc_list_patterns",
+            "codegraph_graphdoc_list_patterns",
             "List the mined structural pattern registry (pattern id, kind tokens, node count, doc count, doc frequency) from the last mining run.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
-            "codegraph_doc_search_struct",
+            "codegraph_graphdoc_search_struct",
             "Search document nodes by structural kind chain, e.g. `MAP, FIELD, NUMBER`. Results are ranked by IDF — nodes whose surrounding structure is rare across documents rank first; background structures rank last.",
             json!({ "type": "object", "properties": {
                 "pattern": { "type": "string", "description": "Comma-separated kind labels: MAP, ARRAY, FIELD, INDEX, STRING, NUMBER, BOOL, NULL, ROOT." },
@@ -358,9 +373,10 @@ fn tool_defs() -> Vec<ToolDef> {
                 "limit": { "type": "integer", "default": 20, "description": "Max results." }
             }, "required": ["pattern"] }),
         ),
-        // ── Binary tools (dataset riêng .codegraph/binary.sqlite — lazy SQL) ──
+        // ── Binary tools (dataset riêng .codegraph/binary.sqlite — lazy SQL).
+        // Search binary đã gộp vào codegraph_search_symbol (`source: "binary"`). ──
         tool(
-            "codegraph_binary_list",
+            "codegraph_graphbin_list",
             "List binary symbols from the separate binary graph (entrypoints/exports/imports/functions/strings). Fast SQL-indexed listing with pagination — the starting point for binary analysis (entrypoints replace grep as the anchor).",
             json!({ "type": "object", "properties": {
                 "flag": { "type": "string", "enum": ["entrypoint", "export", "import", "jni"], "description": "Filter by flag. Omit to list all symbols." },
@@ -368,32 +384,22 @@ fn tool_defs() -> Vec<ToolDef> {
                 "path": { "type": "string", "description": "Filter by binary file path." },
                 "order": { "type": "string", "enum": ["name", "addr", "id"], "default": "name" },
                 "offset": { "type": "integer", "default": 0 },
-                "limit": { "type": "integer", "default": 50, "description": "Max rows per page." }
+                "limit": { "type": "integer", "default": 50, "description": "Max rows per page." },
+                "format": { "type": "string", "enum": ["minimize", "medium"], "default": "minimize", "description": "Output format: minimize = rows as fixed-order positional arrays [id, name, kind, addr, end_addr, path, flag, lib, signature] (default), medium = objects with default-valued fields omitted." }
             } }),
         ),
         tool(
-            "codegraph_binary_search",
-            "Search binary symbols by name (exact/prefix/suffix/contains), optionally filtered by kind/flag. Backed by SQL indexes on the separate binary dataset — no in-memory rebuild.",
-            json!({ "type": "object", "properties": {
-                "pattern": { "type": "string", "description": "Name pattern to search." },
-                "match": { "type": "string", "enum": ["exact", "prefix", "suffix", "contains"], "default": "contains" },
-                "kind": { "type": "string", "description": "Optional kind filter (Function, Method, Class, Module, Enum, Constant)." },
-                "flag": { "type": "string", "enum": ["entrypoint", "export", "import", "jni"], "description": "Optional flag filter." },
-                "offset": { "type": "integer", "default": 0 },
-                "limit": { "type": "integer", "default": 50 }
-            }, "required": ["pattern"] }),
-        ),
-        tool(
-            "codegraph_binary_addr",
+            "codegraph_graphbin_addr",
             "Look up binary symbols at an address (O(1) point query) and list known entrypoints of a binary. Use to anchor binary analysis at entry addresses.",
             json!({ "type": "object", "properties": {
                 "addr": { "type": "integer", "description": "Virtual address to look up (omit to list entrypoints)." },
                 "path": { "type": "string", "description": "Binary path for entrypoint listing." },
-                "limit": { "type": "integer", "default": 20 }
+                "limit": { "type": "integer", "default": 20 },
+                "format": { "type": "string", "enum": ["minimize", "medium"], "default": "minimize", "description": "Output format: minimize = rows as fixed-order positional arrays [id, name, kind, addr, end_addr, path, flag, lib, signature] (default), medium = objects with default-valued fields omitted." }
             } }),
         ),
         tool(
-            "codegraph_binary_stats",
+            "codegraph_graphbin_stats",
             "Show binary graph statistics (symbols, entrypoints, imports, exports, binaries).",
             json!({ "type": "object", "properties": {} }),
         ),
@@ -624,7 +630,7 @@ pub async fn dispatch_with_api(
             }
             emit(root.as_str(), &out.page)
         }
-        "codegraph_files" => {
+        "codegraph_graphcode_files" => {
             let prefix = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             // Index lưu path absolute; output relativize theo root. Filter khớp
             // CẢ prefix absolute (path gốc) lẫn prefix tương đối (path hiển thị).
@@ -642,12 +648,18 @@ pub async fn dispatch_with_api(
             };
             emit(root.as_str(), &files)
         }
-        "codegraph_status" => {
+        "codegraph_graphcode_stats" => {
             let stats = api.stats_cached().await;
             emit(root.as_str(), &stats)
         }
         "codegraph_search_symbol" => {
             let q = arg_str(&args, "query")?;
+            let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("all");
+            if !matches!(source, "all" | "code" | "binary") {
+                return Err(Error::Invalid(format!(
+                    "unknown source: {source:?} (expected all|code|binary)"
+                )));
+            }
             let kind = args
                 .get("kind")
                 .and_then(|v| v.as_str())
@@ -667,17 +679,27 @@ pub async fn dispatch_with_api(
                 .get("timeout_ms")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(20000);
-            let out = api
-                .search_symbol_paged_resumable(
-                    q,
-                    kind,
-                    mode,
-                    Pagination { limit, offset },
-                    resume,
-                    timeout_ms,
+            let code_out = if source == "binary" {
+                // Chỉ binary — bỏ qua code index (tránh scan không cần).
+                None
+            } else {
+                Some(
+                    api.search_symbol_paged_resumable(
+                        q,
+                        kind,
+                        mode,
+                        Pagination { limit, offset },
+                        resume.clone(),
+                        timeout_ms,
+                    )
+                    .await?,
                 )
-                .await?;
-            if out.timed_out {
+            };
+            if code_out
+                .as_ref()
+                .is_some_and(|out| out.timed_out)
+            {
+                let out = code_out.as_ref().expect("checked above");
                 return Err(Error::Other(format!(
                     "codegraph_search_symbol timed out after {}ms (collected {} symbols so far). \
                      Retry the same call with the same arguments plus \"resume\": \"{}\" \
@@ -689,24 +711,70 @@ pub async fn dispatch_with_api(
             }
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
-            let results: Vec<Value> = out
-                .page
-                .into_iter()
-                .map(|s| symbol_json(root.as_str(), &s, detail, format))
-                .collect();
+            let total = code_out.as_ref().map_or(0, |out| out.total);
+            let code_resume = code_out.as_ref().and_then(|out| out.resume.clone());
+            let has_more = code_out.as_ref().is_some_and(|out| {
+                offset as usize + out.page.len() < out.total
+            });
+            let results: Vec<Value> = code_out
+                .map(|out| {
+                    out.page
+                        .into_iter()
+                        .map(|s| symbol_json(root.as_str(), &s, detail, format))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Nhánh binary: `source: "all"|"binary"` — mở BinaryGraph lazy,
+            // open fail (chưa có dataset) → bỏ phần binary khỏi response.
+            // semantic/hybrid chỉ tồn tại ở code index — binary fallback contains.
+            let binary = if source != "code" {
+                let bin_mode = match mode {
+                    SymbolMatch::Exact => codegraph_extract::NameMatch::Exact,
+                    SymbolMatch::Prefix => codegraph_extract::NameMatch::Prefix,
+                    SymbolMatch::Suffix => codegraph_extract::NameMatch::Suffix,
+                    _ => codegraph_extract::NameMatch::Contains,
+                };
+                match codegraph_extract::BinaryGraph::open_from_config(root).await {
+                    Ok(bin) => match bin
+                        .search_name(
+                            q,
+                            bin_mode,
+                            kind,
+                            None,
+                            offset as u64,
+                            limit as u64,
+                        )
+                        .await
+                    {
+                        Ok(page) => {
+                            let rows: Vec<Value> = page
+                                .rows
+                                .iter()
+                                .map(|r| bin_row_json(root.as_str(), r, format))
+                                .collect();
+                            Some(json!({ "total": page.total, "rows": rows }))
+                        }
+                        Err(_) => None,
+                    },
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
             emit_value(
                 root.as_str(),
                 json!({
                     "results": results,
-                    "total": out.total,
+                    "total": total,
                     "limit": limit,
                     "offset": offset,
-                    "has_more": offset as usize + results.len() < out.total,
-                    "resume": out.resume,
+                    "has_more": has_more,
+                    "resume": code_resume,
+                    "binary": binary,
                 }),
             )
         }
-        "codegraph_class" => {
+        "codegraph_graphcode_class" => {
             let target = resolve_target(
                 api,
                 &args,
@@ -737,7 +805,7 @@ pub async fn dispatch_with_api(
                 },
             }
         }
-        "codegraph_list_types" => {
+        "codegraph_graphcode_list_types" => {
             let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("class");
             let kind = SymbolKind::parse(kind_str).ok_or_else(|| {
                 Error::Invalid(format!(
@@ -759,7 +827,7 @@ pub async fn dispatch_with_api(
                 .await?;
             if out.timed_out {
                 return Err(Error::Other(format!(
-                    "codegraph_list_types timed out after {}ms (collected {} symbols so far). \
+                    "codegraph_graphcode_list_types timed out after {}ms (collected {} symbols so far). \
                      Retry the same call with the same arguments plus \"resume\": \"{}\" \
                      to continue from where it stopped.",
                     timeout_ms,
@@ -786,7 +854,7 @@ pub async fn dispatch_with_api(
                 }),
             )
         }
-        "codegraph_function_scope" => {
+        "codegraph_graphcode_function_scope" => {
             let target = resolve_target(api, &args, "id", "func_name", &[]).await?;
             match target {
                 Target::Ambiguous(v) => emit_value(root.as_str(), v),
@@ -825,7 +893,7 @@ pub async fn dispatch_with_api(
                 },
             }
         }
-        "codegraph_search_by_annotation" => {
+        "codegraph_graphcode_search_by_annotation" => {
             let annotation = arg_str(&args, "annotation")?;
             let kind = args
                 .get("kind")
@@ -852,7 +920,7 @@ pub async fn dispatch_with_api(
                 .await?;
             if out.timed_out {
                 return Err(Error::Other(format!(
-                    "codegraph_search_by_annotation timed out after {}ms (collected {} symbols so far). \
+                    "codegraph_graphcode_search_by_annotation timed out after {}ms (collected {} symbols so far). \
                      Retry the same call with the same arguments plus \"resume\": \"{}\" \
                      to continue the search from where it stopped.",
                     timeout_ms,
@@ -879,7 +947,7 @@ pub async fn dispatch_with_api(
                 }),
             )
         }
-        "codegraph_dependencies" => {
+        "codegraph_graphcode_dependencies" => {
             let report = api.dependencies().await;
             emit(root.as_str(), &report)
         }
@@ -1114,6 +1182,36 @@ fn symbol_json(root: &str, s: &Symbol, detail: DetailLevel, style: OutputStyle) 
     }
 }
 
+/// Binary symbol row JSON theo `style`. `Minimize` → mảng vị trí cố định
+/// [id, name, kind, addr, end_addr, path, flag, lib, signature] (path đã
+/// relativize); `Medium` → object (field default được lược trong `emit_value`).
+fn bin_row_json(root: &str, r: &codegraph_extract::BinSymbolRow, style: OutputStyle) -> Value {
+    match style {
+        OutputStyle::Minimize => json!([
+            r.id,
+            r.name,
+            r.kind,
+            r.addr,
+            r.end_addr,
+            strip_root_prefix(&r.path, root),
+            r.flag,
+            r.lib,
+            r.signature,
+        ]),
+        OutputStyle::Medium => json!({
+            "id": r.id,
+            "name": r.name,
+            "kind": r.kind,
+            "addr": r.addr,
+            "end_addr": r.end_addr,
+            "path": strip_root_prefix(&r.path, root),
+            "flag": r.flag,
+            "lib": r.lib,
+            "signature": r.signature,
+        }),
+    }
+}
+
 /// Strip `root/` prefix khỏi một path — chỉ khi root là tiền tố theo boundary
 /// (`root` + `/`), tránh cắt nhầm `/root2/...`. Giữ nguyên nếu không khớp.
 pub(crate) fn strip_root_prefix<'a>(path: &'a str, root: &str) -> &'a str {
@@ -1287,7 +1385,7 @@ pub async fn dispatch_doc_search(
                     })
                 })
                 .collect();
-            return serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()));
+            return emit_value("", Value::Array(results));
         }
         let hits = graph.search_key_fuzzy(&last, 50);
         if hits.is_empty() {
@@ -1308,7 +1406,7 @@ pub async fn dispatch_doc_search(
                 })
             })
             .collect();
-        return serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()));
+        return emit_value("", Value::Array(results));
     }
     let mut results = Vec::new();
     for id in ids.iter().take(100) {
@@ -1324,7 +1422,7 @@ pub async fn dispatch_doc_search(
             }));
         }
     }
-    serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
+    emit_value("", Value::Array(results))
 }
 
 /// Search node theo kind chain cấu trúc (vd "MAP, FIELD, NUMBER") — kết quả
@@ -1374,8 +1472,8 @@ pub async fn dispatch_doc_search_struct(
         ));
     }
     rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let results: Vec<&Value> = rows.iter().take(limit).map(|(_, v)| v).collect();
-    serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
+    let results: Vec<Value> = rows.into_iter().take(limit).map(|(_, v)| v).collect();
+    emit_value("", Value::Array(results))
 }
 
 /// Mine structural patterns — đếm kind chain trên mọi node lá scalar, cấp
@@ -1395,14 +1493,14 @@ pub async fn dispatch_doc_mine_patterns(
         .mine_patterns(top_k, min_count, max_depth)
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
-    serde_json::to_string_pretty(&mined).map_err(|e| Error::Other(e.to_string()))
+    emit_value("", serde_json::to_value(&mined).unwrap_or(Value::Null))
 }
 
 pub async fn dispatch_doc_list_patterns(doc_graph: Arc<crate::SharedDocGraph>) -> Result<String> {
     let graph = doc_graph.graph().await;
     let graph = graph.read().await;
     let entries = graph.list_patterns();
-    serde_json::to_string_pretty(&entries).map_err(|e| Error::Other(e.to_string()))
+    emit_value("", serde_json::to_value(&entries).unwrap_or(Value::Null))
 }
 
 pub async fn dispatch_doc_search_value(
@@ -1428,7 +1526,7 @@ pub async fn dispatch_doc_search_value(
             })
         })
         .collect();
-    serde_json::to_string_pretty(&results).map_err(|e| Error::Other(e.to_string()))
+    emit_value("", Value::Array(results))
 }
 
 pub async fn dispatch_doc_hydrate(
@@ -1445,7 +1543,7 @@ pub async fn dispatch_doc_hydrate(
         .await;
     match payload {
         Some(p) => {
-            let json = serde_json::to_string_pretty(&p).map_err(|e| Error::Other(e.to_string()))?;
+            let json = emit_value("", serde_json::to_value(&p).unwrap_or(Value::Null))?;
             Ok(json)
         }
         None => Ok(format!("node {node_id} not found")),
@@ -1456,7 +1554,7 @@ pub async fn dispatch_doc_list(doc_graph: Arc<crate::SharedDocGraph>) -> Result<
     let graph = doc_graph.graph().await;
     let graph = graph.read().await;
     let infos = graph.list_docs();
-    serde_json::to_string_pretty(&infos).map_err(|e| Error::Other(e.to_string()))
+    emit_value("", serde_json::to_value(&infos).unwrap_or(Value::Null))
 }
 
 /// Ingest hàng loạt mọi file document (theo extension) trong thư mục
@@ -1513,7 +1611,7 @@ pub async fn dispatch_doc_ingest_dir(
     if !failed.is_empty() {
         summary["errors"] = json!(failed.iter().take(10).collect::<Vec<_>>());
     }
-    serde_json::to_string_pretty(&summary).map_err(|e| Error::Other(e.to_string()))
+    emit_value("", summary)
 }
 
 pub async fn dispatch_doc_remove(
@@ -1568,8 +1666,9 @@ pub async fn dispatch_binary(root: &Utf8Path, name: &str, args: Value) -> Result
     let graph = codegraph_extract::BinaryGraph::open_from_config(root)
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
+    let format = format_from_args(&args, OutputStyle::Minimize);
     match name {
-        "codegraph_binary_list" => {
+        "codegraph_graphbin_list" => {
             let kind = args
                 .get("kind")
                 .and_then(|v| v.as_str())
@@ -1594,42 +1693,14 @@ pub async fn dispatch_binary(root: &Utf8Path, name: &str, args: Value) -> Result
                 .list(kind, flag, path, order, offset, limit)
                 .await
                 .map_err(|e| Error::Other(e.to_string()))?;
-            serde_json::to_string_pretty(&page).map_err(|e| Error::Other(e.to_string()))
+            let rows: Vec<Value> = page
+                .rows
+                .iter()
+                .map(|r| bin_row_json(root.as_str(), r, format))
+                .collect();
+            emit_value(root.as_str(), json!({ "total": page.total, "rows": rows }))
         }
-        "codegraph_binary_search" => {
-            let pattern = args
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    Error::Invalid("codegraph_binary_search requires `pattern`".into())
-                })?;
-            let mode = match args.get("match").and_then(|v| v.as_str()) {
-                Some("exact") => codegraph_extract::NameMatch::Exact,
-                Some("prefix") => codegraph_extract::NameMatch::Prefix,
-                Some("suffix") => codegraph_extract::NameMatch::Suffix,
-                _ => codegraph_extract::NameMatch::Contains,
-            };
-            let kind = args
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .and_then(parse_bin_kind);
-            let flag = args
-                .get("flag")
-                .and_then(|v| v.as_str())
-                .and_then(codegraph_extract::BinFlag::parse);
-            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(50)
-                .min(500);
-            let page = graph
-                .search_name(pattern, mode, kind, flag, offset, limit)
-                .await
-                .map_err(|e| Error::Other(e.to_string()))?;
-            serde_json::to_string_pretty(&page).map_err(|e| Error::Other(e.to_string()))
-        }
-        "codegraph_binary_addr" => {
+        "codegraph_graphbin_addr" => {
             let limit = args
                 .get("limit")
                 .and_then(|v| v.as_u64())
@@ -1641,7 +1712,11 @@ pub async fn dispatch_binary(root: &Utf8Path, name: &str, args: Value) -> Result
                     .by_addr(addr, limit)
                     .await
                     .map_err(|e| Error::Other(e.to_string()))?;
-                serde_json::to_string_pretty(&rows).map_err(|e| Error::Other(e.to_string()))
+                let rows: Vec<Value> = rows
+                    .iter()
+                    .map(|r| bin_row_json(root.as_str(), r, format))
+                    .collect();
+                emit_value(root.as_str(), Value::Array(rows))
             } else {
                 let eps = graph
                     .entrypoints(path, limit)
@@ -1651,15 +1726,15 @@ pub async fn dispatch_binary(root: &Utf8Path, name: &str, args: Value) -> Result
                     .iter()
                     .map(|(p, n)| json!({ "path": p, "name": n }))
                     .collect();
-                serde_json::to_string_pretty(&list).map_err(|e| Error::Other(e.to_string()))
+                emit_value(root.as_str(), Value::Array(list))
             }
         }
-        "codegraph_binary_stats" => {
+        "codegraph_graphbin_stats" => {
             let stats = graph
                 .stats()
                 .await
                 .map_err(|e| Error::Other(e.to_string()))?;
-            serde_json::to_string_pretty(&stats).map_err(|e| Error::Other(e.to_string()))
+            emit_value(root.as_str(), serde_json::to_value(&stats).unwrap_or(Value::Null))
         }
         _ => Err(Error::Invalid(format!("unknown binary tool: {name}"))),
     }

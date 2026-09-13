@@ -56,7 +56,7 @@ Parsed documents are stored in a `DocumentGraph` backed by `codegraph-graph`'s `
 
 **Access points:**
 - **CLI**: `codegraph doc ingest <path>`, `codegraph doc search`, `codegraph doc hydrate <id>`, `codegraph doc list`, `codegraph doc stats`
-- **MCP**: `codegraph_doc_ingest`, `codegraph_doc_search`, `codegraph_doc_hydrate`, `codegraph_doc_list`, `codegraph_doc_stats`
+- **MCP**: `codegraph_graphdoc_ingest`, `codegraph_graphdoc_search`, `codegraph_graphdoc_hydrate`, `codegraph_graphdoc_list`, `codegraph_graphdoc_stats`
 - **GraphQL**: `docList`, `docSearch`, `docStats` queries and `docIngest`, `docStats` mutations
 
 **Format auto-detection**: `.tf`/`.hcl` → hcl, `.yaml`/`.yml` → yaml, `.json` → json, `.toml` → toml.

@@ -24,7 +24,7 @@ file-reading subtask — codegraph IS the index.
 | Intent | Tool |
 |---|---|
 | symbol by id/name | `codegraph_symbol` |
-| find symbols by name (match modes + semantic/hybrid) | `codegraph_search_symbol` |
+| find symbols by name (match modes + semantic/hybrid; code + binary via `source`) | `codegraph_search_symbol` |
 | what (transitively) calls this? | `codegraph_callers` |
 | what does this call directly? | `codegraph_callees` |
 | change-impact radius | `codegraph_impact` |
@@ -33,22 +33,29 @@ file-reading subtask — codegraph IS the index.
 | functions whose chain matches a pattern | `codegraph_search_flow` |
 | composed context for a symbol/topic | `codegraph_context` |
 | who calls library call `foo`? | `codegraph_references` |
-| methods/fields of class X | `codegraph_class` |
-| list all classes/interfaces/enums | `codegraph_list_types` (`kind`: class\|interface\|enum) |
-| params/locals of function X | `codegraph_function_scope` |
-| symbols annotated `@X` | `codegraph_search_by_annotation` |
-| project dependencies | `codegraph_dependencies` |
-| files under a path | `codegraph_files` |
-| index health | `codegraph_status` |
-| behavior sandbox (Rhai mocks) | `codegraph_sandbox` |
-| MR impact (draft) | `codegraph_diff` |
-| MR before/after trace compare | `codegraph_diff_simulate` |
-| ref vs working-tree trace compare | `codegraph_origin_simulate` |
+| methods/fields of class X | `codegraph_graphcode_class` |
+| list all classes/interfaces/enums | `codegraph_graphcode_list_types` (`kind`: class\|interface\|enum) |
+| params/locals of function X | `codegraph_graphcode_function_scope` |
+| symbols annotated `@X` | `codegraph_graphcode_search_by_annotation` |
+| project dependencies | `codegraph_graphcode_dependencies` |
+| files under a path | `codegraph_graphcode_files` |
+| code index stats only | `codegraph_graphcode_stats` |
+| stats across code + doc + binary | `codegraph_status` |
+| behavior sandbox (Rhai mocks) | `codegraph_graphcode_sandbox` |
+| MR impact (draft) | `codegraph_graphcode_diff` |
+| MR before/after trace compare | `codegraph_graphcode_diff_simulate` |
+| ref vs working-tree trace compare | `codegraph_graphcode_origin_simulate` |
+
+## Document & binary graphs
+Document tools are `codegraph_graphdoc_*` (ingest, search, search_value,
+search_struct, hydrate, list, list_patterns, mine_patterns, ingest_dir, remove,
+stats). Binary tools are `codegraph_graphbin_*` (list, addr, stats); binary name
+search is merged into `codegraph_search_symbol` (`source:"binary"|"all"`).
 
 ## Disambiguation
 Duplicate names → `ambiguous:true` with a `matches` list. Retry with the
-numeric `id` alone. `codegraph_symbol`, `codegraph_class`,
-`codegraph_function_scope`, `codegraph_list_types`, and `codegraph_search_symbol`
+numeric `id` alone. `codegraph_symbol`, `codegraph_graphcode_class`,
+`codegraph_graphcode_function_scope`, `codegraph_graphcode_list_types`, and `codegraph_search_symbol`
 accept `id`/`name`.
 
 ## Large indexes: timeout + resume
@@ -76,7 +83,12 @@ Symbol array (`minimize`), 14 fixed fields in order:
 `6` type_name, `7` file(rel root), `8` line, `9` end_line(0=none), `10` signature,
 `11` doc, `12` annotations, `13` language. Never reorder or truncate.
 
-## Behavior sandbox — `codegraph_sandbox`
+Binary row array (`minimize`), 9 fixed fields in order:
+`0` id, `1` name, `2` kind, `3` addr, `4` end_addr, `5` path(rel root), `6` flag,
+`7` lib, `8` signature. Returned by `codegraph_search_symbol` (`binary` section,
+`source: all|binary`), `codegraph_graphbin_list` and `codegraph_graphbin_addr`.
+
+## Behavior sandbox — `codegraph_graphcode_sandbox`
 Compiles an entry function + in-flow callees to machine code; runs against Rhai
 mocks; returns the observed trace. Args: `node`/`name` (entry), `args` (`i64[]`),
 `mocks` (callee → Rhai body or full `fn`), `branch_policy` (if_true|if_false),
@@ -85,7 +97,7 @@ dispatched callee must have a mock or the call fails
 `link failed: no mock configured for callee(s): …`. Response: `return`, ordered
 `mocks`, condition decisions `conds`, and `missing_mocks` (mock those next).
 
-## Diff draft — `codegraph_diff`
+## Diff draft — `codegraph_graphcode_diff`
 Reads a unified diff (MR / `.patch` / `git diff`) against the current index and
 returns a DRAFT of graph changes (does NOT mutate the index). Arg: `diff`.
 Reports touched symbols, flows with call sites on changed lines, and who
@@ -94,9 +106,9 @@ Reports touched symbols, flows with call sites on changed lines, and who
 line in the symbol's span changed.
 
 ## Diff / Origin simulation
-`codegraph_diff_simulate` (needs `diff`): runs the entry flow twice — current
+`codegraph_graphcode_diff_simulate` (needs `diff`): runs the entry flow twice — current
 index (post-MR) and a temp index from `base_ref` (default `HEAD`, via
-`git archive`) — and compares traces. `codegraph_origin_simulate` is the
+`git archive`) — and compares traces. `codegraph_graphcode_origin_simulate` is the
 standalone before/after of a flow at `ref` (default `HEAD`) vs the working tree.
 Args: `entry` (function name), `base_ref`/`ref`, `args`, `mocks`,
 `branch_policy`, `loop_cap`. The sandbox follows flow STRUCTURE: mock-call order,

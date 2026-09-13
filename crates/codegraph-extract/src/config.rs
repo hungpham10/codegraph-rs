@@ -627,7 +627,7 @@ type = "sqlite"
 
 # [docgraph]
 # Document graph — ingest tài liệu cấu trúc (HCL/Terraform, YAML, JSON, TOML)
-# lúc `codegraph init`, truy vấn qua MCP (`codegraph_doc_*`) hoặc `codegraph doc`.
+# lúc `codegraph init`, truy vấn qua MCP (`codegraph_graphdoc_*`) hoặc `codegraph doc`.
 # Bỏ comment section + `paths` để bật:
 # [docgraph]
 # enabled = true                      # mặc định bật khi có `paths`

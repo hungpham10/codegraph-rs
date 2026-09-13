@@ -34,12 +34,13 @@ Các bước chính trong `crates/codegraph-binary`:
    (mặc định `.codegraph/binary.sqlite`, cấu hình qua `[bingraph]`) với dải id
    riêng bắt đầu từ `bin_base` (mặc định 2e9), **không** nạp vào `GraphIndex`
    chính (tránh làm phình name trie/RAM của code index). Các MCP tool
-   `codegraph_binary_list` / `codegraph_binary_search` / `codegraph_binary_addr`
-   / `codegraph_binary_stats` query trực tiếp dataset này; còn
+   `codegraph_graphbin_list` / `codegraph_graphbin_addr` / `codegraph_graphbin_stats`
+   query trực tiếp dataset này; tìm binary theo tên đã gộp vào
+   `codegraph_search_symbol` (`source: "binary"|"all"`); còn
    `codegraph_callees` / `codegraph_callers` / `codegraph_flow` /
    `codegraph_impact` tự route sang `BinaryGraph` khi nhận symbol id ≥
-   `bin_base` — dùng chung giao diện như với source code. `codegraph_search_symbol`
-   và `codegraph_context` chỉ thấy source code, không thấy binary.
+   `bin_base` — dùng chung giao diện như với source code. `codegraph_context`
+   chỉ thấy source code, không thấy binary.
 
 ## Cấu hình
 

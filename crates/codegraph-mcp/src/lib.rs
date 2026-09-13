@@ -252,12 +252,12 @@ impl CodegraphServer {
         let format = self.session.format().await;
         // Document tools — lazy doc graph (SharedDocGraph), không cần session
         // ready. Open giờ rẻ: `DocumentGraph::open` không materialize nodes.
-        if name.starts_with("codegraph_doc_") {
+        if name.starts_with("codegraph_graphdoc_") {
             let doc_graph = self.doc_graph.clone();
             return match name {
-                "codegraph_doc_ingest" => {
+                "codegraph_graphdoc_ingest" => {
                     let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-                        McpError::invalid_params("codegraph_doc_ingest requires `path`", None)
+                        McpError::invalid_params("codegraph_graphdoc_ingest requires `path`", None)
                     })?;
                     let format = args
                         .get("format")
@@ -271,13 +271,13 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_search" => {
+                "codegraph_graphdoc_search" => {
                     let pattern =
                         args.get("pattern")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
                                 McpError::invalid_params(
-                                    "codegraph_doc_search requires `pattern`",
+                                    "codegraph_graphdoc_search requires `pattern`",
                                     None,
                                 )
                             })?;
@@ -290,13 +290,13 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_hydrate" => {
+                "codegraph_graphdoc_hydrate" => {
                     let node_id =
                         args.get("node_id")
                             .and_then(|v| v.as_u64())
                             .ok_or_else(|| {
                                 McpError::invalid_params(
-                                    "codegraph_doc_hydrate requires `node_id`",
+                                    "codegraph_graphdoc_hydrate requires `node_id`",
                                     None,
                                 )
                             })?;
@@ -312,10 +312,10 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_search_value" => {
+                "codegraph_graphdoc_search_value" => {
                     let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
                         McpError::invalid_params(
-                            "codegraph_doc_search_value requires `query`",
+                            "codegraph_graphdoc_search_value requires `query`",
                             None,
                         )
                     })?;
@@ -328,9 +328,9 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_ingest_dir" => {
+                "codegraph_graphdoc_ingest_dir" => {
                     let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-                        McpError::invalid_params("codegraph_doc_ingest_dir requires `path`", None)
+                        McpError::invalid_params("codegraph_graphdoc_ingest_dir requires `path`", None)
                     })?;
                     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
                     tools::dispatch_doc_ingest_dir(doc_graph, path, limit)
@@ -341,9 +341,9 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_remove" => {
+                "codegraph_graphdoc_remove" => {
                     let doc_id = args.get("doc_id").and_then(|v| v.as_u64()).ok_or_else(|| {
-                        McpError::invalid_params("codegraph_doc_remove requires `doc_id`", None)
+                        McpError::invalid_params("codegraph_graphdoc_remove requires `doc_id`", None)
                     })?;
                     tools::dispatch_doc_remove(doc_graph, doc_id)
                         .await
@@ -353,7 +353,7 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_mine_patterns" => {
+                "codegraph_graphdoc_mine_patterns" => {
                     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
                     let min_count =
                         args.get("min_count").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
@@ -367,20 +367,20 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_list_patterns" => tools::dispatch_doc_list_patterns(doc_graph)
+                "codegraph_graphdoc_list_patterns" => tools::dispatch_doc_list_patterns(doc_graph)
                     .await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))
                     .map(|text| ToolOutput::Text {
                         text,
                         source_bytes: 0,
                     }),
-                "codegraph_doc_search_struct" => {
+                "codegraph_graphdoc_search_struct" => {
                     let pattern =
                         args.get("pattern")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
                                 McpError::invalid_params(
-                                    "codegraph_doc_search_struct requires `pattern`",
+                                    "codegraph_graphdoc_search_struct requires `pattern`",
                                     None,
                                 )
                             })?;
@@ -394,14 +394,14 @@ impl CodegraphServer {
                             source_bytes: 0,
                         })
                 }
-                "codegraph_doc_list" => tools::dispatch_doc_list(doc_graph)
+                "codegraph_graphdoc_list" => tools::dispatch_doc_list(doc_graph)
                     .await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))
                     .map(|text| ToolOutput::Text {
                         text,
                         source_bytes: 0,
                     }),
-                "codegraph_doc_stats" => tools::dispatch_doc_stats(doc_graph)
+                "codegraph_graphdoc_stats" => tools::dispatch_doc_stats(doc_graph)
                     .await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))
                     .map(|text| ToolOutput::Text {
@@ -414,9 +414,9 @@ impl CodegraphServer {
             };
         }
 
-        // Binary tools — dataset riêng, lazy; mở per-call (open là O(1),
+        // Binary tools (codegraph_graphbin_*) — dataset riêng, lazy; mở per-call (open là O(1),
         // search contains đi radix trie persist).
-        if name.starts_with("codegraph_binary_") {
+        if name.starts_with("codegraph_graphbin_") {
             return match tools::dispatch_binary(&root, name, args).await {
                 Ok(text) => Ok(ToolOutput::Text {
                     text,
@@ -426,17 +426,46 @@ impl CodegraphServer {
             };
         }
 
+        // codegraph_status — stats GỘP cả 3 dataset: code index (luôn có),
+        // document graph và binary graph (null khi dataset chưa tồn tại).
+        if name == "codegraph_status" {
+            let code = api.stats_cached().await;
+            let doc = {
+                let graph = self.doc_graph.graph().await;
+                let graph = graph.read().await;
+                graph.stats().await.ok().map(|s| json!({
+                    "docs": s.docs,
+                    "nodes": s.nodes,
+                }))
+            };
+            let binary = match codegraph_extract::BinaryGraph::open_from_config(&root).await {
+                Ok(g) => g.stats().await.ok().map(|s| serde_json::to_value(&s).unwrap_or(Value::Null)),
+                Err(_) => None,
+            };
+            let v = json!({
+                "code": {
+                    "symbols": code.symbols,
+                    "chains": code.chains,
+                    "edges": code.edges,
+                    "files": code.files,
+                },
+                "doc": doc,
+                "binary": binary,
+            });
+            return Ok(ToolOutput::json(&v));
+        }
+
         let dispatch = match name {
-            "codegraph_sandbox" => {
+            "codegraph_graphcode_sandbox" => {
                 codegraph_api::tools::dispatch_sandbox(&root, sgi.clone(), args.clone()).await
             }
-            "codegraph_diff" => {
+            "codegraph_graphcode_diff" => {
                 codegraph_api::tools::dispatch_diff(&root, sgi.clone(), args.clone()).await
             }
-            "codegraph_diff_simulate" => {
+            "codegraph_graphcode_diff_simulate" => {
                 codegraph_api::tools::dispatch_diff_simulate(&root, sgi.clone(), args.clone()).await
             }
-            "codegraph_origin_simulate" => {
+            "codegraph_graphcode_origin_simulate" => {
                 codegraph_api::tools::dispatch_origin_simulate(&root, sgi.clone(), args.clone())
                     .await
             }
