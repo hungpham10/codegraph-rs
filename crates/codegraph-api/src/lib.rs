@@ -39,7 +39,7 @@ pub const TIMEOUT_EXPIRE_IMMEDIATELY: u64 = u64::MAX;
 // ==================== Search session store ====================
 
 /// Loại search tạo resume — dùng validate resume id (không cho cross-tool
-/// resume: id của `codegraph_search` không dùng được cho `codegraph_references`).
+/// resume: id của `codegraph_search_symbol` không dùng được cho `codegraph_references`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeKind {
     Name,

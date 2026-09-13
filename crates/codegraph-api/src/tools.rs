@@ -447,7 +447,7 @@ pub async fn dispatch_diff_simulate(
         let delta = sequence_delta(&before, &after);
         Ok::<Value, Error>(json!({
             "draft": true,
-            "tool": "codegraph_diff_simulate",
+            "tool": "codegraph_graphcode_diff_simulate",
             "entry": entry,
             "args": call_args,
             "base_ref": base_ref,
@@ -494,7 +494,7 @@ pub async fn dispatch_origin_simulate(
         let delta = sequence_delta(&origin, &working_tree);
         Ok::<Value, Error>(json!({
             "draft": true,
-            "tool": "codegraph_origin_simulate",
+            "tool": "codegraph_graphcode_origin_simulate",
             "entry": entry,
             "args": call_args,
             "ref": git_ref,

@@ -267,7 +267,11 @@ impl Query {
     // ── Class / scope / files ──
 
     /// Files trong graph, filter theo prefix đường dẫn.
-    async fn files(&self, ctx: &Context<'_>, prefix: Option<String>) -> GqlResult<Vec<FileInfo>> {
+    async fn graphcode_files(
+        &self,
+        ctx: &Context<'_>,
+        prefix: Option<String>,
+    ) -> GqlResult<Vec<FileInfo>> {
         let prefix = prefix.unwrap_or_default();
         Ok(api_for(ctx).await?.files(&prefix).await)
     }
@@ -278,14 +282,14 @@ impl Query {
     }
 
     /// Class info: symbol + fields + methods.
-    async fn class(&self, ctx: &Context<'_>, id: ID) -> GqlResult<Option<ClassInfo>> {
+    async fn graphcode_class(&self, ctx: &Context<'_>, id: ID) -> GqlResult<Option<ClassInfo>> {
         let id = parse_id(&id)?;
         Ok(api_for(ctx).await?.class_info(id).await)
     }
 
     /// Liệt kê symbol theo kind (CLASS / INTERFACE / ENUM), phân trang. Gộp cũ
     /// `list_classes` / `list_interfaces` / `list_enums` thành 1 resolver.
-    async fn types(
+    async fn graphcode_list_types(
         &self,
         ctx: &Context<'_>,
         kind: TypeKind,
@@ -308,7 +312,11 @@ impl Query {
     }
 
     /// Scope của function (parameters + locals).
-    async fn function_scope(&self, ctx: &Context<'_>, id: ID) -> GqlResult<Option<FunctionScope>> {
+    async fn graphcode_function_scope(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+    ) -> GqlResult<Option<FunctionScope>> {
         let id = parse_id(&id)?;
         Ok(api_for(ctx).await?.function_scope(id).await)
     }
@@ -316,7 +324,7 @@ impl Query {
     // ── Annotations / dependencies ──
 
     /// Tìm symbol theo annotation (vd `@Override`, `@Cacheable`).
-    async fn search_by_annotation(
+    async fn graphcode_search_by_annotation(
         &self,
         ctx: &Context<'_>,
         annotation: String,
@@ -337,14 +345,14 @@ impl Query {
     }
 
     /// Dependencies ước lượng từ call names (internal/external/total).
-    async fn dependencies(&self, ctx: &Context<'_>) -> GqlResult<DependenciesReport> {
+    async fn graphcode_dependencies(&self, ctx: &Context<'_>) -> GqlResult<DependenciesReport> {
         Ok(api_for(ctx).await?.dependencies().await)
     }
 
     // ── Document queries ──
 
     /// List all documents in the document graph.
-    async fn doc_list(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocStatsView>> {
+    async fn graphdoc_list(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocStatsView>> {
         let state = ctx.data::<Arc<AppState>>()?;
         let stats = state
             .doc_graph
@@ -360,7 +368,7 @@ impl Query {
     }
 
     /// Search document nodes by pattern string.
-    async fn doc_search(
+    async fn graphdoc_search(
         &self,
         ctx: &Context<'_>,
         _pattern: String,

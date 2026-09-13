@@ -181,13 +181,13 @@ Always prefer `codegraph` tools for **structural** questions — tracing call hi
 
 | Intent / Question | Recommended MCP Tool |
 | :--- | :--- |
-| *"Where is symbol X defined?"* | `codegraph_search` |
+| *"Where is symbol X defined?"* | `codegraph_search_symbol` |
 | *"What callers invoke function Y?"* | `codegraph_callers` |
 | *"What methods or functions does Y call?"* | `codegraph_callees` |
 | *"What components or files will break if I modify Z?"* | `codegraph_impact` |
-| *"Show me Y's exact signature and internal block"* | `codegraph_node` |
+| *"Show me Y's exact signature and internal block"* | `codegraph_symbol` |
 | *"Give me focused, aggregated context for this task"* | `codegraph_context` |
-| *"What files exist under a specific path/ directory?"* | `codegraph_files` |
+| *"What files exist under a specific path/ directory?"* | `codegraph_graphcode_files` |
 | *"Is the local knowledge graph healthy and active?"* | `codegraph_status` |
 
 ---

@@ -89,7 +89,7 @@ impl Mutation {
 
     /// Sandbox một flow function (compile + run với Rhai mocks).
     /// `args: JSON` = `{ node?, name?, args?: [i64], mocks?: {callee: rhai}, branchPolicy?, loopCap? }`.
-    async fn sandbox(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
+    async fn graphcode_sandbox(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
         let sgi = state
             .session
@@ -108,7 +108,7 @@ impl Mutation {
 
     /// Diff → draft report (symbols/flows chạm vào unified diff).
     /// `args: JSON` = `{ diff: "...", entry?, baseRef?, ... }`.
-    async fn diff(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
+    async fn graphcode_diff(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
         let sgi = state
             .session
@@ -127,7 +127,7 @@ impl Mutation {
 
     /// Diff → simulate: so sánh trace sandbox trước/sau MR. `args: JSON` =
     /// `{ diff, entry?, baseRef?, args?, mocks?, branchPolicy?, loopCap? }`.
-    async fn diff_simulate(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
+    async fn graphcode_diff_simulate(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
         let sgi = state
             .session
@@ -146,7 +146,7 @@ impl Mutation {
 
     /// Ref → simulate: so sánh trace trên `git archive <ref>` vs working tree.
     /// `args: JSON` = `{ entry, ref?, args?, mocks?, branchPolicy?, loopCap? }`.
-    async fn origin_simulate(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
+    async fn graphcode_origin_simulate(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
         let sgi = state
             .session
@@ -166,7 +166,7 @@ impl Mutation {
     // ── Document mutations ──
 
     /// Ingest a document file into the document graph.
-    async fn doc_ingest(
+    async fn graphdoc_ingest(
         &self,
         ctx: &Context<'_>,
         path: String,
@@ -221,7 +221,7 @@ impl Mutation {
     }
 
     /// Search document nodes.
-    async fn doc_search(
+    async fn graphdoc_search(
         &self,
         ctx: &Context<'_>,
         _pattern: String,
@@ -247,7 +247,7 @@ impl Mutation {
     }
 
     /// Get document stats.
-    async fn doc_stats(&self, ctx: &Context<'_>) -> GqlResult<String> {
+    async fn graphdoc_stats(&self, ctx: &Context<'_>) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
         let stats = state
             .doc_graph
