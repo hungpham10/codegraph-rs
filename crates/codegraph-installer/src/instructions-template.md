@@ -12,13 +12,13 @@ for literal text queries.
 
 | Question | Tool |
 |---|---|
-| "Where is X defined?" | `codegraph_search` |
+| "Where is X defined?" | `codegraph_search_symbol` |
 | "What calls Y?" | `codegraph_callers` |
 | "What does Y call?" | `codegraph_callees` |
 | "What would break if I changed Z?" | `codegraph_impact` |
-| "Show me Y's signature / source" | `codegraph_node` |
+| "Show me Y's signature / source" | `codegraph_symbol` |
 | "Give me focused context for a task" | `codegraph_context` |
-| "What files exist under path/" | `codegraph_files` |
+| "What files exist under path/" | `codegraph_graphcode_files` |
 | "Is the index healthy?" | `codegraph_status` |
 
 ## Rules of thumb

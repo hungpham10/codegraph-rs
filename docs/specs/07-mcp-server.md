@@ -21,14 +21,13 @@ Serveur MCP minimaliste sur stdio. Pas de SDK Rust officiel mature → hand-roll
 
 | Nom MCP | Handler | Args |
 |---|---|---|
-| `codegraph_search` | `db.search_nodes` | `{ query, limit?, kind? }` |
-| `codegraph_node` | `db.node_by_id` ou by_name | `{ id?, name? }` |
+| `codegraph_search_symbol` | `db.search_nodes` | `{ query, limit?, kind? }` |
+| `codegraph_symbol` | `db.node_by_id` ou by_name | `{ id?, name? }` |
 | `codegraph_callers` | `traversal.callers` | `{ node, depth? }` |
 | `codegraph_callees` | `traversal.callees` | `{ node, depth? }` |
 | `codegraph_impact` | `traversal.impact_radius` | `{ node, max_depth? }` |
 | `codegraph_context` | `context::build` | `{ query, depth?, include_source?, format? }` |
-| `codegraph_explore` | `context::explore` | `{ paths[], depth? }` |
-| `codegraph_files` | `db.files_under` | `{ path? }` |
+| `codegraph_graphcode_files` | `db.files_under` | `{ path? }` |
 | `codegraph_status` | `db.stats` | `{}` |
 
 Chaque tool a un JSON Schema `inputSchema` exposé dans `tools/list`.
@@ -69,7 +68,7 @@ JSON-RPC 2.0 standard:
 
 ## Tests
 
-- Integration: spawn `codegraph serve --mcp` sur fixture indexé, écris séquence `initialize` → `tools/call codegraph_search`, assert response.
+- Integration: spawn `codegraph serve --mcp` sur fixture indexé, écris séquence `initialize` → `tools/call codegraph_search_symbol`, assert response.
 - Pas de SDK client — fabrique requêtes JSON à la main.
 
 ## Pièges

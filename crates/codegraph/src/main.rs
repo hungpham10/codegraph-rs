@@ -10,7 +10,7 @@ use std::sync::Arc;
 use codegraph_graph::embeddings::warm_model_cache;
 
 /// CLI tối giản: chỉ còn lifecycle (`init`/`deinit`) + MCP server (`serve --mcp`).
-/// Mọi query/interact đi qua MCP tools (`codegraph_search`, `codegraph_context`,
+/// Mọi query/interact đi qua MCP tools (`codegraph_search_symbol`, `codegraph_context`,
 /// `codegraph_status`, …) — CLI không lặp lại các lệnh đọc index nữa.
 #[derive(Parser, Debug)]
 #[command(

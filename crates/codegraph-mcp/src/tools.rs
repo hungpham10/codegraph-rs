@@ -251,7 +251,7 @@ fn tool_defs() -> Vec<ToolDef> {
             "codegraph_graphcode_sandbox",
             "Run a sandbox simulation of a function's flow: compile the entry function + its in-flow callees into machine code (Cranelift JIT) and run it with Rhai mocks. `mocks` maps a callee name to a Rhai body (auto-wrapped into `fn <name>(args) { … }` where `args` is the call's i64 array) or a full `fn <name>(args) { … }` script; inline mocks override `[sandbox].mock_dirs` files. Before compiling, every callee that will be mock-dispatched must have a mock (file or `mocks`); if any is unconfigured the call fails with `link failed: no mock configured for callee(s): …`. Returns the entry return value, the ordered mock invocations, control-flow decisions (if/loop/switch taken/skipped), and any callees that still ran without a mock (`missing_mocks`).",
             json!({ "type": "object", "properties": {
-                "node": { "type": "integer", "description": "Entry function symbol id (from codegraph_search / codegraph_flow)." },
+                "node": { "type": "integer", "description": "Entry function symbol id (from codegraph_search_symbol / codegraph_flow)." },
                 "name": { "type": "string", "description": "Entry function name (substring → first function match); used when node is omitted." },
                 "args": { "type": "array", "items": { "type": "integer" }, "description": "Abstract i64 arguments passed to the entry function." },
                 "mocks": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Callee name → Rhai mock body or full `fn` source." },
