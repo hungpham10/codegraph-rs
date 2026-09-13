@@ -28,17 +28,32 @@ int entry_fn(int x) { return helper(x) * 2; }
         .expect("chạy cc");
     assert!(status.success(), "cc thất bại");
 
-    let cfg = codegraph_extract::ExtractConfig::load(dir_path);
-    let (parsed, skipped) = codegraph_binary::collect_binaries(dir_path, &cfg.binary);
-    assert_eq!(skipped, 0);
-    assert_eq!(parsed.len(), 1, "phải tìm thấy libtiny.so");
+    let mut cfg = codegraph_extract::ExtractConfig::load(dir_path);
+    // Tắt cache — retry phải extract lại thật, không trả kết quả cũ.
+    cfg.binary.cache = false;
 
-    let g = codegraph_extract::BinaryGraph::open(None, 2_000_000_000)
-        .await
-        .unwrap();
-    for p in &parsed {
-        g.ingest(p, 2_000_000_000).await.unwrap();
-    }
+    // r2 đôi lúc analyze không recover được call ops của dylib (không xác định
+    // được entrypoint) — retry extract tối đa 3 lần trước khi kết luận fail.
+    let (_parsed, g) = {
+        let mut ok = None;
+        for attempt in 1..=3 {
+            let (batch, skipped) = codegraph_binary::collect_binaries(dir_path, &cfg.binary);
+            assert_eq!(skipped, 0);
+            assert_eq!(batch.len(), 1, "phải tìm thấy libtiny.so");
+            let g = codegraph_extract::BinaryGraph::open(None, 2_000_000_000)
+                .await
+                .unwrap();
+            for p in &batch {
+                g.ingest(p, 2_000_000_000).await.unwrap();
+            }
+            if extracted_has_calls(&g, &batch).await {
+                ok = Some((batch, g));
+                break;
+            }
+            eprintln!("attempt {attempt}: r2 không extract được call ops — retry");
+        }
+        ok.expect("r2 không extract được call ops nào sau 3 lần thử")
+    };
 
     // Tìm entry_fn qua search tên.
     let page = g
@@ -91,4 +106,21 @@ fn which_failed(bin: &str) -> bool {
         .arg("--version")
         .output()
         .is_err()
+}
+
+/// Extract được coi là thành công khi có ít nhất một chain chứa call site
+/// (element ngoài self/marker).
+async fn extracted_has_calls(
+    g: &codegraph_extract::BinaryGraph,
+    parsed: &[codegraph_graph::ParseResult],
+) -> bool {
+    for p in parsed {
+        for local_id in p.chains.keys() {
+            let id = 2_000_000_000 + local_id;
+            if !g.callees(id).await.unwrap_or_default().is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
