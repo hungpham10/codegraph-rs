@@ -695,10 +695,7 @@ pub async fn dispatch_with_api(
                     .await?,
                 )
             };
-            if code_out
-                .as_ref()
-                .is_some_and(|out| out.timed_out)
-            {
+            if code_out.as_ref().is_some_and(|out| out.timed_out) {
                 let out = code_out.as_ref().expect("checked above");
                 return Err(Error::Other(format!(
                     "codegraph_search_symbol timed out after {}ms (collected {} symbols so far). \
@@ -713,9 +710,9 @@ pub async fn dispatch_with_api(
             let format = format_from_args(&args, session_format);
             let total = code_out.as_ref().map_or(0, |out| out.total);
             let code_resume = code_out.as_ref().and_then(|out| out.resume.clone());
-            let has_more = code_out.as_ref().is_some_and(|out| {
-                offset as usize + out.page.len() < out.total
-            });
+            let has_more = code_out
+                .as_ref()
+                .is_some_and(|out| offset as usize + out.page.len() < out.total);
             let results: Vec<Value> = code_out
                 .map(|out| {
                     out.page
@@ -736,14 +733,7 @@ pub async fn dispatch_with_api(
                 };
                 match codegraph_extract::BinaryGraph::open_from_config(root).await {
                     Ok(bin) => match bin
-                        .search_name(
-                            q,
-                            bin_mode,
-                            kind,
-                            None,
-                            offset as u64,
-                            limit as u64,
-                        )
+                        .search_name(q, bin_mode, kind, None, offset as u64, limit as u64)
                         .await
                     {
                         Ok(page) => {
@@ -1734,7 +1724,10 @@ pub async fn dispatch_binary(root: &Utf8Path, name: &str, args: Value) -> Result
                 .stats()
                 .await
                 .map_err(|e| Error::Other(e.to_string()))?;
-            emit_value(root.as_str(), serde_json::to_value(&stats).unwrap_or(Value::Null))
+            emit_value(
+                root.as_str(),
+                serde_json::to_value(&stats).unwrap_or(Value::Null),
+            )
         }
         _ => Err(Error::Invalid(format!("unknown binary tool: {name}"))),
     }

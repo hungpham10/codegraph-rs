@@ -330,7 +330,10 @@ impl CodegraphServer {
                 }
                 "codegraph_graphdoc_ingest_dir" => {
                     let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-                        McpError::invalid_params("codegraph_graphdoc_ingest_dir requires `path`", None)
+                        McpError::invalid_params(
+                            "codegraph_graphdoc_ingest_dir requires `path`",
+                            None,
+                        )
                     })?;
                     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
                     tools::dispatch_doc_ingest_dir(doc_graph, path, limit)
@@ -343,7 +346,10 @@ impl CodegraphServer {
                 }
                 "codegraph_graphdoc_remove" => {
                     let doc_id = args.get("doc_id").and_then(|v| v.as_u64()).ok_or_else(|| {
-                        McpError::invalid_params("codegraph_graphdoc_remove requires `doc_id`", None)
+                        McpError::invalid_params(
+                            "codegraph_graphdoc_remove requires `doc_id`",
+                            None,
+                        )
                     })?;
                     tools::dispatch_doc_remove(doc_graph, doc_id)
                         .await
@@ -433,13 +439,19 @@ impl CodegraphServer {
             let doc = {
                 let graph = self.doc_graph.graph().await;
                 let graph = graph.read().await;
-                graph.stats().await.ok().map(|s| json!({
-                    "docs": s.docs,
-                    "nodes": s.nodes,
-                }))
+                graph.stats().await.ok().map(|s| {
+                    json!({
+                        "docs": s.docs,
+                        "nodes": s.nodes,
+                    })
+                })
             };
             let binary = match codegraph_extract::BinaryGraph::open_from_config(&root).await {
-                Ok(g) => g.stats().await.ok().map(|s| serde_json::to_value(&s).unwrap_or(Value::Null)),
+                Ok(g) => g
+                    .stats()
+                    .await
+                    .ok()
+                    .map(|s| serde_json::to_value(&s).unwrap_or(Value::Null)),
                 Err(_) => None,
             };
             let v = json!({
