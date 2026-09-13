@@ -275,11 +275,22 @@ fn do_extract(
     }
 
     // 4. Calls + chains
+    // Relocs (`irj`) — GOT slot → tên symbol. Cần để resolve PLT stub của
+    // local export (ELF .so): r2 5.x đặt tên `fcn.xxx` cho stub này vì symbol
+    // không phải import, nhưng reloc ở GOT slot nó load vẫn mang tên hàm thật.
+    let relocs = parse_irj(session)?;
+    let mut reloc_by_addr: HashMap<u64, &RelocEntry> = HashMap::new();
+    for r in &relocs {
+        if let Some(vaddr) = r.vaddr {
+            reloc_by_addr.insert(vaddr, r);
+        }
+    }
     let maps = FnMaps {
         fn_by_addr: &fn_by_addr,
         fn_id_to_name: &fn_id_to_name,
         plt_by_addr: &plt_by_addr,
         import_name_to_id: &import_name_to_id,
+        reloc_by_addr: &reloc_by_addr,
     };
     if cfg_markers {
         build_chains_with_cfg(session, &functions, &maps, &mut chains, &mut calls)?;
@@ -319,6 +330,10 @@ fn parse_aflj(session: &mut dyn R2Client) -> Result<Vec<FnEntry>, Error> {
 
 fn parse_iij(session: &mut dyn R2Client) -> Result<Vec<ImportEntry>, Error> {
     parse_array(session.cmdj("iij")?)
+}
+
+fn parse_irj(session: &mut dyn R2Client) -> Result<Vec<RelocEntry>, Error> {
+    parse_array(session.cmdj("irj")?)
 }
 
 fn parse_izj(session: &mut dyn R2Client) -> Result<Vec<StrEntry>, Error> {
@@ -422,6 +437,52 @@ struct FnMaps<'a> {
     fn_id_to_name: &'a HashMap<u64, String>,
     plt_by_addr: &'a HashMap<u64, String>,
     import_name_to_id: &'a HashMap<String, u64>,
+    reloc_by_addr: &'a HashMap<u64, &'a RelocEntry>,
+}
+
+/// Tập stub GOT đã phát hiện: addr stub → (tên reloc, sym_va thật nếu có).
+type GotStubs = HashMap<u64, (String, Option<u64>)>;
+
+/// Phát hiện PLT stub của local export (ELF .so): function nhỏ, kết thúc bằng
+/// jump gián tiếp, và có op `lea`/`adrp` tham chiếu GOT slot có reloc tên R.
+/// Chỉ quét function ≤ 32 bytes để không phải pdfj lại toàn bộ binary lớn.
+fn detect_got_stubs(session: &mut dyn R2Client, functions: &[FnEntry], maps: &FnMaps) -> GotStubs {
+    let mut stubs = GotStubs::new();
+    for entry in functions {
+        let addr = entry.addr.unwrap_or(0);
+        if addr == 0 || entry.size.unwrap_or(u64::MAX) > 32 || stubs.contains_key(&addr) {
+            continue;
+        }
+        let Ok(ops_json) = session.cmdj(&format!("pdfj @ {addr}")) else {
+            continue;
+        };
+        let ops: Vec<DisasmOp> = ops_json
+            .get("ops")
+            .and_then(|o| o.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<DisasmOp>(v).ok())
+            .collect();
+        let last_type = ops.last().and_then(|o| o.type_.as_deref());
+        if !matches!(last_type, Some("ujmp") | Some("jmp")) || ops.is_empty() {
+            continue;
+        }
+        let Some(target) = ops.iter().find_map(|o| {
+            o.ptr
+                .and_then(|p| maps.reloc_by_addr.get(&p))
+                .and_then(|r| {
+                    r.name
+                        .as_deref()
+                        .filter(|n| !n.is_empty())
+                        .map(|n| (n.to_string(), r.sym_va.filter(|va| *va != 0)))
+                })
+        }) else {
+            continue;
+        };
+        stubs.insert(addr, target);
+    }
+    stubs
 }
 
 /// Xây chain từ `pdfj` từng function (marker từ CFG).
@@ -432,6 +493,10 @@ fn build_chains_with_cfg(
     chains: &mut HashMap<u64, Vec<u64>>,
     calls: &mut Vec<CallRecord>,
 ) -> Result<(), Error> {
+    // Pre-pass trước vòng resolve: các call được resolve trong lúc duyệt
+    // function, nên stub phải được phát hiện trước để call tới nó (xuất hiện
+    // trước trong aflj) vẫn resolve đúng.
+    let got_stubs = detect_got_stubs(session, functions, maps);
     for entry in functions {
         let addr = entry.addr.unwrap_or(0);
         let Some(&func_id) = maps.fn_by_addr.get(&addr) else {
@@ -470,7 +535,7 @@ fn build_chains_with_cfg(
                 match t.as_str() {
                     "call" => {
                         let (_callee_id, callee_name) =
-                            resolve_call_target(op.jump.or(op.ptr), maps);
+                            resolve_call_target(op.jump.or(op.ptr), maps, &got_stubs);
                         let pos = chain.len();
                         chain.push(0);
                         local_calls.push(CallRecord {
@@ -573,7 +638,7 @@ fn build_chains_from_graph(
     Ok(())
 }
 
-fn resolve_call_target(target: Option<u64>, maps: &FnMaps) -> (u64, String) {
+fn resolve_call_target(target: Option<u64>, maps: &FnMaps, got_stubs: &GotStubs) -> (u64, String) {
     let addr = match target {
         Some(a) => a,
         None => return (0, String::new()),
@@ -584,6 +649,16 @@ fn resolve_call_target(target: Option<u64>, maps: &FnMaps) -> (u64, String) {
         return (id, name.clone());
     }
     if let Some(&fid) = maps.fn_by_addr.get(&addr) {
+        // PLT stub của local export (ELF .so): r2 5.x chỉ đặt tên `fcn.xxx`,
+        // resolve về symbol thật qua reloc ở GOT slot mà stub load.
+        if let Some((name, sym_va)) = got_stubs.get(&addr) {
+            let id = sym_va
+                .and_then(|va| maps.fn_by_addr.get(&va))
+                .or_else(|| maps.import_name_to_id.get(name))
+                .copied()
+                .unwrap_or(fid);
+            return (id, name.clone());
+        }
         let name = maps
             .fn_id_to_name
             .get(&fid)

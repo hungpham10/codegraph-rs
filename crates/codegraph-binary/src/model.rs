@@ -135,7 +135,23 @@ pub struct CallGraphNode {
     pub imports: Option<Vec<String>>,
 }
 
+/// Một entry reloc từ `irj`. Dùng để resolve PLT stub của local export: với
+/// ELF .so, call tới hàm được export trong cùng library đi qua PLT+GOT, và r2
+/// 5.x không đặt tên stub này (`fcn.480`) vì symbol không phải import — nhưng
+/// GOT slot của nó luôn có reloc mang tên hàm thật.
+#[derive(Debug, Deserialize)]
+pub struct RelocEntry {
+    pub name: Option<String>,
+    pub vaddr: Option<u64>,
+    /// Địa chỉ symbol thật mà reloc trỏ tới (nếu resolve được trong cùng binary).
+    pub sym_va: Option<u64>,
+}
+
 /// Một lệnh disasm trong `pdfj.ops`.
+///
+/// Các field số phải chịu được kiểu lệch giữa các bản r2: 6.x trả
+/// `"refptr": 0` (số) nhưng 5.x trả `"refptr": false` (boolean) — nếu serde
+/// fail thì toàn bộ op bị drop và extract mất hết call ops.
 #[derive(Debug, Deserialize)]
 pub struct DisasmOp {
     /// r2 6.x trả `addr`; bản cũ trả `offset`.
@@ -149,7 +165,9 @@ pub struct DisasmOp {
     pub disasm: Option<String>,
     pub ptr: Option<u64>,
     pub val: Option<u64>,
+    #[serde(default, deserialize_with = "de_u64_or_bool")]
     pub refptr: Option<u64>,
+    #[serde(default, deserialize_with = "de_u64_or_bool")]
     pub reference: Option<u64>,
     pub jump: Option<u64>,
     pub fail: Option<u64>,
@@ -160,3 +178,23 @@ pub struct DisasmOp {
 
 /// JSON gốc dạng `Value` cho phép linh hoạt.
 pub type Json = serde_json::Value;
+
+/// Deserialize u64 chấp nhận cả `false`/`true` (r2 5.x đôi khi trả boolean
+/// thay vì số) — boolean map về 0/1 thay vì làm fail toàn bộ op.
+fn de_u64_or_bool<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrBool {
+        Num(u64),
+        Bool(bool),
+    }
+    Ok(match Option::<NumOrBool>::deserialize(deserializer)? {
+        Some(NumOrBool::Num(n)) => Some(n),
+        Some(NumOrBool::Bool(b)) => Some(u64::from(b)),
+        None => None,
+    })
+}
