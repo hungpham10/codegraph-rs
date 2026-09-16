@@ -55,7 +55,6 @@ CodeGraph-docs supports parsing structured configuration and document files into
 Parsed documents are stored in a `DocumentGraph` backed by `codegraph-graph`'s `InMemoryStorage` (persistent tries) with `Search<DocToken>` indices for path, type, value, struct, and pattern queries.
 
 **Access points:**
-- **CLI**: `codegraph doc ingest <path>`, `codegraph doc search`, `codegraph doc hydrate <id>`, `codegraph doc list`, `codegraph doc stats`
 - **MCP**: `codegraph_graphdoc_ingest`, `codegraph_graphdoc_search`, `codegraph_graphdoc_hydrate`, `codegraph_graphdoc_list`, `codegraph_graphdoc_stats`
 - **GraphQL**: `docList`, `docSearch`, `docStats` queries and `docIngest`, `docStats` mutations
 

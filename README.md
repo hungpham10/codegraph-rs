@@ -34,6 +34,8 @@ codegraph serve --mcp
 codegraph serve --mcp --http --addr 0.0.0.0:8123
 ```
 
+Reset generated index data without losing `config.toml` with `codegraph clean` (or remove the whole `.codegraph/` with `codegraph deinit`).
+
 The agent binds the workspace with `codegraph_init {"path": ...}` and gets tools like `codegraph_search_symbol`, `codegraph_flow`, `codegraph_callers`, `codegraph_impact`, `codegraph_context` — all querying over MCP.
 
 ## 📊 Comparison — Why Not X?
@@ -63,13 +65,12 @@ CodeGraph supports parsing both **source code** (via tree-sitter) and **configur
 
 | Format | Extension | Parser | Access |
 |--------|-----------|--------|--------|
-| YAML | `.yaml`, `.yml` | YamlParser | `codegraph doc ingest` / MCP |
-| JSON | `.json` | JsonParser | `codegraph doc ingest` / MCP |
-| TOML | `.toml` | TomlParser | `codegraph doc ingest` / MCP |
-| **HCL** (HashiCorp) | `.hcl`, `.tf` | HclParser | `codegraph doc ingest` / MCP |
+| YAML | `.yaml`, `.yml` | YamlParser | MCP |
+| JSON | `.json` | JsonParser | MCP |
+| TOML | `.toml` | TomlParser | MCP |
+| **HCL** (HashiCorp) | `.hcl`, `.tf` | HclParser | MCP |
 
 Document files can be ingested into a **document graph** and queried via:
-- **CLI**: `codegraph doc ingest <path>`, `codegraph doc search`, `codegraph doc stats`
 - **MCP**: `codegraph_graphdoc_ingest`, `codegraph_graphdoc_search`, `codegraph_graphdoc_hydrate`, `codegraph_graphdoc_list`, `codegraph_graphdoc_stats`
 - **GraphQL**: `docList`, `docSearch`, `docStats` queries and `docIngest`, `docSearch`, `docStats` mutations
 

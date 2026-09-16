@@ -48,6 +48,10 @@ enum Cmd {
     },
     /// Remove the .codegraph/ directory.
     Deinit,
+    /// Remove generated index/data files inside .codegraph/ (db.sqlite,
+    /// docs store, …) while keeping config.toml, version and .gitignore —
+    /// the inverse of re-indexing: run `codegraph init` afterwards to rebuild.
+    Clean,
     /// Register codegraph as an MCP server for an AI agent (e.g. Claude Code),
     /// so the agent can launch `codegraph serve --mcp`. Writes the agent's config
     /// (e.g. `~/.claude/settings.json`). After a Homebrew install, this points
@@ -129,11 +133,6 @@ enum Cmd {
         #[arg(long = "api-key")]
         api_key: Vec<String>,
     },
-    /// Document operations: ingest, search, hydrate, and manage structured documents (HCL, YAML, JSON, TOML, XML).
-    Doc {
-        #[command(subcommand)]
-        cmd: DocCmd,
-    },
 }
 
 /// Giá trị `--format` của CLI — map sang `codegraph_mcp::OutputStyle`.
@@ -151,67 +150,6 @@ impl OutputFormat {
             Self::Medium => codegraph_mcp::OutputStyle::Medium,
         }
     }
-}
-
-/// Document CLI subcommands.
-#[derive(Subcommand, Debug)]
-enum DocCmd {
-    /// Parse and ingest a document file (HCL, YAML, JSON, TOML, XML).
-    Ingest {
-        /// Path to the document file. Đặt tên `file` — positional `path` đụng
-        /// global `--path` (Utf8PathBuf parser) làm clap panic khi parse args.
-        #[arg()]
-        file: String,
-        /// Override auto-detected format (hcl, yaml, json, toml, nginx).
-        #[arg(long)]
-        format: Option<String>,
-    },
-    /// Search document nodes by path pattern.
-    Search {
-        /// Search pattern (substring match on path tokens).
-        #[arg()]
-        pattern: String,
-        /// Search depth (default: 1).
-        #[arg(long, default_value_t = 1)]
-        depth: usize,
-    },
-    /// Hydrate a node into a small payload for LLM reasoning.
-    Hydrate {
-        /// Node id to hydrate.
-        #[arg()]
-        node_id: u64,
-    },
-    /// List all ingested documents with stats.
-    List,
-    /// Show document graph statistics.
-    Stats,
-    /// Mine structural patterns (kind chains ending at scalar leaves) across
-    /// all ingested documents and list them sorted by doc frequency ascending
-    /// — rare/characteristic patterns first, background noise last.
-    Patterns {
-        /// Max patterns to keep.
-        #[arg(long, default_value_t = 20)]
-        top_k: usize,
-        /// Min node occurrences for a pattern to be kept.
-        #[arg(long, default_value_t = 3)]
-        min_count: usize,
-        /// Max kind-chain window length ending at the leaf.
-        #[arg(long, default_value_t = 4)]
-        max_depth: usize,
-    },
-    /// Search nodes by structural kind chain, ranked by IDF (rare structures
-    /// first), e.g. `codegraph doc struct "MAP, FIELD, NUMBER"`.
-    Struct {
-        /// Comma-separated kind labels: MAP, ARRAY, FIELD, INDEX, STRING, NUMBER, BOOL, NULL, ROOT.
-        #[arg()]
-        pattern: String,
-        /// Search depth (default: 1).
-        #[arg(long, default_value_t = 1)]
-        depth: usize,
-        /// Max results (default: 20).
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
 }
 
 #[tokio::main]
@@ -241,6 +179,7 @@ async fn main() -> Result<()> {
     match cmd {
         Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
         Cmd::Deinit => cmd_deinit(&root),
+        Cmd::Clean => cmd_clean(&root),
         Cmd::Doctor => cmd_doctor(&root).await,
         Cmd::Install { target, global } => cmd_install(&root, &target, global),
         Cmd::Uninstall { target, global } => cmd_uninstall(&root, &target, global),
@@ -274,7 +213,6 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Cmd::Doc { cmd } => cmd_doc(&root, cmd).await,
     }
 }
 
@@ -409,6 +347,35 @@ fn cmd_deinit(root: &Utf8Path) -> Result<()> {
         std::fs::remove_dir_all(&dir)?;
         eprintln!("removed {}", dir);
     }
+    Ok(())
+}
+
+/// `codegraph clean`: xoá dữ liệu index sinh ra trong `.codegraph/` (db.sqlite,
+/// docs store, cache, …) nhưng giữ lại config.toml, version và .gitignore —
+/// workspace vẫn initialized, chạy `codegraph init` sau để index lại.
+fn cmd_clean(root: &Utf8Path) -> Result<()> {
+    const KEEP: [&str; 3] = ["config.toml", "version", ".gitignore"];
+    let dir = codegraph_extract::project_dir(root);
+    if !dir.exists() {
+        eprintln!("no {dir} — nothing to clean");
+        return Ok(());
+    }
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        if KEEP.contains(&entry.file_name().to_string_lossy().as_ref()) {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+        removed += 1;
+        eprintln!("removed {}", path.display());
+    }
+    eprintln!("cleaned {removed} item(s) in {dir} (config kept)");
     Ok(())
 }
 
@@ -749,140 +716,4 @@ async fn cmd_serve(
         server.prewarm_symbol_index();
     }
     codegraph_mcp::serve_stdio(server).await
-}
-
-/// `codegraph doc`: manage structured documents (HCL/Terraform, YAML, JSON, TOML).
-/// Persist qua dataset docs theo config (`[docgraph]`/`[storage]`) — không còn
-/// in-memory per-invocation.
-async fn cmd_doc(root: &Utf8Path, cmd: DocCmd) -> Result<()> {
-    let mut graph = open_doc_graph(root).await?;
-
-    match cmd {
-        DocCmd::Ingest { file, format } => {
-            let inserted = graph.ingest_file(&file, format.as_deref()).await?;
-            println!("ingested {file} → doc_id={inserted}");
-        }
-        DocCmd::Search { pattern, depth } => {
-            use codegraph_docs::DocToken;
-            // Full path search qua trie; không match → fallback quét key.
-            let mut tokens = vec![DocToken::root()];
-            let mut fuzzy_seg: Option<String> = None;
-            for seg in pattern.split('.') {
-                if let Some(fz) = seg.strip_prefix('~') {
-                    fuzzy_seg = Some(fz.to_string());
-                    break;
-                }
-                match graph.intern_id(seg) {
-                    Some(id) => tokens.push(DocToken::field(id)),
-                    None => break,
-                }
-            }
-            // Có segment `~` → bỏ qua full-path, đi thẳng fuzzy.
-            // depth = số tầng thừa dưới pattern; radix filter theo tổng key len.
-            let ids = if fuzzy_seg.is_none() {
-                let mut ids = graph
-                    .search_path(&tokens, Some(tokens.len() - 1 + depth))
-                    .await
-                    .unwrap_or_default();
-                ids.extend(graph.search_path_scan(&tokens, 100));
-                ids.sort_unstable();
-                ids.dedup();
-                ids
-            } else {
-                Vec::new()
-            };
-            if ids.is_empty() {
-                let last = fuzzy_seg
-                    .unwrap_or_else(|| pattern.rsplit('.').next().unwrap_or(&pattern).to_string());
-                let hits = graph.search_key_fuzzy(&last, 50);
-                if hits.is_empty() {
-                    println!("no nodes matched — key `{last}` not seen in any ingested document");
-                    return Ok(());
-                }
-                for h in hits {
-                    println!(
-                        "node {} doc={} key={:?} score={:.3} kind={:?} value={:?}",
-                        h.node.id, h.node.doc, h.matched_key, h.score, h.node.kind, h.node.value
-                    );
-                }
-                return Ok(());
-            }
-            for id in ids.iter().take(100) {
-                if let Some(payload) = graph.hydrate_depth(*id, Some(1)).await {
-                    let json = serde_json::to_string_pretty(&payload)?;
-                    println!("{json}");
-                }
-            }
-        }
-        DocCmd::Hydrate { node_id } => match graph.hydrate(node_id).await {
-            Some(payload) => {
-                let json = serde_json::to_string_pretty(&payload)?;
-                println!("{json}");
-            }
-            None => println!("node {node_id} not found"),
-        },
-        DocCmd::List => {
-            let stats = graph.stats().await?;
-            println!("documents: {}, nodes: {}", stats.docs, stats.nodes);
-        }
-        DocCmd::Stats => {
-            let stats = graph.stats().await?;
-            println!("documents: {}", stats.docs);
-            println!("nodes: {}", stats.nodes);
-        }
-        DocCmd::Patterns {
-            top_k,
-            min_count,
-            max_depth,
-        } => {
-            let mined = graph.mine_patterns(top_k, min_count, max_depth).await?;
-            if mined.is_empty() {
-                println!("no patterns matched (min_count={min_count})");
-            }
-            for p in mined {
-                println!(
-                    "P#{:<4} docs={:.1}% nodes={} chain={}",
-                    p.pattern_id,
-                    p.doc_freq * 100.0,
-                    p.node_count,
-                    p.tokens.join(" → ")
-                );
-            }
-        }
-        DocCmd::Struct {
-            pattern,
-            depth,
-            limit,
-        } => {
-            let tokens: Vec<codegraph_docs::DocToken> = pattern
-                .split(',')
-                .filter_map(|s| {
-                    let s = s.trim();
-                    (!s.is_empty()).then(|| codegraph_docs::parse_kind_label(s))
-                })
-                .collect();
-            let ids = graph.search_kind_chain(&tokens, Some(depth));
-            if ids.is_empty() {
-                println!("no nodes matched this structural pattern");
-                return Ok(());
-            }
-            let total_docs = graph.list_docs().len();
-            let mut rows: Vec<(f64, u64)> = ids
-                .iter()
-                .take(limit * 5)
-                .map(|id| (graph.pattern_uniqueness(*id, total_docs), *id))
-                .collect();
-            rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            for (idf, id) in rows.iter().take(limit) {
-                match graph.hydrate_depth(*id, Some(1)).await {
-                    Some(p) => println!(
-                        "node {} doc={} idf={:.3} path={:?} key={:?} value={:?}",
-                        p.id, p.doc, idf, p.path, p.key, p.value
-                    ),
-                    None => continue,
-                }
-            }
-        }
-    }
-    Ok(())
 }
