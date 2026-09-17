@@ -720,7 +720,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codegraph"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "camino",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-api"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "camino",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-bench"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "camino",
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-binary"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "camino",
  "codegraph-core",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-context"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-core"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "async-graphql",
  "camino",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-docs"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "codegraph-core",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-extract"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "camino",
  "codegraph-binary",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graph"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "async-trait",
  "bincode",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graphql"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "async-graphql",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-installer"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "camino",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-mcp"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-sboxes"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "camino",
  "codegraph-core",
