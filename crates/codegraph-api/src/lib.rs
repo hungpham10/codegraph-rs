@@ -65,6 +65,7 @@ pub struct ResumeDesc {
 #[derive(Debug, Clone)]
 pub enum ResumeCursor {
     Name(SearchCursor),
+    Callers(codegraph_graph::CallersCursor),
     Offset { next: usize, desc: ResumeDesc },
 }
 
@@ -135,7 +136,9 @@ impl SearchSessionStore {
     /// Đọc cursor theo id — `None` nếu không có / quá TTL.
     pub fn get(&self, id: &str) -> Option<(u64, ResumeCursor)> {
         let map = self.inner.lock().unwrap();
-        map.get(id).map(|s| (s.index_version, s.cursor.clone()))
+        map.get(id)
+            .filter(|s| s.created.elapsed() < self.ttl)
+            .map(|s| (s.index_version, s.cursor.clone()))
     }
 
     /// Xoá session (khi search hoàn tất, không còn page nào).
@@ -385,6 +388,60 @@ impl GraphApi {
     /// Callers (transitive BFS) — `depth` = số hop tối đa (1 = direct).
     pub async fn callers(&self, id: u64, depth: u32) -> Result<Vec<Symbol>> {
         self.index().await.callers(id, depth as usize).await
+    }
+
+    /// Resume caller traversal on the same query and index version.
+    pub async fn callers_resumable(
+        &self,
+        id: u64,
+        depth: u32,
+        resume: Option<String>,
+        timeout_ms: u64,
+    ) -> Result<ResumeSearchOutcome> {
+        let idx = self.index().await;
+        let version = idx.version();
+        let cursor = match &resume {
+            Some(token) => {
+                let (stored_version, cursor) = self.sessions.get(token).ok_or_else(|| {
+                    Error::Invalid("resume id expired or unknown — retry without resume".into())
+                })?;
+                if stored_version != version {
+                    return Err(Error::Invalid(
+                        "index changed — retry without resume".into(),
+                    ));
+                }
+                match cursor {
+                    ResumeCursor::Callers(c) if c.id == id && c.depth == depth.max(1) as usize => {
+                        Some(c)
+                    }
+                    _ => {
+                        return Err(Error::Invalid(
+                            "resume id was created for a different query — retry without resume"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            None => None,
+        };
+        let out = idx
+            .callers_resumable(id, depth as usize, cursor, deadline_from(timeout_ms))
+            .await?;
+        let timed_out = out.cursor.is_some();
+        if let Some(token) = &resume {
+            self.sessions.remove(token);
+        }
+        let token = out
+            .cursor
+            .map(|c| self.sessions.put(ResumeCursor::Callers(c), version));
+        Ok(ResumeSearchOutcome {
+            total: out.callers.len(),
+            page: out.callers,
+            timed_out,
+            progress: out.progress,
+            resume: token,
+            index_version: version,
+        })
     }
 
     /// Callees trực tiếp (đọc chain, skip marker/self).

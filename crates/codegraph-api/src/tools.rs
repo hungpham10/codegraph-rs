@@ -57,16 +57,22 @@ pub fn relativize_paths(v: &mut Value, root: &str) {
 /// Serialize payload JSON kèm relativize path theo root — mọi response tool
 /// đi qua đây để `file`/`path` trả về tương đối so với workspace root.
 pub fn emit_value(root: &str, v: Value) -> Result<String> {
-    let mut v = v;
-    relativize_paths(&mut v, root);
-    omit_defaults(&mut v);
-    serde_json::to_string_pretty(&v).map_err(|e| Error::Invalid(e.to_string()))
+    emit_unpruned(root, v)
 }
 
 /// `emit_value` cho bất kỳ type serializable nào (chuyển qua `to_value`).
 pub fn emit<T: Serialize>(root: &str, v: &T) -> Result<String> {
     let value = serde_json::to_value(v).map_err(|e| Error::Invalid(e.to_string()))?;
     emit_value(root, value)
+}
+
+/// Serialize giữ nguyên structure (không lược default): các frontend formatter
+/// (vd MCP `format_response`) cần sentinel gốc (0 / [] / "") để dựng layout
+/// `minimal` chi tiết-correct; pruning ở đây sẽ làm mất data trước formatter.
+pub fn emit_unpruned(root: &str, v: Value) -> Result<String> {
+    let mut v = v;
+    relativize_paths(&mut v, root);
+    serde_json::to_string(&v).map_err(|e| Error::Invalid(e.to_string()))
 }
 
 /// Keys có `0` = "absent" (sentinel) — value 0 bị lược như default. Các số khác
@@ -87,7 +93,7 @@ fn is_default_value(key: &str, v: &Value) -> bool {
 }
 
 /// Lược bỏ key có value mặc định trong mọi OBJECT (in-place). ARRAY không bao
-/// giờ bị xóa phần tử — schema mảng vị trí cố định (style `minimize`) phải giữ
+/// giờ bị xóa phần tử — schema mảng vị trí cố định (style `minimal`) phải giữ
 /// nguyên độ dài; chỉ object con bên trong được xử lý tiếp.
 pub fn omit_defaults(v: &mut Value) {
     match v {

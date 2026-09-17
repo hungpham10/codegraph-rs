@@ -13,6 +13,8 @@
 mod docgraph;
 #[cfg(feature = "http")]
 pub mod http;
+#[cfg(test)]
+mod response_tests;
 mod session;
 pub mod stdio;
 mod tools;
@@ -138,6 +140,28 @@ impl CodegraphServer {
     /// công, [`ToolOutput::Error`] cho lỗi tool (client thấy `is_error`),
     /// [`Err`] cho lỗi protocol (unknown tool đã bị chặn trước ở `call_tool`).
     async fn run_tool(&self, name: &str, args: Value) -> Result<ToolOutput, McpError> {
+        let detail = tools::detail_from_args(&args, self.session.detail().await);
+        let format = tools::response_format_from_args(name, &args, self.session.format().await);
+        let root = self.session.root().await;
+        let output = self.run_tool_raw(name, args).await?;
+        let root = self.session.root().await.or(root);
+        match output {
+            ToolOutput::Text { text, source_bytes } => {
+                match tools::format_response(
+                    root.as_deref().map_or("", |p| p.as_str()),
+                    &text,
+                    detail,
+                    format,
+                ) {
+                    Ok(text) => Ok(ToolOutput::Text { text, source_bytes }),
+                    Err(e) => Ok(ToolOutput::Error(e.to_string())),
+                }
+            }
+            error => Ok(error),
+        }
+    }
+
+    async fn run_tool_raw(&self, name: &str, args: Value) -> Result<ToolOutput, McpError> {
         // ── Telemetry — không cần session ──
         if name == "codegraph_query_usage_report" {
             let reset = args.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -148,14 +172,13 @@ impl CodegraphServer {
                 u.reset();
             }
             drop(u);
-            let mut v = serde_json::to_value(&report).map_err(|e| {
+            let v = serde_json::to_value(&report).map_err(|e| {
                 McpError::internal_error(
                     "usage report failed",
                     Some(json!({"reason": e.to_string()})),
                 )
             })?;
-            tools::omit_defaults(&mut v);
-            let text = serde_json::to_string_pretty(&v).map_err(|e| {
+            let text = serde_json::to_string(&v).map_err(|e| {
                 McpError::internal_error(
                     "usage report failed",
                     Some(json!({"reason": e.to_string()})),
@@ -188,7 +211,7 @@ impl CodegraphServer {
                     .and_then(|v| v.as_str())
                     .and_then(DetailLevel::parse)
                     .unwrap_or_default();
-                // Output format (minimize/medium) — None giữ nguyên seed từ CLI.
+                // Output format (minimal/medium) — None giữ nguyên seed từ CLI.
                 let format = args
                     .get("format")
                     .and_then(|v| v.as_str())
@@ -423,7 +446,7 @@ impl CodegraphServer {
         // Binary tools (codegraph_graphbin_*) — dataset riêng, lazy; mở per-call (open là O(1),
         // search contains đi radix trie persist).
         if name.starts_with("codegraph_graphbin_") {
-            return match tools::dispatch_binary(&root, name, args).await {
+            return match tools::dispatch_binary(&root, name, args, format).await {
                 Ok(text) => Ok(ToolOutput::Text {
                     text,
                     source_bytes: 0,
@@ -524,9 +547,7 @@ enum ToolOutput {
 
 impl ToolOutput {
     fn json(v: &Value) -> Self {
-        let mut v = v.clone();
-        tools::omit_defaults(&mut v);
-        match serde_json::to_string_pretty(&v) {
+        match serde_json::to_string(v) {
             Ok(text) => ToolOutput::Text {
                 text,
                 source_bytes: 0,

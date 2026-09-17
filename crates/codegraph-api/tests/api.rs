@@ -100,6 +100,93 @@ async fn search_and_symbol_by_id() {
 }
 
 #[tokio::test]
+async fn callers_resume_roundtrip_and_validation() {
+    use codegraph_api::TIMEOUT_EXPIRE_IMMEDIATELY as EXPIRED;
+    let dir = tempfile::tempdir().unwrap();
+    let dsn = format!("sqlite://{}", dir.path().join("resume.db").display());
+    let (caller, callee, helper) = seed_index(&dsn).await;
+    let api = api(&dsn).await;
+    let first = api
+        .callers_resumable(helper, 2, None, EXPIRED)
+        .await
+        .unwrap();
+    assert!(first.timed_out && first.page.is_empty());
+    let token = first.resume.unwrap();
+    for (id, depth) in [(callee, 2), (helper, 1)] {
+        assert!(api
+            .callers_resumable(id, depth, Some(token.clone()), 0)
+            .await
+            .is_err());
+    }
+    assert!(api
+        .callers_resumable(helper, 2, Some("unknown".into()), 0)
+        .await
+        .is_err());
+    assert!(api
+        .search_symbol_paged_resumable(
+            "helper",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 5,
+                offset: 0
+            },
+            Some(token.clone()),
+            0
+        )
+        .await
+        .is_err());
+    let again = api
+        .callers_resumable(helper, 2, Some(token.clone()), EXPIRED)
+        .await
+        .unwrap();
+    assert!(again.timed_out);
+    assert!(api
+        .callers_resumable(helper, 2, Some(token), 0)
+        .await
+        .is_err());
+    let token = again.resume.unwrap();
+    let done = api
+        .callers_resumable(helper, 2, Some(token.clone()), 0)
+        .await
+        .unwrap();
+    assert!(!done.timed_out && done.resume.is_none());
+    assert_eq!(
+        done.page.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![callee, caller]
+    );
+    assert!(api
+        .callers_resumable(helper, 2, Some(token), 0)
+        .await
+        .is_err());
+    let name = api
+        .search_symbol_paged_resumable(
+            "helper",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 5,
+                offset: 0,
+            },
+            None,
+            EXPIRED,
+        )
+        .await
+        .unwrap();
+    assert!(api
+        .callers_resumable(helper, 2, name.resume, 0)
+        .await
+        .is_err());
+    let stale = api
+        .callers_resumable(helper, 2, None, EXPIRED)
+        .await
+        .unwrap()
+        .resume;
+    seed_index(&dsn).await;
+    assert!(api.callers_resumable(helper, 2, stale, 0).await.is_err());
+}
+
+#[tokio::test]
 async fn callers_callees_and_flow() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("db.sqlite");
