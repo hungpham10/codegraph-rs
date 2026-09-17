@@ -60,16 +60,16 @@ pub enum OutputStyle {
     /// Mặc định — nhỏ gọn nhất: symbol thành mảng vị trí cố định (chỉ value,
     /// order được document; value thiếu = sentinel null/0/""/[]).
     #[default]
-    Minimize,
+    Minimal,
     /// Giữ key, lược bỏ field có value mặc định (None/0/""/[]/{}).
     Medium,
 }
 
 impl OutputStyle {
-    /// Parse từ tên arg (`minimize`/`medium`) — `None` nếu lạ.
+    /// Parse từ tên arg (`minimal`/`medium`) — `None` nếu lạ.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "minimize" => Self::Minimize,
+            "minimal" => Self::Minimal,
             "medium" => Self::Medium,
             _ => return None,
         })
@@ -77,7 +77,7 @@ impl OutputStyle {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Minimize => "minimize",
+            Self::Minimal => "minimal",
             Self::Medium => "medium",
         }
     }
@@ -221,7 +221,7 @@ impl Session {
         *self.detail.read().await
     }
 
-    /// Output format hiện tại (minimize/medium) cho mọi response.
+    /// Output format hiện tại (minimal/medium) cho mọi response.
     pub async fn format(&self) -> OutputStyle {
         *self.format.read().await
     }

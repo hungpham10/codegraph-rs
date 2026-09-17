@@ -211,7 +211,7 @@ impl CodegraphServer {
                     .and_then(|v| v.as_str())
                     .and_then(DetailLevel::parse)
                     .unwrap_or_default();
-                // Output format (minimize/medium) — None giữ nguyên seed từ CLI.
+                // Output format (minimal/medium) — None giữ nguyên seed từ CLI.
                 let format = args
                     .get("format")
                     .and_then(|v| v.as_str())

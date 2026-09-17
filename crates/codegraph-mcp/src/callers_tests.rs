@@ -47,25 +47,25 @@ async fn callers_timeout_resume_dispatch() {
     .unwrap();
     drop(idx);
     let api = GraphApi::new_with_index(Arc::new(SharedGraphIndex::open(Some(dsn)).await.unwrap()));
-    let minimized = dispatch_with_api(
+    let compact = dispatch_with_api(
         &api,
         root,
         DetailLevel::Medium,
-        OutputStyle::Minimize,
+        OutputStyle::Minimal,
         false,
         "codegraph_symbol",
-        json!({"id": a, "format": "minimize"}),
+        json!({"id": a, "format": "minimal"}),
     )
     .await
     .unwrap();
-    let minimized: Value = serde_json::from_str(&minimized).unwrap();
-    assert_eq!(minimized.as_array().unwrap().len(), 6);
+    let compact: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(compact.as_array().unwrap().len(), 6);
 
     let context = dispatch_with_api(
         &api,
         root,
         DetailLevel::Minimal,
-        OutputStyle::Minimize,
+        OutputStyle::Minimal,
         false,
         "codegraph_context",
         json!({"query":"caller","depth":1}),
@@ -76,7 +76,7 @@ async fn callers_timeout_resume_dispatch() {
         root.as_str(),
         &context,
         DetailLevel::Minimal,
-        OutputStyle::Minimize,
+        OutputStyle::Minimal,
     )
     .unwrap();
     let context: Value = serde_json::from_str(&context).unwrap();

@@ -21,13 +21,13 @@ fn nested_symbols_respect_all_detail_and_format_combinations() {
         (DetailLevel::Medium, 6),
         (DetailLevel::Verbose, 14),
     ] {
-        for style in [OutputStyle::Minimize, OutputStyle::Medium] {
+        for style in [OutputStyle::Minimal, OutputStyle::Medium] {
             let input = json!({"symbol":symbol(),"matches":[symbol()],"source":"fn example() {\n    false\n}"});
             let output =
                 tools::format_response("/repo", &input.to_string(), detail, style).unwrap();
             let result: Value = serde_json::from_str(&output).unwrap();
             assert_eq!(result["source"], input["source"]);
-            if style == OutputStyle::Minimize {
+            if style == OutputStyle::Minimal {
                 assert!(!output.contains('\n'));
                 assert_eq!(result["symbol"].as_array().unwrap().len(), size);
                 assert_eq!(result["matches"][0], result["symbol"]);
@@ -57,7 +57,7 @@ fn repeated_records_are_smaller_and_decodable() {
         "/repo",
         &input.to_string(),
         DetailLevel::Minimal,
-        OutputStyle::Minimize,
+        OutputStyle::Minimal,
     )
     .unwrap();
     let medium = tools::format_response(
@@ -90,9 +90,9 @@ fn api_emitted_payloads_keep_sentinels_through_the_formatter() {
     let full = json!({"symbols":[symbol()]});
     let raw = codegraph_api::tools::emit_value("/repo", full).unwrap();
     let out =
-        tools::format_response("/repo", &raw, DetailLevel::Verbose, OutputStyle::Minimize).unwrap();
+        tools::format_response("/repo", &raw, DetailLevel::Verbose, OutputStyle::Minimal).unwrap();
     let result: Value = serde_json::from_str(&out).unwrap();
-    // Minimize dựng mảng 14 cell từ object-symbol (thứ tự theo symbol_json);
+    // Minimal dựng mảng 14 cell từ object-symbol (thứ tự theo symbol_json);
     // sentinel phải là số 0 / [] gốc, không phải null do prune xảy ra trước.
     let cells = result["symbols"][0].as_array().unwrap();
     assert_eq!(cells.len(), 14);
@@ -114,7 +114,7 @@ fn document_values_and_annotation_args_are_preserved() {
     ] {
         let input =
             json!({"value":value,"args":{"enabled":false,"empty":""},"path":"/repo/a.json"});
-        for style in [OutputStyle::Minimize, OutputStyle::Medium] {
+        for style in [OutputStyle::Minimal, OutputStyle::Medium] {
             let output =
                 tools::format_response("/repo", &input.to_string(), DetailLevel::Minimal, style)
                     .unwrap();
@@ -124,6 +124,15 @@ fn document_values_and_annotation_args_are_preserved() {
             assert_eq!(result["path"], "a.json");
         }
     }
+}
+
+#[test]
+fn minimal_format_name_round_trips() {
+    assert_eq!(OutputStyle::parse("minimal"), Some(OutputStyle::Minimal));
+    assert_eq!(OutputStyle::Minimal.as_str(), "minimal");
+    assert_eq!(OutputStyle::default(), OutputStyle::Minimal);
+    assert_eq!(OutputStyle::parse("medium"), Some(OutputStyle::Medium));
+    assert_eq!(OutputStyle::Medium.as_str(), "medium");
 }
 
 #[test]
@@ -140,7 +149,7 @@ fn every_registered_tool_advertises_output_controls() {
         };
         assert_eq!(
             props[key]["enum"],
-            json!(["minimize", "medium"]),
+            json!(["minimal", "medium"]),
             "{}",
             tool.name
         );
@@ -161,7 +170,7 @@ async fn server_routes_share_formatting_and_overrides() {
         server
             .run_tool(
                 "codegraph_init",
-                json!({"path":dir.path(),"index":false,"detail":"minimal","format":"minimize"}),
+                json!({"path":dir.path(),"index":false,"detail":"minimal","format":"minimal"}),
             )
             .await
             .unwrap(),

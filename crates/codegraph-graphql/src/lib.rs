@@ -165,7 +165,7 @@ mod tests {
     use tokio::sync::RwLock as TokioRwLock;
 
     fn make_state(mermaid: bool) -> Arc<AppState> {
-        let session = Session::new_with_format(OutputStyle::Minimize);
+        let session = Session::new_with_format(OutputStyle::Minimal);
         let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
             Arc::new(TokioRwLock::new(InMemoryStorage::default()));
         let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
@@ -185,7 +185,7 @@ mod tests {
             addr: "127.0.0.1:0".parse().unwrap(),
             api_key: None,
             root: None,
-            format: OutputStyle::Minimize,
+            format: OutputStyle::Minimal,
             allow_hosts: vec![],
             mermaid,
         }

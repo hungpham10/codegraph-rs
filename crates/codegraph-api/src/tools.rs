@@ -68,7 +68,7 @@ pub fn emit<T: Serialize>(root: &str, v: &T) -> Result<String> {
 
 /// Serialize giữ nguyên structure (không lược default): các frontend formatter
 /// (vd MCP `format_response`) cần sentinel gốc (0 / [] / "") để dựng layout
-/// `minimize` chi tiết-correct; pruning ở đây sẽ làm mất data trước formatter.
+/// `minimal` chi tiết-correct; pruning ở đây sẽ làm mất data trước formatter.
 pub fn emit_unpruned(root: &str, v: Value) -> Result<String> {
     let mut v = v;
     relativize_paths(&mut v, root);
@@ -93,7 +93,7 @@ fn is_default_value(key: &str, v: &Value) -> bool {
 }
 
 /// Lược bỏ key có value mặc định trong mọi OBJECT (in-place). ARRAY không bao
-/// giờ bị xóa phần tử — schema mảng vị trí cố định (style `minimize`) phải giữ
+/// giờ bị xóa phần tử — schema mảng vị trí cố định (style `minimal`) phải giữ
 /// nguyên độ dài; chỉ object con bên trong được xử lý tiếp.
 pub fn omit_defaults(v: &mut Value) {
     match v {

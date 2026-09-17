@@ -46,10 +46,10 @@ fn tool(name: &'static str, desc: &'static str, mut schema: Value) -> ToolDef {
     };
     let format = props.entry(format_key).or_insert_with(|| {
         json!({
-            "type": "string", "enum": ["minimize", "medium"]
+            "type": "string", "enum": ["minimal", "medium"]
         })
     });
-    format["description"] = json!("Response format; overrides session default. minimize = compact JSON with detail-aware symbol arrays and repeated records as {columns,rows}; medium = keyed JSON. See server instructions for array layouts.");
+    format["description"] = json!("Response format; overrides session default. minimal = compact JSON with detail-aware symbol arrays and repeated records as {columns,rows}; medium = keyed JSON. See server instructions for array layouts.");
     if name != "codegraph_init" {
         format.as_object_mut().unwrap().remove("default");
     }
@@ -78,7 +78,7 @@ fn tool_defs() -> Vec<ToolDef> {
             json!({ "type": "object", "properties": {
                 "id": { "type": "integer" },
                 "name": { "type": "string" },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol as a fixed-order positional array (default), medium = full object with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = symbol as a fixed-order positional array (default), medium = full object with default-valued fields omitted." }
             } }),
         ),
         tool(
@@ -90,7 +90,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "node": { "type": "integer" },
                 "depth": { "type": "integer", "default": 1 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["node"] }),
         ),
         tool(
@@ -99,7 +99,7 @@ fn tool_defs() -> Vec<ToolDef> {
             json!({ "type": "object", "properties": {
                 "node": { "type": "integer" },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["node"] }),
         ),
         tool(
@@ -109,7 +109,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "node": { "type": "integer" },
                 "max_depth": { "type": "integer", "default": 3 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["node"] }),
         ),
         tool(
@@ -118,7 +118,7 @@ fn tool_defs() -> Vec<ToolDef> {
             json!({ "type": "object", "properties": {
                 "node": { "type": "integer" },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Detail for the embedded symbol (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["node"] }),
         ),
         tool(
@@ -185,7 +185,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "path": { "type": "string", "description": "Absolute path of the workspace root to bind this session to." },
                 "index": { "type": "boolean", "default": false },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "default": "medium", "description": "Default symbol detail for list-tool responses: minimal = id/name/kind/file/line (fewest tokens), medium = + signature, verbose = full Symbol (doc, annotations, ...). Per-call detail overrides this." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "default": "minimize", "description": "Output format for every response: minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted. Per-call format overrides this." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "default": "minimal", "description": "Output format for every response: minimal = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted. Per-call format overrides this." }
             }, "required": ["path"] }),
         ),
         tool(
@@ -212,7 +212,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "resume": { "type": "string", "description": "Resume id from a previous timeout (or from a previous response with more pages) — retry the same call with this to continue where it stopped." },
                 "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["query"] }),
         ),
         // ── Class queries (codegraph_graphcode_class / codegraph_graphcode_list_types) ──
@@ -222,7 +222,7 @@ fn tool_defs() -> Vec<ToolDef> {
             json!({ "type": "object", "properties": {
                 "class_name": { "type": "string" },
                 "id": { "type": "integer" },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = embedded class symbol as a fixed-order positional array (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = embedded class symbol as a fixed-order positional array (default), medium = objects with default-valued fields omitted." }
             } }),
         ),
         tool(
@@ -233,7 +233,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "limit": { "type": "integer", "default": 20 },
                 "offset": { "type": "integer", "default": 0 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." },
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." },
                 "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
                 "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             } }),
@@ -244,7 +244,7 @@ fn tool_defs() -> Vec<ToolDef> {
             json!({ "type": "object", "properties": {
                 "func_name": { "type": "string" },
                 "id": { "type": "integer" },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = function/params/locals as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = function/params/locals as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             } }),
         ),
         // ── Annotation / call / dependency queries ──
@@ -257,7 +257,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "limit": { "type": "integer", "default": 20 },
                 "offset": { "type": "integer", "default": 0 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "description": "Output format for this call (overrides session default): minimize = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." },
+                "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = symbol items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." },
                 "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
                 "resume": { "type": "string", "description": "Resume id from a previous timeout — retry the same call with this to continue where it stopped." }
             }, "required": ["annotation"] }),
@@ -414,7 +414,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "order": { "type": "string", "enum": ["name", "addr", "id"], "default": "name" },
                 "offset": { "type": "integer", "default": 0 },
                 "limit": { "type": "integer", "default": 50, "description": "Max rows per page." },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "default": "minimize", "description": "Output format: minimize = rows as fixed-order positional arrays [id, name, kind, addr, end_addr, path, flag, lib, signature] (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "default": "minimal", "description": "Output format: minimal = rows as fixed-order positional arrays [id, name, kind, addr, end_addr, path, flag, lib, signature] (default), medium = objects with default-valued fields omitted." }
             } }),
         ),
         tool(
@@ -424,7 +424,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "addr": { "type": "integer", "description": "Virtual address to look up (omit to list entrypoints)." },
                 "path": { "type": "string", "description": "Binary path for entrypoint listing." },
                 "limit": { "type": "integer", "default": 20 },
-                "format": { "type": "string", "enum": ["minimize", "medium"], "default": "minimize", "description": "Output format: minimize = rows as fixed-order positional arrays [id, name, kind, addr, end_addr, path, flag, lib, signature] (default), medium = objects with default-valued fields omitted." }
+                "format": { "type": "string", "enum": ["minimal", "medium"], "default": "minimal", "description": "Output format: minimal = rows as fixed-order positional arrays [id, name, kind, addr, end_addr, path, flag, lib, signature] (default), medium = objects with default-valued fields omitted." }
             } }),
         ),
         tool(
@@ -1211,7 +1211,7 @@ pub(crate) fn format_response(
     };
     normalize_response(&mut value, root, detail, style);
     match style {
-        OutputStyle::Minimize => serde_json::to_string(&value),
+        OutputStyle::Minimal => serde_json::to_string(&value),
         OutputStyle::Medium => serde_json::to_string_pretty(&value),
     }
     .map_err(|e| Error::Invalid(e.to_string()))
@@ -1276,7 +1276,7 @@ fn normalize_response(value: &mut Value, root: &str, detail: DetailLevel, style:
                 if let Some(Value::String(path)) = map.get_mut("file") {
                     *path = strip_root_prefix(path, root).to_owned();
                 }
-                if matches!(style, OutputStyle::Minimize) {
+                if matches!(style, OutputStyle::Minimal) {
                     *value = Value::Array(
                         keys.iter()
                             .map(|key| {
@@ -1316,7 +1316,7 @@ fn normalize_response(value: &mut Value, root: &str, detail: DetailLevel, style:
             for item in items.iter_mut() {
                 normalize_response(item, root, detail, style);
             }
-            if matches!(style, OutputStyle::Minimize)
+            if matches!(style, OutputStyle::Minimal)
                 && items.len() > 1
                 && items.iter().all(Value::is_object)
             {
@@ -1346,20 +1346,20 @@ fn normalize_response(value: &mut Value, root: &str, detail: DetailLevel, style:
     }
 }
 
-/// Symbol JSON theo `detail` + `style`. `Minimize` (mặc định) → mảng vị trí cố
+/// Symbol JSON theo `detail` + `style`. `Minimal` (mặc định) → mảng vị trí cố
 /// định (order được document trong server-instructions.md; file đã relativize
 /// theo root — relativize_paths chỉ chạm object key, không chạm phần tử mảng);
 /// `Medium` → object giữ key (field default bị lược trong formatter chung).
 fn symbol_json(root: &str, s: &Symbol, detail: DetailLevel, style: OutputStyle) -> Value {
     match style {
-        OutputStyle::Minimize if matches!(detail, DetailLevel::Minimal) => json!([
+        OutputStyle::Minimal if matches!(detail, DetailLevel::Minimal) => json!([
             s.id,
             s.name,
             s.kind.as_str(),
             strip_root_prefix(&s.file, root),
             s.line
         ]),
-        OutputStyle::Minimize if matches!(detail, DetailLevel::Medium) => json!([
+        OutputStyle::Minimal if matches!(detail, DetailLevel::Medium) => json!([
             s.id,
             s.name,
             s.kind.as_str(),
@@ -1367,7 +1367,7 @@ fn symbol_json(root: &str, s: &Symbol, detail: DetailLevel, style: OutputStyle) 
             s.line,
             s.signature
         ]),
-        OutputStyle::Minimize => json!([
+        OutputStyle::Minimal => json!([
             s.id,
             s.name,
             s.kind.as_str(),
@@ -1404,12 +1404,12 @@ fn symbol_json(root: &str, s: &Symbol, detail: DetailLevel, style: OutputStyle) 
     }
 }
 
-/// Binary symbol row JSON theo `style`. `Minimize` → mảng vị trí cố định
+/// Binary symbol row JSON theo `style`. `Minimal` → mảng vị trí cố định
 /// [id, name, kind, addr, end_addr, path, flag, lib, signature] (path đã
 /// relativize); `Medium` → object (field default được lược trong `emit_value`).
 fn bin_row_json(root: &str, r: &codegraph_extract::BinSymbolRow, style: OutputStyle) -> Value {
     match style {
-        OutputStyle::Minimize => json!([
+        OutputStyle::Minimal => json!([
             r.id,
             r.name,
             r.kind,

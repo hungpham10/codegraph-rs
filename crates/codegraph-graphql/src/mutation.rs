@@ -21,7 +21,7 @@ impl Mutation {
     /// Bind session vào một workspace root: tạo `.codegraph/` + config, index
     /// CHỈ khi `index = true` (mặc định false — bind nhanh, không block). Sau
     /// đó mới gọi được các query đọc. `detail` = minimal/medium/verbose;
-    /// `format` = minimize/medium (không set → giữ seed từ CLI).
+    /// `format` = minimal/medium (không set → giữ seed từ CLI).
     async fn init(
         &self,
         ctx: &Context<'_>,

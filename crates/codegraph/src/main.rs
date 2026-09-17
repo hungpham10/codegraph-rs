@@ -119,10 +119,10 @@ enum Cmd {
         #[arg(long = "allow-any-host")]
         allow_any_host: bool,
         /// Output format cho mọi response (Binance-style minimal):
-        /// minimize (mặc định) = symbol thành mảng vị trí cố định; medium = giữ
+        /// minimal (mặc định) = symbol thành mảng vị trí cố định; medium = giữ
         /// key, lược field có value mặc định. Ghi đè được theo session
         /// (codegraph_init {"format": ...}) và từng call (arg "format").
-        #[arg(long, value_enum, default_value_t = OutputFormat::Minimize)]
+        #[arg(long, value_enum, default_value_t = OutputFormat::Minimal)]
         format: OutputFormat,
         /// Bật endpoint observability: `/health`, `/metrics`, `/metrics/prometheus`.
         #[arg(long = "enable-observability", default_value_t = true)]
@@ -139,14 +139,14 @@ enum Cmd {
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 enum OutputFormat {
     #[default]
-    Minimize,
+    Minimal,
     Medium,
 }
 
 impl OutputFormat {
     fn style(self) -> codegraph_mcp::OutputStyle {
         match self {
-            Self::Minimize => codegraph_mcp::OutputStyle::Minimize,
+            Self::Minimal => codegraph_mcp::OutputStyle::Minimal,
             Self::Medium => codegraph_mcp::OutputStyle::Medium,
         }
     }

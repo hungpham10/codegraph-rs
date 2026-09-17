@@ -9,7 +9,7 @@ One session per process. Bind before querying:
   non-blocking, does NOT index (`index` defaults `false`). Then
   `codegraph_index {}` builds/refreshes the index. Re-run with a new `path` to
   re-point. Optional defaults: `"detail":"minimal|medium|verbose"`,
-  `"format":"minimize|medium"`.
+  `"format":"minimal|medium"`.
 - `codegraph_deinit {}` — release session (index stays on disk). An unbound
   session refuses all query tools.
 A startup `--path` is already bound.
@@ -73,11 +73,11 @@ Detail controls code symbols, including nested symbols and ambiguous matches;
 non-symbol records retain their tool-specific information. Use `detail:verbose`
 for full symbol metadata. File paths are relative to the workspace root.
 
-## Response format (`minimize` = default)
+## Response format (`minimal` = default)
 Every successful response passes through the same formatter, including admin,
 telemetry, documents, binaries, sandbox and diff tools. Errors and short textual
 not-found messages remain readable text.
-- `minimize` — compact JSON without indentation. Symbol arrays follow the
+- `minimal` — compact JSON without indentation. Symbol arrays follow the
   requested detail. Repeated object records become `{ "columns": [...],
   "rows": [[...], ...] }` when this reduces serialized size. Columns are sorted;
   every row preserves column positions, with `null` for absent/default cells.
@@ -92,14 +92,14 @@ not-found messages remain readable text.
 - `codegraph_graphdoc_ingest` uses `output_format` for response formatting;
   its existing `format` still selects `hcl|yaml|json|toml` input parsing.
 
-Symbol arrays (`minimize`) have a fixed layout for each detail:
+Symbol arrays (`minimal`) have a fixed layout for each detail:
 - `minimal`: `[id,name,kind,file,line]` (5 fields).
 - `medium`: `[id,name,kind,file,line,signature]` (6 fields).
 - `verbose`: `[id,name,kind,scope,scope_id,type_ref,type_name,file,line,end_line,signature,doc,annotations,language]` (14 fields; legacy full layout).
 Never remove default-valued array cells or reorder them. This replaces the old
 always-14-field layout for minimal/medium detail; consumers must use the requested detail.
 
-Binary row array (`minimize`), 9 fixed fields in order:
+Binary row array (`minimal`), 9 fixed fields in order:
 `0` id, `1` name, `2` kind, `3` addr, `4` end_addr, `5` path(rel root), `6` flag,
 `7` lib, `8` signature. Returned by `codegraph_search_symbol` (`binary` section,
 `source: all|binary`), `codegraph_graphbin_list` and `codegraph_graphbin_addr`.
