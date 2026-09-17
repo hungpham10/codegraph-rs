@@ -47,6 +47,42 @@ async fn callers_timeout_resume_dispatch() {
     .unwrap();
     drop(idx);
     let api = GraphApi::new_with_index(Arc::new(SharedGraphIndex::open(Some(dsn)).await.unwrap()));
+    let minimized = dispatch_with_api(
+        &api,
+        root,
+        DetailLevel::Medium,
+        OutputStyle::Minimize,
+        false,
+        "codegraph_symbol",
+        json!({"id": a, "format": "minimize"}),
+    )
+    .await
+    .unwrap();
+    let minimized: Value = serde_json::from_str(&minimized).unwrap();
+    assert_eq!(minimized.as_array().unwrap().len(), 6);
+
+    let context = dispatch_with_api(
+        &api,
+        root,
+        DetailLevel::Minimal,
+        OutputStyle::Minimize,
+        false,
+        "codegraph_context",
+        json!({"query":"caller","depth":1}),
+    )
+    .await
+    .unwrap();
+    let context = format_response(
+        root.as_str(),
+        &context,
+        DetailLevel::Minimal,
+        OutputStyle::Minimize,
+    )
+    .unwrap();
+    let context: Value = serde_json::from_str(&context).unwrap();
+    assert_eq!(context["hits"][0]["symbol"].as_array().unwrap().len(), 5);
+    assert_eq!(context["hits"][0]["callees"][0][0], b);
+
     let call = |args| {
         dispatch_with_api(
             &api,

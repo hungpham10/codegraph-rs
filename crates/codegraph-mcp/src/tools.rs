@@ -29,7 +29,30 @@ struct ToolDef {
     schema: Value,
 }
 
-fn tool(name: &'static str, desc: &'static str, schema: Value) -> ToolDef {
+fn tool(name: &'static str, desc: &'static str, mut schema: Value) -> ToolDef {
+    let props = schema["properties"]
+        .as_object_mut()
+        .expect("tool properties");
+    props.entry("detail").or_insert_with(|| {
+        json!({
+            "type": "string", "enum": ["minimal", "medium", "verbose"],
+            "description": "Symbol detail; overrides the session default in either output format."
+        })
+    });
+    let format_key = if name == "codegraph_graphdoc_ingest" {
+        "output_format"
+    } else {
+        "format"
+    };
+    let format = props.entry(format_key).or_insert_with(|| {
+        json!({
+            "type": "string", "enum": ["minimize", "medium"]
+        })
+    });
+    format["description"] = json!("Response format; overrides session default. minimize = compact JSON with detail-aware symbol arrays and repeated records as {columns,rows}; medium = keyed JSON. See server instructions for array layouts.");
+    if name != "codegraph_init" {
+        format.as_object_mut().unwrap().remove("default");
+    }
     ToolDef { name, desc, schema }
 }
 
@@ -477,11 +500,12 @@ pub async fn dispatch_with_api(
                         .iter()
                         .map(|s| symbol_json(root.as_str(), s, detail, format))
                         .collect();
-                    return Ok(format!(
-                        "ambiguous ({} matches):\n{}",
-                        matches.len(),
-                        emit_value(root.as_str(), Value::Array(matches))?
-                    ));
+                    return emit_value(
+                        root.as_str(),
+                        json!({
+                            "ambiguous": true, "matches": matches, "hint": "Retry with id alone."
+                        }),
+                    );
                 }
                 return match r.symbol {
                     Some(s) => emit_value(
@@ -622,7 +646,7 @@ pub async fn dispatch_with_api(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as u32,
-                format: Format::Markdown,
+                format: Format::Json,
                 strip_prefix: Some(root.as_str().to_string()),
             };
             Ok(api.context_markdown(&req).await?)
@@ -1145,7 +1169,7 @@ async fn dispatch_binary_graph(
 // không cần thấy tiền tố absolute lặp lại trên từng dòng.
 
 /// Detail level cho một tool: arg `detail` ghi đè session default.
-fn detail_from_args(args: &Value, session: DetailLevel) -> DetailLevel {
+pub(crate) fn detail_from_args(args: &Value, session: DetailLevel) -> DetailLevel {
     args.get("detail")
         .and_then(|v| v.as_str())
         .and_then(DetailLevel::parse)
@@ -1160,12 +1184,189 @@ fn format_from_args(args: &Value, session: OutputStyle) -> OutputStyle {
         .unwrap_or(session)
 }
 
+pub(crate) fn response_format_from_args(
+    name: &str,
+    args: &Value,
+    session: OutputStyle,
+) -> OutputStyle {
+    if name == "codegraph_graphdoc_ingest" {
+        args.get("output_format")
+            .and_then(Value::as_str)
+            .and_then(OutputStyle::parse)
+            .unwrap_or(session)
+    } else {
+        format_from_args(args, session)
+    }
+}
+
+/// Chung cho mọi response thành công, kể cả admin và các dataset phụ.
+pub(crate) fn format_response(
+    root: &str,
+    text: &str,
+    detail: DetailLevel,
+    style: OutputStyle,
+) -> Result<String> {
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return Ok(text.to_owned());
+    };
+    normalize_response(&mut value, root, detail, style);
+    match style {
+        OutputStyle::Minimize => serde_json::to_string(&value),
+        OutputStyle::Medium => serde_json::to_string_pretty(&value),
+    }
+    .map_err(|e| Error::Invalid(e.to_string()))
+}
+
+fn normalize_response(value: &mut Value, root: &str, detail: DetailLevel, style: OutputStyle) {
+    match value {
+        Value::Object(map) => {
+            let symbol_keys = [
+                "id",
+                "name",
+                "kind",
+                "scope",
+                "scope_id",
+                "type_ref",
+                "type_name",
+                "file",
+                "line",
+                "end_line",
+                "signature",
+                "doc",
+                "annotations",
+                "language",
+            ];
+            let symbol = ["id", "name", "kind", "file", "line"]
+                .iter()
+                .all(|key| map.contains_key(*key))
+                && map.keys().all(|key| symbol_keys.contains(&key.as_str()));
+            let member_keys = ["id", "name", "kind", "line", "signature"];
+            if matches!(detail, DetailLevel::Minimal)
+                && ["id", "name", "kind", "line"]
+                    .iter()
+                    .all(|key| map.contains_key(*key))
+                && map.keys().all(|key| member_keys.contains(&key.as_str()))
+            {
+                map.remove("signature");
+            }
+            if symbol {
+                let keys: &[&str] = match detail {
+                    DetailLevel::Minimal => &["id", "name", "kind", "file", "line"],
+                    DetailLevel::Medium => &["id", "name", "kind", "file", "line", "signature"],
+                    DetailLevel::Verbose => &[
+                        "id",
+                        "name",
+                        "kind",
+                        "scope",
+                        "scope_id",
+                        "type_ref",
+                        "type_name",
+                        "file",
+                        "line",
+                        "end_line",
+                        "signature",
+                        "doc",
+                        "annotations",
+                        "language",
+                    ],
+                };
+                if !matches!(detail, DetailLevel::Verbose) {
+                    map.retain(|key, _| keys.contains(&key.as_str()));
+                }
+                if let Some(Value::String(path)) = map.get_mut("file") {
+                    *path = strip_root_prefix(path, root).to_owned();
+                }
+                if matches!(style, OutputStyle::Minimize) {
+                    *value = Value::Array(
+                        keys.iter()
+                            .map(|key| {
+                                map.get(*key)
+                                    // Detail medium: 0 nghĩa "absent" — cell null.
+                                    .filter(|cell| {
+                                        !matches!(detail, DetailLevel::Medium)
+                                            || !ZERO_SENTINEL_KEYS.contains(&key.as_ref())
+                                            || !cell.is_u64()
+                                            || cell.as_u64() != Some(0)
+                                    })
+                                    .cloned()
+                                    .unwrap_or(Value::Null)
+                            })
+                            .collect(),
+                    );
+                    return;
+                }
+            }
+            for (key, child) in map.iter_mut() {
+                // Giữ nguyên scalar document và annotation args.
+                if key == "value" || key == "args" {
+                    continue;
+                }
+                if PATH_KEYS.contains(&key.as_str()) {
+                    if let Value::String(path) = child {
+                        *path = strip_root_prefix(path, root).to_owned();
+                    }
+                }
+                normalize_response(child, root, detail, style);
+            }
+            map.retain(|key, child| {
+                key == "value" || key == "args" || !is_default_value(key, child)
+            });
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                normalize_response(item, root, detail, style);
+            }
+            if matches!(style, OutputStyle::Minimize)
+                && items.len() > 1
+                && items.iter().all(Value::is_object)
+            {
+                let mut columns = std::collections::BTreeSet::new();
+                for item in items.iter() {
+                    columns.extend(item.as_object().unwrap().keys().cloned());
+                }
+                let columns: Vec<_> = columns.into_iter().collect();
+                let rows: Vec<Vec<Value>> = items
+                    .iter()
+                    .map(|item| {
+                        columns
+                            .iter()
+                            .map(|key| item.get(key).cloned().unwrap_or(Value::Null))
+                            .collect()
+                    })
+                    .collect();
+                let table = json!({"columns": columns, "rows": rows});
+                if serde_json::to_vec(&table).unwrap().len()
+                    < serde_json::to_vec(items).unwrap().len()
+                {
+                    *value = table;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Symbol JSON theo `detail` + `style`. `Minimize` (mặc định) → mảng vị trí cố
 /// định (order được document trong server-instructions.md; file đã relativize
 /// theo root — relativize_paths chỉ chạm object key, không chạm phần tử mảng);
-/// `Medium` → object giữ key (field default bị lược sau trong `omit_defaults`).
+/// `Medium` → object giữ key (field default bị lược trong formatter chung).
 fn symbol_json(root: &str, s: &Symbol, detail: DetailLevel, style: OutputStyle) -> Value {
     match style {
+        OutputStyle::Minimize if matches!(detail, DetailLevel::Minimal) => json!([
+            s.id,
+            s.name,
+            s.kind.as_str(),
+            strip_root_prefix(&s.file, root),
+            s.line
+        ]),
+        OutputStyle::Minimize if matches!(detail, DetailLevel::Medium) => json!([
+            s.id,
+            s.name,
+            s.kind.as_str(),
+            strip_root_prefix(&s.file, root),
+            s.line,
+            s.signature
+        ]),
         OutputStyle::Minimize => json!([
             s.id,
             s.name,
@@ -1236,6 +1437,9 @@ fn bin_row_json(root: &str, r: &codegraph_extract::BinSymbolRow, style: OutputSt
 /// Strip `root/` prefix khỏi một path — chỉ khi root là tiền tố theo boundary
 /// (`root` + `/`), tránh cắt nhầm `/root2/...`. Giữ nguyên nếu không khớp.
 pub(crate) fn strip_root_prefix<'a>(path: &'a str, root: &str) -> &'a str {
+    if root.is_empty() {
+        return path;
+    }
     if let Some(rest) = path.strip_prefix(root) {
         if let Some(rest) = rest.strip_prefix('/') {
             return rest;
@@ -1252,6 +1456,9 @@ fn relativize_paths(v: &mut Value, root: &str) {
     match v {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
+                if k == "value" || k == "args" {
+                    continue;
+                }
                 if PATH_KEYS.contains(&k.as_str()) {
                     if let Some(s) = val.as_str() {
                         *val = Value::String(strip_root_prefix(s, root).to_string());
@@ -1274,8 +1481,7 @@ fn relativize_paths(v: &mut Value, root: &str) {
 fn emit_value(root: &str, v: Value) -> Result<String> {
     let mut v = v;
     relativize_paths(&mut v, root);
-    omit_defaults(&mut v);
-    serde_json::to_string_pretty(&v).map_err(|e| Error::Invalid(e.to_string()))
+    serde_json::to_string(&v).map_err(|e| Error::Invalid(e.to_string()))
 }
 
 /// `emit_value` cho bất kỳ type serializable nào (chuyển qua `to_value`).
@@ -1301,32 +1507,6 @@ fn is_default_value(key: &str, v: &Value) -> bool {
     }
 }
 
-/// Lược bỏ key có value mặc định trong mọi OBJECT (in-place). ARRAY không bao
-/// giờ bị xóa phần tử — schema mảng vị trí cố định (style `minimize`) phải giữ
-/// nguyên độ dài; chỉ object con bên trong được xử lý tiếp.
-///
-/// Giữ thứ tự key (preserve_order): `mem::take` + rebuild — `Map::remove` là
-/// swap-remove (đảo thứ tự), `shift_remove` không có sẵn trên mọi bản serde_json.
-pub(crate) fn omit_defaults(v: &mut Value) {
-    match v {
-        Value::Object(map) => {
-            let old = std::mem::take(map);
-            for (k, mut child) in old {
-                omit_defaults(&mut child);
-                if !is_default_value(&k, &child) {
-                    map.insert(k, child);
-                }
-            }
-        }
-        Value::Array(arr) => {
-            for item in arr.iter_mut() {
-                omit_defaults(item);
-            }
-        }
-        _ => {}
-    }
-}
-
 // ── Document tool dispatch ──
 
 pub async fn dispatch_doc_ingest(
@@ -1342,7 +1522,7 @@ pub async fn dispatch_doc_ingest(
         .ingest_file(path, format.as_deref())
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
-    Ok(format!("ingested {path} → doc_id={inserted}"))
+    emit_value("", json!({"path": path, "doc_id": inserted}))
 }
 
 pub async fn dispatch_doc_search(
@@ -1647,7 +1827,7 @@ pub async fn dispatch_doc_remove(
         .remove_document(doc_id)
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
-    Ok(format!("removed doc {doc_id}"))
+    emit_value("", json!({"removed": doc_id}))
 }
 
 pub async fn dispatch_doc_stats(doc_graph: Arc<crate::SharedDocGraph>) -> Result<String> {
@@ -1659,7 +1839,7 @@ pub async fn dispatch_doc_stats(doc_graph: Arc<crate::SharedDocGraph>) -> Result
         .stats()
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
-    Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
+    emit_value("", json!({"documents": stats.docs, "nodes": stats.nodes}))
 }
 
 // ── Binary tool dispatch ──
@@ -1683,11 +1863,16 @@ fn parse_bin_kind(s: &str) -> Option<SymbolKind> {
     }
 }
 
-pub async fn dispatch_binary(root: &Utf8Path, name: &str, args: Value) -> Result<String> {
+pub async fn dispatch_binary(
+    root: &Utf8Path,
+    name: &str,
+    args: Value,
+    session_format: OutputStyle,
+) -> Result<String> {
     let graph = codegraph_extract::BinaryGraph::open_from_config(root)
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
-    let format = format_from_args(&args, OutputStyle::Minimize);
+    let format = format_from_args(&args, session_format);
     match name {
         "codegraph_graphbin_list" => {
             let kind = args

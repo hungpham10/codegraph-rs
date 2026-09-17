@@ -140,6 +140,22 @@ fn collect_file_paths(v: &Value, out: &mut Vec<String>) {
             }
         }
         Value::Array(arr) => {
+            let file_index = match arr.len() {
+                5 | 6 => Some(3),
+                14 => Some(7),
+                _ => None,
+            };
+            if arr.first().is_some_and(Value::is_u64)
+                && arr
+                    .get(2)
+                    .and_then(Value::as_str)
+                    .and_then(codegraph_core::SymbolKind::parse)
+                    .is_some()
+            {
+                if let Some(path) = file_index.and_then(|i| arr.get(i)).and_then(Value::as_str) {
+                    out.push(path.to_owned());
+                }
+            }
             for val in arr {
                 collect_file_paths(val, out);
             }
