@@ -19,6 +19,10 @@ use std::sync::Arc;
 /// `bin_base`), `codegraph_context`, `codegraph_search_flow`,
 /// `codegraph_references`, `codegraph_mermaid`, `codegraph_status` (stats gộp
 /// cả 3 dataset), `codegraph_init/deinit/index`, `codegraph_query_usage_report`.
+#[cfg(test)]
+#[path = "callers_tests.rs"]
+mod callers_tests;
+
 struct ToolDef {
     name: &'static str,
     desc: &'static str,
@@ -56,8 +60,10 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_callers",
-            "Find functions that (transitively) call the given symbol.",
+            "Find functions that (transitively) call the given symbol. Code-index queries support timeout_ms (default 20000; 0 disables) and resume: on timeout retry with the returned resume id and the same node/depth. Binary queries do not support timeout/resume.",
             json!({ "type": "object", "properties": {
+                "resume": { "type": "string", "description": "Resume id returned by a timed-out code-index callers query." },
+                "timeout_ms": { "type": "integer", "minimum": 0, "default": 20000 },
                 "node": { "type": "integer" },
                 "depth": { "type": "integer", "default": 1 },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
@@ -494,8 +500,26 @@ pub async fn dispatch_with_api(
             {
                 return Ok(out);
             }
-            let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-            let hits = api.callers(id, depth).await?;
+            let depth = u32::try_from(args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1))
+                .map_err(|_| Error::Invalid("depth exceeds u32 range".into()))?;
+            let resume = args
+                .get("resume")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20000);
+            let out = api.callers_resumable(id, depth, resume, timeout_ms).await?;
+            if out.timed_out {
+                return Err(Error::Other(format!(
+                    "codegraph_callers timed out after {}ms (collected {} callers). Retry with the same node/depth plus \"resume\": \"{}\" to continue.",
+                    timeout_ms,
+                    out.progress,
+                    out.resume.as_deref().unwrap_or("")
+                )));
+            }
+            let hits = out.page;
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
             let out: Vec<Value> = hits
@@ -1062,6 +1086,13 @@ async fn dispatch_binary_graph(
     let Some(graph) = binary_graph_for(root, id).await else {
         return Ok(None);
     };
+    if name == "codegraph_callers"
+        && (args.get("resume").is_some() || args.get("timeout_ms").is_some())
+    {
+        return Err(Error::Invalid(
+            "binary callers do not support timeout_ms/resume".into(),
+        ));
+    }
     let detail = detail_from_args(args, session_detail);
     let format = format_from_args(args, session_format);
     let out = match name {

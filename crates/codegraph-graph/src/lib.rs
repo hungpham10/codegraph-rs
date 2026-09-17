@@ -327,6 +327,34 @@ pub struct SearchCursor {
     pub phase: SearchCursorPhase,
 }
 
+/// BFS checkpoint; valid only for the query and snapshot that created it.
+#[derive(Debug, Clone)]
+pub struct CallersCursor {
+    pub id: u64,
+    pub depth: usize,
+    pub index_version: u64,
+    level: usize,
+    frontier: Vec<u64>,
+    frontier_pos: usize,
+    next: Vec<u64>,
+    visited: HashSet<u64>,
+    out_ids: Vec<u64>,
+    search: Option<SearchResume>,
+    pending: Vec<usize>,
+    pending_pos: usize,
+    search_complete: bool,
+    materialize_pos: usize,
+    callers: Vec<Symbol>,
+}
+
+#[derive(Debug)]
+pub struct CallersOutcome {
+    /// Complete results only; partial work stays in the cursor.
+    pub callers: Vec<Symbol>,
+    pub cursor: Option<CallersCursor>,
+    pub progress: usize,
+}
+
 /// Kết quả của [`GraphIndex::search_symbol_paged_resumable`].
 #[derive(Debug)]
 pub struct PagedSearchOutcome {
@@ -1583,52 +1611,114 @@ impl GraphIndex {
 
     /// Callers (transitive BFS) — `depth` = số hop tối đa (1 = direct).
     pub async fn callers(&self, id: u64, depth: usize) -> Result<Vec<Symbol>> {
+        Ok(self.callers_resumable(id, depth, None, None).await?.callers)
+    }
+
+    /// Cooperative deadline across BFS, chain searches and result cloning.
+    pub async fn callers_resumable(
+        &self,
+        id: u64,
+        depth: usize,
+        resume: Option<CallersCursor>,
+        deadline: Option<Instant>,
+    ) -> Result<CallersOutcome> {
+        let depth = depth.max(1);
         if !self.symbols.contains_key(&id) {
             return Err(Error::Invalid(format!("symbol id {id} not found")));
         }
-        let mut visited = HashSet::new();
-        visited.insert(id);
-        let mut frontier = vec![id];
-        let mut out_ids = Vec::new();
-        for _ in 0..depth.max(1) {
-            let mut next = Vec::new();
-            for &cur in &frontier {
-                for caller in self.direct_callers(cur).await? {
-                    if visited.insert(caller) {
-                        out_ids.push(caller);
-                        next.push(caller);
-                    }
+        let mut state = match resume {
+            Some(c) => {
+                if c.id != id || c.depth != depth || c.index_version != self.version() {
+                    return Err(Error::Invalid(
+                        "callers cursor does not match query or index version".into(),
+                    ));
                 }
+                c
             }
-            frontier = next;
-            if frontier.is_empty() {
-                break;
-            }
-        }
-        Ok(out_ids
-            .into_iter()
-            .filter_map(|i| self.symbols.get(&i).cloned())
-            .collect())
-    }
-
-    /// Callers trực tiếp của `id` — substring search `[id]` trên chain engine.
-    ///
-    /// Mọi chain chứa id ở vị trí callee (hoặc vị trí 0 — chính chain của id,
-    /// bỏ qua khi `caller == id`).
-    async fn direct_callers(&self, id: u64) -> Result<Vec<u64>> {
-        let pattern = [id];
-        let hits = match self.chains.search(&pattern, None).await {
-            Ok(h) => h,
-            Err(_) => return Ok(Vec::new()),
+            None => CallersCursor {
+                id,
+                depth,
+                index_version: self.version(),
+                level: 0,
+                frontier: vec![id],
+                frontier_pos: 0,
+                next: Vec::new(),
+                visited: HashSet::from([id]),
+                out_ids: Vec::new(),
+                search: None,
+                pending: Vec::new(),
+                pending_pos: 0,
+                search_complete: false,
+                materialize_pos: 0,
+                callers: Vec::new(),
+            },
         };
-        let mut out = Vec::new();
-        for (record, _) in hits {
-            let caller = record as u64;
-            if caller != id && self.symbols.contains_key(&caller) {
-                out.push(caller);
+        loop {
+            if deadline.is_some_and(|dl| Instant::now() >= dl) {
+                return Ok(CallersOutcome {
+                    progress: state.out_ids.len(),
+                    callers: Vec::new(),
+                    cursor: Some(state),
+                });
             }
+            if state.level >= depth || state.frontier.is_empty() {
+                if state.materialize_pos < state.out_ids.len() {
+                    let id = state.out_ids[state.materialize_pos];
+                    if let Some(symbol) = self.symbols.get(&id) {
+                        state.callers.push(symbol.clone());
+                    }
+                    state.materialize_pos += 1;
+                    continue;
+                }
+                return Ok(CallersOutcome {
+                    progress: state.out_ids.len(),
+                    callers: state.callers,
+                    cursor: None,
+                });
+            }
+            if state.frontier_pos == state.frontier.len() {
+                state.frontier = std::mem::take(&mut state.next);
+                state.frontier_pos = 0;
+                state.level += 1;
+                continue;
+            }
+            let current = state.frontier[state.frontier_pos];
+            if !state.search_complete {
+                let page = self
+                    .chains
+                    .search_resumable(&[current], None, state.search.take(), deadline)
+                    .await?;
+                if page.timed_out {
+                    state.search = Some(page.resume.ok_or_else(|| {
+                        Error::Invalid("timed out chain search has no checkpoint".into())
+                    })?);
+                    return Ok(CallersOutcome {
+                        progress: state.out_ids.len(),
+                        callers: Vec::new(),
+                        cursor: Some(state),
+                    });
+                }
+                state.pending = page.record_ids;
+                state.pending_pos = 0;
+                state.search_complete = true;
+                continue;
+            }
+            if state.pending_pos < state.pending.len() {
+                let caller = state.pending[state.pending_pos] as u64;
+                state.pending_pos += 1;
+                if caller != current
+                    && self.symbols.contains_key(&caller)
+                    && state.visited.insert(caller)
+                {
+                    state.out_ids.push(caller);
+                    state.next.push(caller);
+                }
+                continue;
+            }
+            state.pending.clear();
+            state.search_complete = false;
+            state.frontier_pos += 1;
         }
-        Ok(out)
     }
 
     /// Callees trực tiếp — đọc chain, skip marker/0/self/seen. Không có chain
@@ -2622,6 +2712,164 @@ mod tests {
             chains,
             calls,
         }
+    }
+
+    async fn check_callers_without_metadata(idx: &mut GraphIndex) {
+        let a = SYMBOL_BASE;
+        let b = a + 1;
+        let c = a + 2;
+        let isolated = a + 3;
+        idx.ingest(&[result(
+            "callers.rs",
+            vec![
+                sym("callers.rs", "a", a),
+                sym("callers.rs", "b", b),
+                sym("callers.rs", "c", c),
+                sym("callers.rs", "isolated", isolated),
+            ],
+            HashMap::from([
+                (a, vec![a, b, b, MARKER_IF_TRUE, c, MARKER_BRANCH_END]),
+                (b, vec![b, c]),
+                (c, vec![c, a]),
+            ]),
+            vec![],
+        )])
+        .await
+        .unwrap();
+
+        for id in [a, b, c, isolated] {
+            let expected: Vec<u64> = idx
+                .chains
+                .search(&[id], None)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(record, _)| record as u64)
+                .filter(|&caller| caller != id && idx.symbols.contains_key(&caller))
+                .collect();
+            for _ in 0..2 {
+                let actual: Vec<_> = idx
+                    .callers(id, 1)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|s| s.id)
+                    .collect();
+                assert_eq!(actual, expected);
+            }
+        }
+        let direct = idx.callers(c, 1).await.unwrap();
+        let ids = |v: &[Symbol]| v.iter().map(|s| s.id).collect::<Vec<_>>();
+        let mut sorted_ids = ids(&direct);
+        sorted_ids.sort_unstable();
+        assert_eq!(sorted_ids, vec![a, b]);
+        assert_eq!(ids(&idx.callers(c, 0).await.unwrap()), ids(&direct));
+        assert_eq!(ids(&idx.callers(c, 10).await.unwrap()), ids(&direct));
+        assert!(idx.callers(isolated, 10).await.unwrap().is_empty());
+        assert!(idx.callers(isolated + 1, 1).await.is_err());
+
+        let expired = Some(Instant::now());
+        let paused = idx.callers_resumable(c, 10, None, expired).await.unwrap();
+        assert!(paused.callers.is_empty());
+        let cursor = paused.cursor.unwrap();
+        assert!(
+            idx.callers_resumable(b, 10, Some(cursor.clone()), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            idx.callers_resumable(c, 1, Some(cursor.clone()), None)
+                .await
+                .is_err()
+        );
+        let mut stale = cursor.clone();
+        stale.index_version = stale.index_version.wrapping_add(1);
+        assert!(
+            idx.callers_resumable(c, 10, Some(stale), None)
+                .await
+                .is_err()
+        );
+        let again = idx
+            .callers_resumable(c, 10, Some(cursor.clone()), expired)
+            .await
+            .unwrap();
+        assert_eq!(again.progress, 0);
+        let done = idx
+            .callers_resumable(c, 10, again.cursor, None)
+            .await
+            .unwrap();
+        assert!(done.cursor.is_none());
+        assert_eq!(ids(&done.callers), ids(&direct));
+
+        // Resume with an unfinished inner search.
+        let mut searching = cursor.clone();
+        searching.search = idx
+            .chains
+            .search_resumable(&[c], None, None, expired)
+            .await
+            .unwrap()
+            .resume;
+        assert!(searching.search.is_some());
+        let done = idx
+            .callers_resumable(c, 10, Some(searching), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&done.callers), ids(&direct));
+
+        // Resume after consuming one record of the current frontier node.
+        let mut pending = cursor.clone();
+        pending.pending = idx
+            .chains
+            .search_resumable(&[c], None, None, None)
+            .await
+            .unwrap()
+            .record_ids;
+        pending.search_complete = true;
+        let first = pending.pending[0] as u64;
+        pending.pending_pos = 1;
+        if first != c && idx.symbols.contains_key(&first) && pending.visited.insert(first) {
+            pending.out_ids.push(first);
+            pending.next.push(first);
+        }
+        let done = idx
+            .callers_resumable(c, 10, Some(pending), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&done.callers), ids(&direct));
+
+        // Resume in a later BFS level and while materializing the output.
+        let mut next_level = cursor;
+        next_level.level = 1;
+        next_level.frontier = ids(&direct);
+        next_level.out_ids = ids(&direct);
+        next_level.visited.extend(ids(&direct));
+        let done = idx
+            .callers_resumable(c, 10, Some(next_level.clone()), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&done.callers), ids(&direct));
+        next_level.level = 10;
+        next_level.materialize_pos = 1;
+        next_level.callers.push(direct[0].clone());
+        let done = idx
+            .callers_resumable(c, 10, Some(next_level), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&done.callers), ids(&direct));
+    }
+
+    #[tokio::test]
+    async fn callers_without_metadata_matches_legacy() {
+        check_callers_without_metadata(&mut GraphIndex::in_memory()).await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn callers_without_metadata_matches_legacy_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let dsn = format!("sqlite://{}", dir.path().join("callers.db").display());
+        let mut idx = GraphIndex::open(&dsn).await.unwrap();
+        check_callers_without_metadata(&mut idx).await;
     }
 
     #[tokio::test]
