@@ -1284,7 +1284,7 @@ fn normalize_response(value: &mut Value, root: &str, detail: DetailLevel, style:
                                     // Detail medium: 0 nghĩa "absent" — cell null.
                                     .filter(|cell| {
                                         !matches!(detail, DetailLevel::Medium)
-                                            || !ZERO_SENTINEL_KEYS.contains(&key.as_ref())
+                                            || !ZERO_SENTINEL_KEYS.contains(key)
                                             || !cell.is_u64()
                                             || cell.as_u64() != Some(0)
                                     })
