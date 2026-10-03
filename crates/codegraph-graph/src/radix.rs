@@ -730,7 +730,7 @@ impl<T: Element> Radix<T> {
                                 let rel = frame.child_idx - base;
                                 frame.child_idx += 1;
                                 let (cp_bytes, _) = &child_nodes[rel];
-                                let cp = Self::to_vec(&cp_bytes);
+                                let cp = Self::to_vec(cp_bytes);
                                 if cp.is_empty() || cp[0] != next_elem {
                                     continue;
                                 }
