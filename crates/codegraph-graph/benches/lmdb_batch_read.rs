@@ -81,7 +81,10 @@ fn bench_children_batch(c: &mut Criterion) {
         let mut s = LmdbStorage::open(&path).await.unwrap();
         let mut parents = Vec::new();
         for i in 0..64usize {
-            let p = s.new_node(format!("p{i:03}").into_bytes(), i).await.unwrap();
+            let p = s
+                .new_node(format!("p{i:03}").into_bytes(), i)
+                .await
+                .unwrap();
             // Mỗi parent có 32 child.
             for j in 0..32usize {
                 let c = s
@@ -121,9 +124,5 @@ fn bench_children_batch(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_batch_vs_single,
-    bench_children_batch
-);
+criterion_group!(benches, bench_batch_vs_single, bench_children_batch);
 criterion_main!(benches);

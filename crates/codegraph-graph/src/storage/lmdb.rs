@@ -239,7 +239,9 @@ fn probe_env(path: &str) -> lmdb::Result<Arc<ProbeHandle>> {
         return Ok(handle.clone());
     }
     let env = Arc::new(open_env_read_only(path)?);
-    let db = env.open_db(Some(D_VERSION)).map_err(|err| lmdb::Error::Other(err.to_string()))?;
+    let db = env
+        .open_db(Some(D_VERSION))
+        .map_err(|err| lmdb::Error::Other(err.to_string()))?;
     let handle = Arc::new(ProbeHandle { env, db });
     cache.insert(path.to_string(), handle.clone());
     Ok(handle)
@@ -1150,7 +1152,9 @@ mod tests {
     async fn test_get_nodes_batch_matches_single() {
         let (_d, path) = tmp_path();
         let mut s = LmdbStorage::open(&path).await.unwrap();
-        let ids: Vec<usize> = (1..=20).map(|i| s.new_node(vec![i as u8; (i % 5) + 1], i * 3).await.unwrap()).collect();
+        let ids: Vec<usize> = (1..=20)
+            .map(|i| s.new_node(vec![i as u8; (i % 5) + 1], i * 3).await.unwrap())
+            .collect();
 
         let batch = s.get_nodes(&ids).await.unwrap();
         assert_eq!(batch.len(), ids.len());
@@ -1170,7 +1174,10 @@ mod tests {
         let a = s.new_node(b"a".to_vec(), 1).await.unwrap();
         let b = s.new_node(b"b".to_vec(), 2).await.unwrap();
         // Insert ngược thứ tự để chắc chắn phải sort mới ra [x, y, z].
-        let kids = [b.new_node(b"k1".to_vec(), 10).await.unwrap(), b.new_node(b"k0".to_vec(), 11).await.unwrap()];
+        let kids = [
+            b.new_node(b"k1".to_vec(), 10).await.unwrap(),
+            b.new_node(b"k0".to_vec(), 11).await.unwrap(),
+        ];
         for &kid in &kids {
             let mut tx = s.new_tx();
             tx.add_child(a, kid).await.unwrap();
