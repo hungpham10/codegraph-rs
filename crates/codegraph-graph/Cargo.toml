@@ -84,3 +84,8 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 [[bench]]
 name = "search_bloom"
 harness = false
+
+[[bench]]
+name = "lmdb_batch_read"
+harness = false
+required-features = ["lmdb"]

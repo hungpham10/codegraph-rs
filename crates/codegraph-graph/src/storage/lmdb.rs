@@ -211,44 +211,56 @@ fn open_env_read_only(path: &str) -> lmdb::Result<Environment> {
     b.open(Path::new(path))
 }
 
-/// Cache read-only `Environment` theo path — 1 env dùng chung cho mọi `probe_version`.
+/// Env + DBI handle dùng cho `probe_version`, cache theo path.
 ///
-/// `Environment` là `Send + Sync` nên an toàn để dùng chung; env sống trọn
-/// process (không drop) để locktable không bị mở/đóng lặp.
+/// `Environment` là `Send + Sync` nên an toàn để dùng chung; `Database` là
+/// handle `Copy` chỉ trỏ vào env. Cả hai sống trọn process (không drop) để
+/// locktable không bị mở/đóng lặp.
 #[cfg(feature = "lmdb")]
 #[cfg_attr(feature = "sqlite", allow(dead_code))] // probe chỉ dùng khi lmdb là backend file
-fn probe_env(path: &str) -> lmdb::Result<Arc<Environment>> {
+struct ProbeHandle {
+    env: Arc<Environment>,
+    db: Database,
+}
+
+/// Cache read-only `(Environment, Database)` theo path — 1 cặp dùng chung cho
+/// mọi `probe_version`.
+#[cfg(feature = "lmdb")]
+#[cfg_attr(feature = "sqlite", allow(dead_code))] // probe chỉ dùng khi lmdb là backend file
+fn probe_env(path: &str) -> lmdb::Result<Arc<ProbeHandle>> {
     let data = Path::new(path).join("data.mdb");
     if !data.is_file() {
         return Err(lmdb::Error::NotFound);
     }
-    static CACHE: std::sync::LazyLock<Mutex<HashMap<String, Arc<Environment>>>> =
+    static CACHE: std::sync::LazyLock<Mutex<HashMap<String, Arc<ProbeHandle>>>> =
         std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
     let mut cache = CACHE.lock().expect("probe env cache lock");
-    if let Some(env) = cache.get(path) {
-        return Ok(env.clone());
+    if let Some(handle) = cache.get(path) {
+        return Ok(handle.clone());
     }
     let env = Arc::new(open_env_read_only(path)?);
-    cache.insert(path.to_string(), env.clone());
-    Ok(env)
+    let db = env.open_db(Some(D_VERSION)).map_err(|err| lmdb::Error::Other(err.to_string()))?;
+    let handle = Arc::new(ProbeHandle { env, db });
+    cache.insert(path.to_string(), handle.clone());
+    Ok(handle)
 }
 
 /// Đọc `version` từ file mà KHÔNG tạo file (nếu chưa có) — dùng bởi
 /// `SharedGraphIndex::ensure_fresh` để dò stale. Mirror `SqliteStorage::probe_version`.
 ///
-/// Reuse env cache (`probe_env`) để không mở/đóng `Environment` mỗi lần gọi —
-/// `MDB_BAD_RSLOT` xảy ra khi nhiều `Environment` cùng mở/đóng trên một locktable
-/// (lock.mdb) khi nhiều request probe song song (runtime/mcp: mỗi request gọi qua
-/// `ensure_fresh` → `current_version`). Cache theo path giữ 1 env read-only dùng
-/// chung (sống trọn process) nên không còn tranh chấp slot reader.
+/// Reuse cache (`probe_env`) để không mở/đóng `Environment` **và không `open_db`**
+/// mỗi lần gọi — `MDB_BAD_RSLOT` xảy ra khi nhiều `Environment` cùng mở/đóng trên
+/// một locktable (lock.mdb) khi nhiều request probe song song (runtime/mcp: mỗi
+/// request gọi qua `ensure_fresh` → `current_version`). Cache theo path giữ 1 env
+/// read-only + DBI handle dùng chung (sống trọn process) nên mỗi request chỉ còn
+/// đúng 1 `begin_ro_txn` + 1 `get`.
 #[cfg(feature = "lmdb")]
 #[cfg_attr(feature = "sqlite", allow(dead_code))] // probe chỉ dùng khi lmdb là backend file
 pub async fn probe_version(path: &str) -> Result<u64> {
-    let env = probe_env(path)
+    let handle = probe_env(path)
         .map_err(|err| StorageError::Internal(format!("lmdb file not found: {path} ({err})")))?;
-    let db = env.open_db(Some(D_VERSION)).map_err(e)?;
-    let tx = env.begin_ro_txn().map_err(e)?;
-    match tx.get(db, &KEY_ONE).map(de_u64) {
+    let tx = handle.env.begin_ro_txn().map_err(e)?;
+    match tx.get(handle.db, &KEY_ONE).map(de_u64) {
         Ok(v) => Ok(v),
         Err(lmdb::Error::NotFound) => {
             Err(StorageError::Internal("lmdb version row missing".into()))
@@ -486,6 +498,42 @@ impl CategoryStorage for LmdbStorage {
             None => Vec::new(),
         };
         out.sort_unstable();
+        Ok(out)
+    }
+
+    /// Batch đọc node: MỘT `begin_ro_txn` cho cả `ids` — xem
+    /// [`CategoryStorage::get_nodes`] (giải thích `MDB_BAD_RSLOT`).
+    async fn get_nodes(&self, ids: &[usize]) -> Result<Vec<(Vec<u8>, usize)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let Some(v) = self.get_opt(&tx, self.nodes, &k8(id))? else {
+                return Err(StorageError::BranchOutOfRange(id));
+            };
+            out.push(de_node_val(v));
+        }
+        Ok(out)
+    }
+
+    /// Batch đọc children: MỘT `begin_ro_txn` cho cả `ids`, mỗi list vẫn sort
+    /// như `get_children` để DFS không đổi thứ tự duyệt.
+    async fn get_childrens(&self, ids: &[usize]) -> Result<Vec<Vec<usize>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let mut list = match self.get_opt(&tx, self.children, &k8(id))? {
+                Some(v) => de_list(v),
+                None => Vec::new(),
+            };
+            list.sort_unstable();
+            out.push(list);
+        }
         Ok(out)
     }
 
@@ -1095,6 +1143,113 @@ mod tests {
         let path = dir.path().join("test.lmdb");
         let path = path.to_string_lossy().into_owned();
         (dir, path)
+    }
+
+    /// `get_nodes` phải trả đúng thứ tự `ids` và giống hệt `get_node` từng cái.
+    #[tokio::test]
+    async fn test_get_nodes_batch_matches_single() {
+        let (_d, path) = tmp_path();
+        let mut s = LmdbStorage::open(&path).await.unwrap();
+        let ids: Vec<usize> = (1..=20).map(|i| s.new_node(vec![i as u8; (i % 5) + 1], i * 3).await.unwrap()).collect();
+
+        let batch = s.get_nodes(&ids).await.unwrap();
+        assert_eq!(batch.len(), ids.len());
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(batch[i], s.get_node(id).await.unwrap());
+        }
+
+        // Rỗng → rỗng, không mở txn nào.
+        assert!(s.get_nodes(&[]).await.unwrap().is_empty());
+    }
+
+    /// `get_childrens` phải trả list đã sort, khớp `get_children` từng cái.
+    #[tokio::test]
+    async fn test_get_childrens_batch_matches_single() {
+        let (_d, path) = tmp_path();
+        let mut s = LmdbStorage::open(&path).await.unwrap();
+        let a = s.new_node(b"a".to_vec(), 1).await.unwrap();
+        let b = s.new_node(b"b".to_vec(), 2).await.unwrap();
+        // Insert ngược thứ tự để chắc chắn phải sort mới ra [x, y, z].
+        let kids = [b.new_node(b"k1".to_vec(), 10).await.unwrap(), b.new_node(b"k0".to_vec(), 11).await.unwrap()];
+        for &kid in &kids {
+            let mut tx = s.new_tx();
+            tx.add_child(a, kid).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+
+        let batch = s.get_childrens(&[a, b]).await.unwrap();
+        assert_eq!(batch[0], s.get_children(a).await.unwrap());
+        assert_eq!(batch[1], s.get_children(b).await.unwrap());
+        assert_eq!(batch[0], kids);
+
+        assert!(s.get_childrens(&[]).await.unwrap().is_empty());
+    }
+
+    /// Id không tồn tại → `BranchOutOfRange`, giống `get_node` đơn lẻ.
+    #[tokio::test]
+    async fn test_batch_missing_id_errors() {
+        let (_d, path) = tmp_path();
+        let s = LmdbStorage::open(&path).await.unwrap();
+        assert!(matches!(
+            s.get_nodes(&[999_999]).await,
+            Err(StorageError::BranchOutOfRange(_))
+        ));
+    }
+
+    /// Regression `MDB_BAD_RSLOT`: N task đọc SONG SONG phải không lỗi khi
+    /// reader-slot LMDB có trần (`max_readers`). Trước khi có batch read,
+    /// mỗi `get_node` là một read-txn nên tải đọc nhân lên rất nhanh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_batch_reads_no_bad_rslot() {
+        use std::sync::Arc;
+        let (_d, path) = tmp_path();
+        let ids = {
+            let mut s = LmdbStorage::open(&path).await.unwrap();
+            let mut ids = Vec::new();
+            for i in 1..=500usize {
+                ids.push(s.new_node(vec![(i % 251) as u8; 6], i).await.unwrap());
+            }
+            for &id in ids.iter() {
+                let mut tx = s.new_tx();
+                tx.add_child(storage::EMPTY, id).await.unwrap();
+                tx.commit().await.unwrap();
+            }
+            ids
+        };
+        let st = Arc::new(LmdbStorage::open(&path).await.unwrap());
+
+        // 8 task × 200 vòng batch-read — tổng ~800k lần đọc node.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let st = Arc::clone(&st);
+            let ids = ids.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..200 {
+                    let chunk: Vec<usize> = ids.iter().copied().take(64).collect();
+                    let got = st.get_nodes(&chunk).await.unwrap();
+                    assert_eq!(got.len(), chunk.len());
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    /// `probe_version` phải trả đúng version khi gọi lặp lại (dùng env + DBI
+    /// handle cache) và vẫn lỗi khi path không tồn tại.
+    #[tokio::test]
+    async fn test_probe_version_reuses_cached_handle() {
+        let (_d, path) = tmp_path();
+        {
+            let mut s = LmdbStorage::open(&path).await.unwrap();
+            s.set_version(42).await.unwrap();
+        }
+        // Nhiều lần gọi liên tiếp — lần 2+ đi qua cache handle.
+        for _ in 0..100 {
+            assert_eq!(probe_version(&path).await.unwrap(), 42);
+        }
+        assert!(probe_version("definitely/missing.lmdb").await.is_err());
     }
 
     #[tokio::test]

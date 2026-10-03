@@ -323,6 +323,40 @@ macro_rules! declare_category_storage {
             async fn get_node(&self, id: usize) -> Result<(Vec<u8>, usize)>;
             async fn get_children(&self, id: usize) -> Result<Vec<usize>>;
 
+            // ── Batch reads (MỐT read-txn cho nhiều id) ──
+            //
+            // Radix DFS (`radix.rs::search_dfs`) gọi `get_node`/`get_children`
+            // cho TỪNG node/child → mỗi lần đọc là một `begin_ro_txn` riêng nên
+            // một lần search tạo O(nodes) read-txn. Khi nhiều request search chạy
+            // song song (MCP/GraphQL dùng chung `Arc<GraphIndex>`), số read-txn
+            // đồng thời nhân lên và có thể chạm trần reader-slot của LMDB →
+            // `MDB_BAD_RSLOT`.
+            //
+            // 2 hàm này gom nhiều id vào MỘT read-txn. Backend nền (in-memory,
+            // sqlite, redis, rdbms) không override — default impl gọi lại hàm
+            // đơn lẻ nên hành vi giữ nguyên. LMDB override để dùng 1 txn.
+
+            /// Đọc nhiều node trong MỘT read-txn — thứ tự khớp `ids`.
+            ///
+            /// Node không tồn tại → `Err(BranchOutOfRange)` (giống `get_node`).
+            async fn get_nodes(&self, ids: &[usize]) -> Result<Vec<(Vec<u8>, usize)>> {
+                let mut out = Vec::with_capacity(ids.len());
+                for &id in ids {
+                    out.push(self.get_node(id).await?);
+                }
+                Ok(out)
+            }
+
+            /// Đọc children của nhiều node trong MỐT read-txn — `out[i]` là
+            /// children của `ids[i]`, đã sort. Node không tồn tại → `Err`.
+            async fn get_childrens(&self, ids: &[usize]) -> Result<Vec<Vec<usize>>> {
+                let mut out = Vec::with_capacity(ids.len());
+                for &id in ids {
+                    out.push(self.get_children(id).await?);
+                }
+                Ok(out)
+            }
+
             // ── Shard roots (endpoint) ──
             async fn set_root(&mut self, shard: usize, root: usize) -> Result<()>;
             async fn get_root(&self, shard: usize) -> Result<usize>;
