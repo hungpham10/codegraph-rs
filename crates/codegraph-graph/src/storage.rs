@@ -161,6 +161,10 @@ enum TxOp {
 /// chưa lộ ra cho reader cho tới khi `commit` hoàn tất.
 ///
 /// `commit(self: Box<Self>)` tiêu thụ chính transaction — không thể commit 2 lần.
+// `async_trait` tự sinh `#[must_use]` cho future; double_must_use (clippy 1.99)
+// báo trùng vì `Pin<Box<dyn Future>>` vốn đã `must_use`. Lỗi nằm trong macro
+// của async_trait, không phải code viết tay → allow tại chỗ sinh ra.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Tx: Send {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize>;
@@ -183,6 +187,7 @@ pub trait Tx: Send {
 /// khi feature bật → method gọi được qua `dyn CategoryStorage` như cũ.
 /// Backend không override → default no-op.
 #[cfg(feature = "bloom-search")]
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
 #[async_trait]
 pub trait BloomStorage: Send + Sync {
     async fn set_node_bloom(&mut self, _id: usize, _bloom: &[u8]) -> Result<()> {
@@ -199,6 +204,7 @@ pub trait BloomStorage: Send + Sync {
 /// element id, cùng `clear`. Tách riêng để trait lõi gọn. `CategoryStorage`
 /// super-bound trait này (luôn) → method gọi được qua `dyn CategoryStorage`.
 /// Mặc định no-op.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
 #[async_trait]
 pub trait NodeMetaStorage: Send + Sync {
     /// Lưu metadata của node (opaque bytes, VD Node JSON) keyed theo element id.
@@ -236,6 +242,7 @@ pub trait NodeMetaStorage: Send + Sync {
 /// lookup (KMP + DFS). Tách riêng để trait lõi gọn. `CategoryStorage`
 /// super-bound trait này (luôn) → method gọi được qua `dyn CategoryStorage`.
 /// Mặc định no-op.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
 #[async_trait]
 pub trait ShortcutsStorage: Send + Sync {
     /// Thêm `node_id` vào shortcut set của element `elem` (encoded bytes).
@@ -262,6 +269,7 @@ pub trait ShortcutsStorage: Send + Sync {
 /// Edge-data storage: lưu/đọc metadata của mỗi edge id (opaque bytes) keyed
 /// theo edge id. Tách riêng để trait lõi gọn. `CategoryStorage` super-bound
 /// trait này (luôn) → method gọi được qua `dyn CategoryStorage`. Mặc định no-op.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
 #[async_trait]
 pub trait EdgeDataStorage: Send + Sync {
     /// Lưu dữ liệu edge (opaque bytes, VD CallEdgeMeta JSON) keyed theo edge id.
@@ -284,6 +292,7 @@ pub trait EdgeDataStorage: Send + Sync {
 /// encode u64 LE 8-byte/element. Tách riêng để trait lõi gọn.
 /// `CategoryStorage` super-bound trait này (luôn) → method gọi được qua
 /// `dyn CategoryStorage`. Mặc định no-op.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
 #[async_trait]
 pub trait ChainStorage: Send + Sync {
     /// Lưu chain của owner (keyed theo record của owner; u64 LE 8-byte/element).
@@ -310,7 +319,8 @@ pub trait ChainStorage: Send + Sync {
 macro_rules! declare_category_storage {
     ($($bounds:tt)*) => {
         /// Radix-node storage: node management + transaction + 5 stream phụ.
-        #[async_trait]
+        #[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
+#[async_trait]
         pub trait CategoryStorage: $($bounds)* {
             // ── Node management ──
             async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize>;
@@ -391,6 +401,8 @@ declare_category_storage!(
 /// - Chỉ `GraphIndex` / `SharedGraphIndex` dùng (`Radix` / `Search` không cần).
 /// - Backend tối giản có thể bỏ qua (vd: chỉ cần `CategoryStorage` cho test).
 /// - Cho phép phát triển/scale entity layer độc lập với radix.
+// Xem `Tx` — cùng lý do `double_must_use` (clippy 1.99).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait EntityStorage: Send + Sync {
     // ── Symbol registry ──
@@ -526,6 +538,7 @@ pub trait EntityStorage: Send + Sync {
 ///
 /// Gộp `CategoryStorage` + 5 trait phụ + `EntityStorage`. Backend implement
 /// 7 `impl` block riêng biệt — review từng phần độc lập được.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
 #[async_trait]
 pub trait Storage:
     CategoryStorage
