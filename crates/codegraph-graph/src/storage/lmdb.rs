@@ -1150,9 +1150,10 @@ mod tests {
     async fn test_get_nodes_batch_matches_single() {
         let (_d, path) = tmp_path();
         let mut s = LmdbStorage::open(&path).await.unwrap();
-        let ids: Vec<usize> = (1..=20)
-            .map(|i| s.new_node(vec![i as u8; (i % 5) + 1], i * 3).await.unwrap())
-            .collect();
+        let mut ids: Vec<usize> = Vec::new();
+        for i in 1..=20usize {
+            ids.push(s.new_node(vec![i as u8; (i % 5) + 1], i * 3).await.unwrap());
+        }
 
         let batch = s.get_nodes(&ids).await.unwrap();
         assert_eq!(batch.len(), ids.len());
@@ -1171,10 +1172,11 @@ mod tests {
         let mut s = LmdbStorage::open(&path).await.unwrap();
         let a = s.new_node(b"a".to_vec(), 1).await.unwrap();
         let b = s.new_node(b"b".to_vec(), 2).await.unwrap();
-        // Insert ngược thứ tự để chắc chắn phải sort mới ra [x, y, z].
+        // Hai child của `a`, tạo ngược thứ tự id để chắc chắn phải sort mới ra
+        // thứ tự tăng dần.
         let kids = [
-            b.new_node(b"k1".to_vec(), 10).await.unwrap(),
-            b.new_node(b"k0".to_vec(), 11).await.unwrap(),
+            s.new_node(b"k1".to_vec(), 10).await.unwrap(),
+            s.new_node(b"k0".to_vec(), 11).await.unwrap(),
         ];
         for &kid in &kids {
             let mut tx = s.new_tx();
@@ -1185,7 +1187,12 @@ mod tests {
         let batch = s.get_childrens(&[a, b]).await.unwrap();
         assert_eq!(batch[0], s.get_children(a).await.unwrap());
         assert_eq!(batch[1], s.get_children(b).await.unwrap());
-        assert_eq!(batch[0], kids);
+        // Children luôn sort tăng dần dù tạo ngược thứ tự.
+        let mut sorted = kids.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(batch[0], sorted);
+        // Node không có child → list rỗng (không phải lỗi).
+        assert!(batch[1].is_empty());
 
         assert!(s.get_childrens(&[]).await.unwrap().is_empty());
     }
@@ -1216,7 +1223,7 @@ mod tests {
             }
             for &id in ids.iter() {
                 let mut tx = s.new_tx();
-                tx.add_child(storage::EMPTY, id).await.unwrap();
+                tx.add_child(EMPTY, id).await.unwrap();
                 tx.commit().await.unwrap();
             }
             ids
