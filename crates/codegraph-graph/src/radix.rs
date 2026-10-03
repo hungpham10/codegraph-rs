@@ -782,7 +782,7 @@ impl<T: Element> Radix<T> {
                             let st = self.storage.read().await;
                             let mut node = st.get_nodes(&[node_id]).await?;
                             let node = node.pop().expect("get_nodes trả về đúng 1 phần tử");
-                            let children = st.get_childrens(&[node_id]).await?;
+                            let mut children = st.get_childrens(&[node_id]).await?;
                             (node.1, children.pop().expect("get_childrens trả 1 phần tử"))
                         };
                         if record != storage::EMPTY {

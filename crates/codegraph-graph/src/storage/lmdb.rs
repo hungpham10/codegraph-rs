@@ -239,9 +239,7 @@ fn probe_env(path: &str) -> lmdb::Result<Arc<ProbeHandle>> {
         return Ok(handle.clone());
     }
     let env = Arc::new(open_env_read_only(path)?);
-    let db = env
-        .open_db(Some(D_VERSION))
-        .map_err(|err| lmdb::Error::Other(err.to_string()))?;
+    let db = env.open_db(Some(D_VERSION))?;
     let handle = Arc::new(ProbeHandle { env, db });
     cache.insert(path.to_string(), handle.clone());
     Ok(handle)
