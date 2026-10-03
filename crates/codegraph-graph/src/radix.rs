@@ -677,8 +677,16 @@ impl<T: Element> Radix<T> {
                             break;
                         };
 
-                        let (prefix_bytes, _record) =
-                            { self.storage.read().await.get_node(frame.node_id).await? };
+                        // Đọc node của frame + children của frame trong MỘT
+                        // read-txn (`get_nodes`/`get_childrens`): xem
+                        // `CategoryStorage::get_nodes` — giảm số read-txn mỗi
+                        // vòng DFS, tránh chạm trần reader-slot của LMDB khi nhiều
+                        // request search song song.
+                        let (prefix_bytes, _record) = {
+                            let st = self.storage.read().await;
+                            let mut out = st.get_nodes(&[frame.node_id]).await?;
+                            out.pop().expect("get_nodes trả về đúng 1 phần tử")
+                        };
                         let prefix = Self::to_vec(&prefix_bytes);
                         let result = matcher(&prefix, pattern, frame.pattern_pos);
 
@@ -691,11 +699,9 @@ impl<T: Element> Radix<T> {
                         }
 
                         let children = {
-                            self.storage
-                                .read()
-                                .await
-                                .get_children(frame.node_id)
-                                .await?
+                            let st = self.storage.read().await;
+                            let mut out = st.get_childrens(&[frame.node_id]).await?;
+                            out.pop().expect("get_childrens trả về đúng 1 phần tử")
                         };
                         let mut descended = false;
                         while frame.cont_idx < result.continuations.len() {
@@ -707,12 +713,24 @@ impl<T: Element> Radix<T> {
                             }
 
                             let next_elem = pattern[pp];
+                            // Pre-fetch node của MỌI child còn lại trong 1
+                            // read-txn thay vì mỗi child 1 txn. Chỉ fetch phần chưa
+                            // duyệt; `base` ánh xạ chỉ số tương đối về `children`
+                            // (giống hệt hành vi cũ từng child một).
+                            let base = frame.child_idx.min(children.len());
+                            let remaining = &children[base..];
+                            let child_nodes = if remaining.is_empty() {
+                                Vec::new()
+                            } else {
+                                let st = self.storage.read().await;
+                                st.get_nodes(remaining).await?
+                            };
                             while frame.child_idx < children.len() {
                                 let child = children[frame.child_idx];
+                                let rel = frame.child_idx - base;
                                 frame.child_idx += 1;
-                                let (cp_bytes, _) =
-                                    { self.storage.read().await.get_node(child).await? };
-                                let cp = Self::to_vec(&cp_bytes);
+                                let (cp_bytes, _) = &child_nodes[rel];
+                                let cp = Self::to_vec(cp_bytes);
                                 if cp.is_empty() || cp[0] != next_elem {
                                     continue;
                                 }
@@ -758,12 +776,18 @@ impl<T: Element> Radix<T> {
                 }
                 DfsState::Collect { root, mut stack } => {
                     if let Some((node_id, child_idx)) = stack.pop() {
-                        let (_prefix_bytes, record) =
-                            { self.storage.read().await.get_node(node_id).await? };
+                        // Gom node + children của cùng `node_id` — 2 read-txn
+                        // điển hình xuống 2 lần gọi batch (mỗi lần 1 txn).
+                        let (record, children) = {
+                            let st = self.storage.read().await;
+                            let mut node = st.get_nodes(&[node_id]).await?;
+                            let node = node.pop().expect("get_nodes trả về đúng 1 phần tử");
+                            let mut children = st.get_childrens(&[node_id]).await?;
+                            (node.1, children.pop().expect("get_childrens trả 1 phần tử"))
+                        };
                         if record != storage::EMPTY {
                             records.push(record);
                         }
-                        let children = { self.storage.read().await.get_children(node_id).await? };
                         if child_idx < children.len() {
                             stack.push((node_id, child_idx + 1));
                             stack.push((children[child_idx], 0));
