@@ -40,20 +40,24 @@ impl StructureMem {
 }
 
 /// Bytes của `String` (đã cấp trên heap).
+///
+/// Nhận `&String` chứ không phải `&str`: `str` không có `capacity()`.
+#[allow(clippy::ptr_arg)] // xem `vec_bytes` — cần `capacity()` của `String`.
 #[inline]
-fn str_bytes(s: &str) -> u64 {
+fn str_bytes(s: &String) -> u64 {
     s.capacity() as u64
 }
 
 /// Bytes của `Option<String>`.
 #[inline]
 fn opt_str_bytes(s: &Option<String>) -> u64 {
-    s.as_ref().map_or(0, str_bytes)
+    s.as_ref().map_or(0, |x| x.capacity() as u64)
 }
 
 /// Bytes của `Vec<u64>`: buffer + phần tử.
+#[allow(clippy::ptr_arg)] // xem `vec_bytes` — cần `capacity()` của `Vec`.
 #[inline]
-fn u64_vec_bytes(v: &[u64]) -> u64 {
+fn u64_vec_bytes(v: &Vec<u64>) -> u64 {
     (v.capacity() * size_of::<u64>()) as u64
 }
 
@@ -66,8 +70,11 @@ fn map_bucket_bytes<K: Hash, V>(map: &HashMap<K, V>) -> u64 {
 }
 
 /// Bytes của một `Vec<T>` (buffer đã cấp).
+// `&Vec<T>` thay vì `&[T]`: `capacity()` là method riêng của `Vec`, cần biết
+// bytes **đã cấp** chứ không phải `len` — mà slice không đọc được.
+#[allow(clippy::ptr_arg)]
 #[inline]
-fn vec_bytes<T>(v: &[T]) -> u64 {
+fn vec_bytes<T>(v: &Vec<T>) -> u64 {
     (v.capacity() * size_of::<T>()) as u64
 }
 
@@ -169,7 +176,8 @@ pub fn scope_index_mem(m: &HashMap<u64, Vec<u64>>) -> StructureMem {
 }
 
 /// RAM của `name_records: Vec<String>` + `sorted_name_keys: Vec<String>`.
-pub fn name_keys_mem(records: &[String], sorted: &[String]) -> StructureMem {
+#[allow(clippy::ptr_arg)] // xem `vec_bytes` — cần `capacity()` của `Vec`.
+pub fn name_keys_mem(records: &Vec<String>, sorted: &Vec<String>) -> StructureMem {
     StructureMem {
         entries: (records.len() + sorted.len()) as u64,
         fixed_bytes: vec_bytes::<String>(records) + vec_bytes::<String>(sorted),
@@ -179,7 +187,8 @@ pub fn name_keys_mem(records: &[String], sorted: &[String]) -> StructureMem {
 }
 
 /// RAM của `files: Vec<FileInfo>`.
-pub fn files_mem(files: &[FileInfo]) -> StructureMem {
+#[allow(clippy::ptr_arg)] // xem `vec_bytes` — cần `capacity()` của `Vec`.
+pub fn files_mem(files: &Vec<FileInfo>) -> StructureMem {
     StructureMem {
         entries: files.len() as u64,
         fixed_bytes: vec_bytes::<FileInfo>(files),
