@@ -1,6 +1,10 @@
 //! Scanner file nhị phân trong workspace (dựa vào magic bytes).
+//!
+//! Traversal dùng chung `DiskSource` (`SourceKind::Binary`) nên không còn bản
+//! `WalkBuilder` thứ ba cùng cấu hình — trước đây chính sách ignore bị copy ở
+//! `extract/src/walker.rs`, `extract/src/config.rs` và đây.
 use camino::{Utf8Path, Utf8PathBuf};
-use ignore::WalkBuilder;
+use codegraph_source::{DiskSource, SourceConfig, SourceEntry, SourceKind};
 
 /// Các magic bytes nhận diện binary: ELF, PE (MZ), Mach-O, fat Mach-O.
 const MAGICS: &[&[u8]] = &[
@@ -12,29 +16,38 @@ const MAGICS: &[&[u8]] = &[
 ];
 
 /// Duyệt `root` (cùng ignore rules với walker) trả về các file nhị phân.
+///
+/// Chỉ đọc **4 byte đầu** mỗi file để check magic bytes. Trước đây gọi
+/// `std::fs::read` — tức đọc và cấp phát **cả file** chỉ để so 4 byte, lãng phí
+/// hàng trăm MB trên binary lớn.
 pub fn find_binaries(root: &Utf8Path) -> Vec<Utf8PathBuf> {
+    let src = DiskSource::new(SourceConfig::for_kind(SourceKind::Binary, root.to_path_buf()));
+    find_binaries_in(&src)
+}
+
+/// Như [`find_binaries`] nhưng đọc từ một `DiskSource` cho sẵn — dùng khi
+/// caller đã dựng sẵn source (chia sẻ config/cache) thay vì dựng lại.
+pub fn find_binaries_in(src: &DiskSource) -> Vec<Utf8PathBuf> {
+    let Ok(entries) = src.list_blocking() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .parents(true)
-        .add_custom_ignore_filename(".codegraphignore")
-        .build();
-    for entry in walker.flatten() {
-        let path = entry.path();
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let bytes = match std::fs::read(path) {
-            Ok(b) if b.len() >= 4 => b,
-            _ => continue,
-        };
-        if MAGICS.iter().any(|m| bytes.starts_with(m)) {
-            out.push(Utf8PathBuf::from_path_buf(path.to_path_buf()).unwrap());
+    for entry in entries {
+        if is_binary_magic(src, &entry) {
+            // Path tuyệt đối — `r2` cần đường dẫn hệ thống.
+            out.push(src.root().join(&entry.path));
         }
     }
     out
+}
+
+/// 4 byte đầu có khớp magic nào không.
+fn is_binary_magic(src: &DiskSource, entry: &SourceEntry) -> bool {
+    let head = match src.read_blocking(entry, Some(4)) {
+        Ok(b) if b.len() >= 4 => b,
+        _ => return false,
+    };
+    MAGICS.iter().any(|m| head.starts_with(m))
 }
 
 #[cfg(test)]

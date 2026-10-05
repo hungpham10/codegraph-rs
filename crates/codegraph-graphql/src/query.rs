@@ -34,6 +34,13 @@ async fn api_for(ctx: &Context<'_>) -> GqlResult<GraphApi> {
     ))
 }
 
+/// Workspace root của session (nếu đã bind) — làm root cho `DiskSource` ở
+/// đường query `include_source`.
+async fn state_root(ctx: &Context<'_>) -> Option<camino::Utf8PathBuf> {
+    let state = ctx.data::<Arc<AppState>>().ok()?;
+    state.session.root().await
+}
+
 /// Clamp + default paging args.
 fn paging(limit: Option<i32>, offset: Option<i32>) -> (u32, u32) {
     let limit = limit.unwrap_or(50).clamp(1, 500) as u32;
@@ -259,7 +266,10 @@ impl Query {
     async fn context(&self, ctx: &Context<'_>, req: ContextRequestInput) -> GqlResult<String> {
         let api = api_for(ctx).await?;
         let core_req: codegraph_context::ContextRequest = req.into();
-        api.context_markdown(&core_req)
+        // Đường query đọc qua `Source` trait. HTTP/GraphQL không luôn có root
+        // (session chưa bind) → `None` ⇒ hit vẫn trả về, `source` rỗng.
+        let src = state_root(ctx).await.map(codegraph_source::DiskSource::for_query);
+        api.context_markdown(&core_req, src.as_ref().map(|s| s as &dyn codegraph_source::Source))
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))
     }

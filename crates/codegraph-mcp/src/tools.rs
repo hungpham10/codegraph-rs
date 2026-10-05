@@ -649,7 +649,10 @@ pub async fn dispatch_with_api(
                 format: Format::Json,
                 strip_prefix: Some(root.as_str().to_string()),
             };
-            Ok(api.context_markdown(&req).await?)
+            // `include_source` đọc qua `Source` trait (đường query), root lấy
+            // từ session — không còn `std::fs` rải rác trong context builder.
+            let src = codegraph_source::DiskSource::for_query(root.to_path_buf());
+            Ok(api.context_markdown(&req, Some(&src as &dyn codegraph_source::Source)).await?)
         }
         "codegraph_references" => {
             let q = arg_str(&args, "query")?;

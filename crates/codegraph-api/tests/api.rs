@@ -272,7 +272,7 @@ async fn files_stats_and_context() {
         format: codegraph_context::Format::Markdown,
         strip_prefix: None,
     };
-    let md = api.context_markdown(&req).await.unwrap();
+    let md = api.context_markdown(&req, None).await.unwrap();
     assert!(md.contains("caller"));
 }
 

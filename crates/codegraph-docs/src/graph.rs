@@ -5,6 +5,7 @@ use crate::tokenize::{DocTag, DocToken};
 use anyhow::Result;
 use codegraph_graph::Search;
 use codegraph_graph::Storage;
+use codegraph_source::{Source, SourceEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
@@ -203,12 +204,30 @@ impl DocumentGraph {
         }
     }
 
-    /// Ingest một file từ disk: đọc, detect format theo extension (override
-    /// bằng `format`), parse rồi upsert. Trùng `path` với doc đã có → thay thế
-    /// tại chỗ (re-ingest khi chạy lại `codegraph init` là idempotent).
+    /// Ingest một file từ disk — wrapper mỏng quanh [`Self::ingest_bytes`].
+    ///
+    /// Giữ nguyên hành vi cũ cho các caller đi theo path (CLI `init`, MCP
+    /// `graphdoc_ingest`): đọc UTF-8 từ đĩa rồi `detect_format` theo extension.
+    /// Đường ingest qua `Source` thì gọi thẳng `ingest_bytes` — không đụng đĩa.
     pub async fn ingest_file(&mut self, path: &str, format: Option<&str>) -> Result<u64> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
+        self.ingest_bytes(path, &source, format).await
+    }
+
+    /// Ingest nội dung đã có sẵn trong tay — đường vào không phụ thuộc đĩa.
+    ///
+    /// `format = None` thì detect theo đuôi của `path`. Trùng `path` với doc đã
+    /// có → thay thế tại chỗ (re-ingest là idempotent).
+    ///
+    /// Đây là chỗ `Source::read` của provider từ xa nối vào: bytes tới từ đâu
+    /// không quan trọng, chỉ cần `path` ổn định làm khoá thay thế.
+    pub async fn ingest_bytes(
+        &mut self,
+        path: &str,
+        source: &str,
+        format: Option<&str>,
+    ) -> Result<u64> {
         let format = match format {
             Some(f) => f.to_string(),
             None => crate::parsers::detect_format(path)?,
@@ -216,8 +235,30 @@ impl DocumentGraph {
         let existing = self.docs.values().find(|d| d.path == path).map(|d| d.id);
         let doc_id = existing.unwrap_or(0);
         let parser = crate::parsers::parser_for(&format)?;
-        let doc = parser.parse(path, &source, doc_id)?;
+        let doc = parser.parse(path, source, doc_id)?;
         self.upsert_document(doc).await
+    }
+
+    /// Ingest từ một [`Source`] bất kỳ — đường vào không giả định đĩa local.
+    ///
+    /// `DiskSource` cho hành vi y hệt `ingest_file`. Provider từ xa (git host,
+    /// object store…) đọc qua đây mà không cần biết bytes tới từ đâu.
+    ///
+    /// `entry.path` là đường dẫn **tương đối so với root của source** — đó là
+    /// khoá thay thế khi re-ingest, nên phải ổn định giữa các lần chạy.
+    pub async fn ingest_source(
+        &mut self,
+        source: &dyn Source,
+        entry: &SourceEntry,
+        format: Option<&str>,
+    ) -> Result<u64> {
+        let bytes = source
+            .read(entry, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", entry.path))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|e| anyhow::anyhow!("{} không phải UTF-8: {e}", entry.path))?;
+        self.ingest_bytes(entry.path_str(), &text, format).await
     }
 
     /// Ingest a document, replacing any previous version with the same id.

@@ -82,7 +82,7 @@ fn benchmark_context(c: &mut crit::Criterion) {
                 ..ContextRequest::default()
             };
             let response = rt
-                .block_on(codegraph_context::build_response(&shared, &req))
+                .block_on(codegraph_context::build_response(&shared, &req, None))
                 .unwrap();
             match case {
                 "warm_depth1" => assert_eq!(response.hits[0].callers.len(), fan_in),
@@ -91,7 +91,9 @@ fn benchmark_context(c: &mut crit::Criterion) {
                 _ => assert!(response.hits.is_empty()),
             }
             group.bench_function(case, |b| {
-                b.iter(|| black_box(rt.block_on(build(&shared, black_box(&req))).unwrap()));
+                b.iter(|| {
+                    black_box(rt.block_on(build(&shared, black_box(&req), None)).unwrap())
+                });
             });
         }
         let req = ContextRequest {
@@ -106,7 +108,7 @@ fn benchmark_context(c: &mut crit::Criterion) {
                             .unwrap(),
                     )
                 },
-                |fresh| black_box(rt.block_on(build(&fresh, black_box(&req))).unwrap()),
+                |fresh| black_box(rt.block_on(build(&fresh, black_box(&req), None)).unwrap()),
                 crit::BatchSize::PerIteration,
             );
         });
