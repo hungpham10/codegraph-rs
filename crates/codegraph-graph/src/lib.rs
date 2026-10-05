@@ -77,6 +77,7 @@ mod bloom;
 pub mod diff;
 pub mod embeddings;
 mod lru;
+pub mod meminfo;
 mod radix;
 mod search;
 mod shared;

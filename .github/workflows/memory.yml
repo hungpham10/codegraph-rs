@@ -1,0 +1,73 @@
+# Đo RAM của codegraph — chạy SONG SONG với CI, không chặn merge.
+#
+# Vì sao cần workflow riêng: CodSpeed đo *thời gian*, còn `GraphIndex` là
+# in-memory-first — mở index là nạp toàn bộ vào RAM (`rebuild()` gọi
+# `load_all_symbols` / `all_chains` / ...). Cái giá RAM đó không hiện ra trong
+# benchmark thời gian nên phải đo riêng.
+#
+# Số liệu RSS trên GitHub-hosted runner là VM dùng chung → **chỉ dùng để so
+# sánh tương đối** trước/sau trong cùng workflow, không dùng làm ngưỡng cứng.
+# Đường `synthetic` là deterministic nên phần "dự đoán" (predicted symbols/edges)
+# mới là con số ổn định thật sự.
+name: Memory
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  memory:
+    name: memory profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch bench repos
+        run: bash .github/benches/fetch_repos.sh
+
+      # Build sẵn để lỗi compile lộ ra ở step riêng, dễ đọc.
+      - name: Build memory profiler
+        run: cargo build --release -p codegraph-bench --bin mem
+
+      # Quy mô synthetic: đủ lớn để `edges`/`call_names` chiếm RAM đáng kể,
+      # vẫn chạy nhanh trên runner.
+      - name: Synthetic 50k functions
+        run: |
+          mkdir -p mem-out
+          ./target/release/mem --synthetic 50000 --fanout 4 \
+            --json | tee mem-out/synthetic-50k.json
+
+      - name: Real repos
+        env:
+          CODEGRAPH_BENCH_REPOS_LIST: ${{ github.workspace }}/.github/benches/repos/list.txt
+        run: |
+          ./target/release/mem --json | tee mem-out/repos.json
+          ./target/release/mem | tee mem-out/repos.txt
+
+      - name: Summary
+        run: |
+          echo "### Memory profile" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat mem-out/repos.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat mem-out/synthetic-50k.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-report
+          path: mem-out/
+          retention-days: 14
