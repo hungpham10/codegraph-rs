@@ -550,4 +550,12 @@ pub trait Storage:
     + Send
     + Sync
 {
+    /// Occupancy của LRU cache phía trên backend: `(tên cache, số entry)`.
+    ///
+    /// Mặc định `[]` — backend không cache thì không có gì để báo. Chỉ
+    /// [`CachedStorage`](crate::storage::cached::CachedStorage) override.
+    /// Dùng cho báo cáo memory (`GraphIndex::mem_breakdown`).
+    fn cache_occupancy(&self) -> Vec<(String, usize)> {
+        Vec::new()
+    }
 }

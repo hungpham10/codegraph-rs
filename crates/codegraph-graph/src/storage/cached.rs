@@ -54,6 +54,30 @@ struct CacheSet {
 }
 
 impl CacheSet {
+    /// Occupancy từng cache — `(tên, số entry đang cache)`. Dùng để báo cáo
+    /// memory: LRU pre-allocate cả arena `capacity` entry ngay khi `new`, nên
+    /// **bytes đã cấp là hằng số**; entry đang dùng mới là phần biến động.
+    fn occupancy(&self) -> Vec<(String, usize)> {
+        [
+            ("nodes", self.nodes.len()),
+            ("children", self.children.len()),
+            ("chains", self.chains.len()),
+            ("metas", self.metas.len()),
+            ("key_lens", self.key_lens.len()),
+            ("edge_data", self.edge_data.len()),
+            ("node_meta", self.node_meta.len()),
+            ("roots", self.roots.len()),
+            ("shortcuts", self.shortcuts.len()),
+            ("symbols", self.symbols.len()),
+            ("embeddings", self.embeddings.len()),
+            ("call_records", self.call_records.len()),
+            ("call_name_index", self.call_name_index.len()),
+        ]
+        .into_iter()
+        .map(|(name, len)| (name.to_string(), len))
+        .collect()
+    }
+
     fn new(capacity: usize) -> Self {
         Self {
             nodes: LruCache::new(capacity),
@@ -510,7 +534,11 @@ impl EntityStorage for CachedStorage {
 // Rust tự cộng method qua blanket bound — không cần viết gì thêm.
 
 #[async_trait]
-impl Storage for CachedStorage {}
+impl Storage for CachedStorage {
+    fn cache_occupancy(&self) -> Vec<(String, usize)> {
+        self.caches.occupancy()
+    }
+}
 
 /// Tx bọc: delegate mọi mutation, khi `commit` xong thì `clear_radix()`.
 struct CachedTx {

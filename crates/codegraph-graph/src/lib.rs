@@ -77,6 +77,8 @@ mod bloom;
 pub mod diff;
 pub mod embeddings;
 mod lru;
+pub mod meminfo;
+pub mod memtrack;
 mod radix;
 mod search;
 mod shared;
@@ -226,6 +228,19 @@ pub struct ParseResult {
     pub chains: HashMap<u64, Vec<u64>>,
     /// Call records (caller_id local; `position` trỏ placeholder `0` trong chain).
     pub calls: Vec<CallRecord>,
+}
+
+/// Một call record của `ParseResult` **mượn** (không clone) + `caller_id` đã
+/// remap sang id global.
+///
+/// `ingest` chỉ cần sửa đúng một field của `CallRecord` là `caller_id` (mọi
+/// field khác giữ nguyên), nên clone toàn bộ `CallRecord` (176 B + heap) vào
+/// `all_calls` là phí vô ích — struct này giữ 16 B thay vì 176 B, trỏ về
+/// `ParseResult` của caller (vốn sống suốt `ingest`).
+struct CallRef<'a> {
+    rec: &'a CallRecord,
+    /// `caller_id` sau remap (giữ `0` nếu local id không có trong `id_map`).
+    caller: u64,
 }
 
 // ==================== GraphIndex ====================
@@ -1017,7 +1032,7 @@ impl GraphIndex {
         if let Some(p) = p {
             p.phase("register symbols", total_symbols);
         }
-        let mut all_calls: Vec<CallRecord> = Vec::new();
+        let mut all_calls: Vec<CallRef<'_>> = Vec::new();
         for result in results {
             let mut id_map: HashMap<u64, u64> = HashMap::new();
             for sym in &result.symbols {
@@ -1045,11 +1060,8 @@ impl GraphIndex {
             }
             // Calls — remap caller_id (position giữ nguyên — đã trỏ đúng chain).
             for c in &result.calls {
-                let mut c2 = c.clone();
-                if let Some(&nid) = id_map.get(&c.caller_id) {
-                    c2.caller_id = nid;
-                }
-                all_calls.push(c2);
+                let caller = id_map.get(&c.caller_id).copied().unwrap_or(c.caller_id);
+                all_calls.push(CallRef { rec: c, caller });
             }
             if let Some(p) = p {
                 p.advance(result.symbols.len());
@@ -1162,11 +1174,11 @@ impl GraphIndex {
     }
 
     /// Thay placeholder `0` trong chain bằng id thật (resolve per-caller).
-    fn resolve_calls(&mut self, calls: &[CallRecord]) {
+    fn resolve_calls(&mut self, calls: &[CallRef<'_>]) {
         let mut caller_calls: HashMap<u64, Vec<&CallRecord>> = HashMap::new();
         for c in calls {
-            if c.caller_id != 0 {
-                caller_calls.entry(c.caller_id).or_default().push(c);
+            if c.caller != 0 {
+                caller_calls.entry(c.caller).or_default().push(c.rec);
             }
         }
         for (caller_id, ccs) in caller_calls {
@@ -1378,13 +1390,15 @@ impl GraphIndex {
     /// position. Chain dựng thẳng (không qua placeholder) vẫn sinh edge đủ.
     async fn build_edges_from_calls(
         &mut self,
-        calls: &[CallRecord],
+        calls: &[CallRef<'_>],
         progress: Option<&dyn IngestProgress>,
     ) -> Result<()> {
-        let mut recs_by_caller: HashMap<u64, Vec<CallRecord>> = HashMap::new();
-        for c in calls {
-            let caller = c.caller_id;
-            recs_by_caller.entry(caller).or_default().push(c.clone());
+        // Chỉ lưu **index** vào `calls` (4 B) thay vì clone `CallRecord`
+        // (176 B + heap) — `calls` sống tới hết hàm nên vẫn tra được.
+        let mut recs_by_caller: HashMap<u64, Vec<u32>> = HashMap::new();
+        for (i, entry) in calls.iter().enumerate() {
+            let (c, caller) = (entry.rec, entry.caller);
+            recs_by_caller.entry(caller).or_default().push(i as u32);
 
             // Call-site index: key theo tên thô + alias type-qualified (nếu có).
             let site = CallSite {
@@ -1409,10 +1423,13 @@ impl GraphIndex {
 
         // Edges từ mọi chain — rec lookup theo position cho metadata.
         for (&caller, chain) in &self.chains_map {
-            let rec_by_pos: HashMap<usize, &CallRecord> = recs_by_caller
-                .get(&caller)
-                .map(|rs| rs.iter().map(|c| (c.position, c)).collect())
-                .unwrap_or_default();
+            let mut rec_by_pos: HashMap<usize, &CallRecord> = HashMap::new();
+            if let Some(idxs) = recs_by_caller.get(&caller) {
+                for &i in idxs {
+                    let rec = calls[i as usize].rec;
+                    rec_by_pos.insert(rec.position, rec);
+                }
+            }
             for (i, &e) in chain.iter().enumerate() {
                 // Vị trí 0 = chính func id (owner) — không phải call. Recursion
                 // thật xuất hiện ở vị trí > 0 (vẫn giữ là edge is_recursive).
@@ -1446,7 +1463,12 @@ impl GraphIndex {
         {
             p.phase("save call records", recs_by_caller.len());
         }
-        for (caller, recs) in recs_by_caller {
+        for (caller, idxs) in recs_by_caller {
+            let recs: Vec<&CallRecord> = idxs.iter().map(|&i| calls[i as usize].rec).collect();
+            // `rec.caller_id` ghi ra đây là id **local** của file, không phải
+            // id global — vô hại: mọi reader (`flow`, `rebuild_edges`,
+            // `bingraph`) lấy caller id từ **key** của blob, không đọc field
+            // này. Nếu sau này cần id global thì đừng đọc field — dùng key.
             let bytes = serde_json::to_vec(&recs).map_err(|e| Error::Search(e.to_string()))?;
             self.storage
                 .write()
@@ -2652,6 +2674,30 @@ impl GraphIndex {
         })
     }
 
+    /// Deep size từng cấu trúc in-memory + occupancy LRU cache.
+    ///
+    /// Dùng để **quy kết quả RSS về đúng cấu trúc**: `GraphIndex` in-memory-first
+    /// nên tổng bytes ở đây mới là thứ quyết định repo lớn tốn bao nhiêu RAM.
+    /// Xem [`crate::memtrack`] để biết phần nào exact và phần nào ước lượng.
+    ///
+    /// Chạy O(tổng số entry) — dùng cho profiler/diagnostics, không phải
+    /// hot path.
+    pub async fn mem_breakdown(&self) -> crate::memtrack::MemBreakdown {
+        use crate::memtrack as mt;
+        let caches = self.storage.read().await.cache_occupancy();
+        mt::MemBreakdown {
+            symbols: mt::symbols_mem(&self.symbols),
+            chains_map: mt::chains_map_mem(&self.chains_map),
+            call_names: mt::call_names_mem(&self.call_names),
+            edges: mt::edges_mem(&self.edges),
+            name_index: mt::name_index_mem(&self.name_index),
+            scope_index: mt::scope_index_mem(&self.scope_index),
+            name_keys: mt::name_keys_mem(&self.name_records, &self.sorted_name_keys),
+            files: mt::files_mem(&self.files),
+            caches,
+        }
+    }
+
     /// Số liệu tổng hợp.
     pub fn stats(&self) -> SemgraphStats {
         SemgraphStats {
@@ -3165,6 +3211,50 @@ mod tests {
         assert_eq!(hits[0].call_sites.len(), 1);
         assert_eq!(hits[0].call_sites[0].call_name, "fmt.Println");
         assert_eq!(hits[0].call_sites[0].line, 3);
+    }
+
+    /// Call records phải gom theo caller id **đã remap** (global), không theo
+    /// `caller_id` local của file — hai file đều dùng `SYMBOL_BASE` làm caller
+    /// local. Gom nhầm theo id local thì blob của file 1 nuốt luôn record của
+    /// file 2 và `flow` của caller thứ hai mất sạch call.
+    #[tokio::test]
+    async fn call_records_grouped_by_global_caller_id() {
+        let call = |name: &str| CallRecord {
+            caller_id: SYMBOL_BASE,
+            call_name: name.to_string(),
+            position: 1,
+            arg_exprs: vec![],
+            line: 7,
+            condition: None,
+            is_loop_body: false,
+            effect: EffectType::None,
+            effect_desc: None,
+            target_class: None,
+            target_method: None,
+        };
+        let mut idx = GraphIndex::in_memory();
+        let first = result(
+            "first.ts",
+            vec![sym("first.ts", "first_fn", SYMBOL_BASE)],
+            HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, 0])]),
+            vec![call("alpha.only_a")],
+        );
+        let second = result(
+            "second.ts",
+            vec![sym("second.ts", "second_fn", SYMBOL_BASE)],
+            HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, 0])]),
+            vec![call("beta.only_b")],
+        );
+        idx.ingest(&[first, second]).await.unwrap();
+
+        let a = SYMBOL_BASE;
+        let b = SYMBOL_BASE + 1;
+        let fa = idx.flow(a).await.unwrap();
+        let fb = idx.flow(b).await.unwrap();
+        assert_eq!(fa.calls.len(), 1);
+        assert_eq!(fa.calls[0].to_name, "alpha.only_a");
+        assert_eq!(fb.calls.len(), 1);
+        assert_eq!(fb.calls[0].to_name, "beta.only_b");
     }
 
     #[tokio::test]

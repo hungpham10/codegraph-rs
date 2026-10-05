@@ -1,0 +1,120 @@
+# Đo RAM của codegraph — chạy SONG SONG với CI, không chặn merge.
+#
+# Vì sao cần workflow riêng: CodSpeed đo *thời gian*, còn `GraphIndex` là
+# in-memory-first — mở index là nạp toàn bộ vào RAM (`rebuild()` gọi
+# `load_all_symbols` / `all_chains` / ...). Cái giá RAM đó không hiện ra trong
+# benchmark thời gian nên phải đo riêng.
+#
+# Số liệu RSS trên GitHub-hosted runner là VM dùng chung → **chỉ dùng để so
+# sánh tương đối** trước/sau trong cùng workflow, không dùng làm ngưỡng cứng.
+# Đường `synthetic` là deterministic nên phần "dự đoán" (predicted symbols/edges)
+# mới là con số ổn định thật sự.
+name: Memory
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  memory:
+    name: memory profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch bench repos
+        run: bash .github/benches/fetch_repos.sh
+
+      # Build sẵn để lỗi compile lộ ra ở step riêng, dễ đọc.
+      - name: Build memory profiler
+        run: cargo build --release -p codegraph-bench --bin mem
+
+      # Quy mô synthetic: đủ lớn để `edges`/`call_names` chiếm RAM đáng kể,
+      # vẫn chạy nhanh trên runner.
+      - name: Synthetic 50k functions
+        run: |
+          mkdir -p mem-out
+          ./target/release/mem --synthetic 50000 --fanout 4 \
+            --json | tee mem-out/synthetic-50k.json
+
+      # Đo VI SAI: cùng 50k symbol nhưng bỏ dần từng thành phần. Hiệu giữa các
+      # shape = chi phí của phần vừa bị bỏ, **gồm cả radix engine** — phần mà
+      # `mem_breakdown` (chỉ tính HashMap của GraphIndex) không quy được.
+      #   symbols → chains: + chain engine (trie + rt_shortcuts)
+      #   chains  → full:   + call_names + edges
+      - name: Synthetic differential shapes
+        run: |
+          : > mem-out/shapes.txt
+          for shape in symbols chains full; do
+            ./target/release/mem --synthetic 50000 --fanout 4 --shape "$shape" \
+              | tee -a mem-out/shapes.txt
+            ./target/release/mem --synthetic 50000 --fanout 4 --shape "$shape" --json \
+              >> mem-out/shapes.json
+          done
+
+      # Reopen = chi phí THƯỜNG TRỰC. `ParseResult` giữ call record xuyên suốt
+      # `ingest` và allocator không trả arena về OS → RSS sau ingest là peak, không
+      # phải live. `open` chạy `rebuild()` từ sqlite nên đo phần giữ lại sau restart.
+      # Quy mô 5k (không phải 50k): `rebuild()` hiện còn nạp `all_call_records()`
+      # + deserialize lần hai nên **rất chậm** — 50k mất ~1h40m/shape, cả job
+      # ~5h. Số liệu RSS của `open` vẫn chỉ để so sánh tương đối (xem ghi chú
+      # đầu file); ở 5k thì đủ thấy xu hướng mà job còn chạy được.
+      - name: Reopen vs ingest (persistent cost, 5k)
+        run: |
+          : > mem-out/reopen.txt
+          for shape in symbols chains full; do
+            ./target/release/mem --synthetic 5000 --fanout 4 --shape "$shape" --mode open \
+              | tee -a mem-out/reopen.txt
+            ./target/release/mem --synthetic 5000 --fanout 4 --shape "$shape" --mode open --json \
+              >> mem-out/reopen.json
+          done
+
+      - name: Real repos
+        env:
+          CODEGRAPH_BENCH_REPOS_LIST: ${{ github.workspace }}/.github/benches/repos/list.txt
+        run: |
+          # Mỗi repo một PROCESS riêng — chạy chung process thì RSS của repo
+          # sau cộng dồn vào repo trước, `rss_after_extract` không còn đọc được.
+          : > mem-out/repos.json
+          : > mem-out/repos.txt
+          while read -r repo; do
+            [ -z "$repo" ] && continue
+            ./target/release/mem "$repo" --json >> mem-out/repos.json
+            ./target/release/mem "$repo" | tee -a mem-out/repos.txt
+          done < "$CODEGRAPH_BENCH_REPOS_LIST"
+
+      - name: Summary
+        run: |
+          echo "### Memory profile" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat mem-out/repos.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Differential shapes (50k)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat mem-out/shapes.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Reopen = persistent cost (5k)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat mem-out/reopen.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat mem-out/synthetic-50k.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-report
+          path: mem-out/
+          retention-days: 14
