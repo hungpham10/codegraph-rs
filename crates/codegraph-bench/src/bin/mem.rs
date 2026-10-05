@@ -144,6 +144,34 @@ struct Cli {
     /// - `full`    — kèm call record → thêm `call_names` + `edges`
     #[arg(long, value_enum, default_value_t = Shape::Full)]
     shape: Shape,
+
+    /// Cách dựng index để đo.
+    ///
+    /// - `ingest` — parse + `ingest` thẳng vào in-memory. **RSS đo được ở đây là
+    ///   high-water của allocator**: trong lúc ingest tồn tại 3 bản sao call
+    ///   song song (`results`, `all_calls`, `recs_by_caller`) và drop xong
+    ///   allocator không trả arena về OS → con số này KHÔNG phải chi phí thường trực.
+    /// - `open` — ingest vào sqlite, **drop hết**, rồi `open` lại. Lúc này chỉ
+    ///   còn `rebuild()` nạp blob từ storage và dựng HashMap, không có bản sao
+    ///   tạm nào → đây mới là chi phí thường trực thật.
+    #[arg(long, value_enum, default_value_t = Mode::Ingest)]
+    mode: Mode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Mode {
+    Ingest,
+    Open,
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Ingest => "ingest",
+            Self::Open => "open",
+        };
+        f.write_str(s)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -402,6 +430,71 @@ fn measure_synthetic(n: usize, fanout: usize, shape: Shape) -> anyhow::Result<Re
     })
 }
 
+/// Đo chi phí thường trực bằng cách **reopen**: ingest vào sqlite → drop sạch
+/// (`index`, `ParseResult`) → `open` lại.
+///
+/// Vì sao cần: trong `ingest` tồn tại 3 bản sao call song song
+/// (`results` + `all_calls` + `recs_by_caller`) và drop xong allocator không trả
+/// arena về OS, nên RSS sau `ingest` là **peak**, không phải live. `open` chỉ
+/// chạy `rebuild()` — nạp blob + dựng HashMap, không có bản sao tạm — nên
+/// `rss_after_open − rss_before_open` mới là chi phí thường trực.
+fn measure_reopen(n: usize, fanout: usize, shape: Shape) -> anyhow::Result<RepoMem> {
+    let mut tracker = MemTracker::new();
+    tracker.mark("start");
+
+    let parsed = vec![synthetic_parse_result(n, fanout, shape)];
+
+    // Thư mục riêng cho mỗi lần chạy — không dùng `tempfile` vì `src/bin/` không
+    // có dev-dependency.
+    let dir = std::env::temp_dir().join(format!("codegraph-mem-{}-{}", std::process::id(), n));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| anyhow::anyhow!("tạo {}: {e}", dir.display()))?;
+    let dsn = format!("sqlite://{}/db.sqlite", dir.display());
+
+    let ingest_idx = index_at(&parsed, Some(&dsn))?;
+    let st = ingest_idx.stats();
+    drop(ingest_idx);
+    // **Quan trọng**: nhả `ParseResult` (chứa toàn bộ `CallRecord`) trước khi đo,
+    // không thì nó chiếm RSS suốt và mọi delta đều sai.
+    drop(parsed);
+    tracker.mark("before_open");
+
+    let idx = runtime().block_on(codegraph_graph::GraphIndex::open(&dsn))?;
+    tracker.mark("open");
+
+    let breakdown = runtime().block_on(idx.mem_breakdown());
+    let sample = |label: &str| {
+        tracker
+            .samples()
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
+    };
+    let before_open = sample("before_open");
+    let after_open = sample("open");
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    Ok(RepoMem {
+        repo: format!("reopen({n},{shape})"),
+        symbols: st.symbols,
+        chains: st.chains,
+        edges: st.edges,
+        files: st.files,
+        rss_after_extract: before_open,
+        rss_after_index: after_open,
+        rss_after_query: 0,
+        rss_peak: tracker.peak(),
+        rss_index_delta: after_open.saturating_sub(before_open),
+        predicted_symbols: st.symbols * size_of::<Symbol>() as u64,
+        predicted_edges: st.edges * size_of::<EdgeMeta>() as u64,
+        accounted_total: breakdown.accounted_total(),
+        caches: breakdown.caches.clone(),
+        breakdown: breakdown_rows(&breakdown),
+    })
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if rss_bytes().is_none() {
@@ -418,7 +511,10 @@ fn main() -> anyhow::Result<()> {
 
     let mut results = Vec::new();
     if let Some(n) = cli.synthetic {
-        results.push(measure_synthetic(n, cli.fanout, cli.shape)?);
+        results.push(match cli.mode {
+            Mode::Ingest => measure_synthetic(n, cli.fanout, cli.shape)?,
+            Mode::Open => measure_reopen(n, cli.fanout, cli.shape)?,
+        });
     } else {
         for repo in load_repos(&cli) {
             if Utf8Path::from_path(repo.root.as_std_path()).is_none() {
