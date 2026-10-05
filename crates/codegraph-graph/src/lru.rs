@@ -194,6 +194,16 @@ where
         self.caching[index].value.clone()
     }
 
+    /// Số entry đang cache — `DashMap::len()` O(1), dùng cho báo cáo memory.
+    pub fn len(&self) -> usize {
+        self.mapping.len()
+    }
+
+    /// `true` khi chưa cache entry nào.
+    pub fn is_empty(&self) -> bool {
+        self.mapping.is_empty()
+    }
+
     /// Xoá toàn bộ entry (dùng khi invalidate hàng loạt, VD sau transaction
     /// commit hoặc `clear_*` của storage). Reset cả arena lẫn linked-list.
     pub fn clear(&self) {

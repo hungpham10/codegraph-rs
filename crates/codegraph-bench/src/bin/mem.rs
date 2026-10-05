@@ -14,11 +14,90 @@
 
 use camino::Utf8Path;
 use clap::Parser;
+use std::sync::OnceLock;
 use codegraph_bench::{BenchOptions, Repo, extract, index_at, orchestrator, run_queries};
 use codegraph_core::{
     Annotation, CallRecord, EdgeMeta, EffectType, ScopeLevel, Symbol, SymbolKind,
 };
 use codegraph_graph::meminfo::{MemTracker, fmt_bytes, rss_bytes};
+use codegraph_graph::memtrack::MemBreakdown;
+
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("dựng tokio runtime")
+    })
+}
+
+/// Một dòng breakdown — JSON-friendly (thứ tự giữ nguyên như `ranked()`).
+#[derive(serde::Serialize)]
+struct BreakdownRow {
+    structure: String,
+    entries: u64,
+    fixed_bytes: u64,
+    heap_bytes: u64,
+    total_bytes: u64,
+}
+
+fn breakdown_rows(b: &MemBreakdown) -> Vec<BreakdownRow> {
+    b.ranked()
+        .into_iter()
+        .map(|(name, m)| BreakdownRow {
+            structure: name.to_string(),
+            entries: m.entries,
+            fixed_bytes: m.fixed_bytes,
+            heap_bytes: m.heap_bytes,
+            total_bytes: m.total_bytes(),
+        })
+        .collect()
+}
+
+/// In breakdown cấu trúc (đã sort giảm dần) — phần trả lời câu hỏi "RAM nằm ở
+/// đâu", tách khỏi RSS tổng.
+fn print_breakdown(rows: &[BreakdownRow], caches: &[(String, usize)], rss_index: u64) {
+    println!("\n  {:<22} {:>9} {:>12} {:>12} {:>12}", "structure", "entries", "fixed", "heap", "total");
+    let mut accounted = 0u64;
+    for row in rows {
+        if row.entries == 0 && row.total_bytes == 0 {
+            continue;
+        }
+        accounted += row.total_bytes;
+        println!(
+            "  {:<22} {:>9} {:>12} {:>12} {:>12}",
+            row.structure,
+            row.entries,
+            fmt_bytes(row.fixed_bytes),
+            fmt_bytes(row.heap_bytes),
+            fmt_bytes(row.total_bytes)
+        );
+    }
+    println!(
+        "  {:<22} {:>9} {:>12} {:>12} {:>12}",
+        "SUM accounted",
+        "",
+        "",
+        "",
+        fmt_bytes(accounted)
+    );
+    if rss_index > 0 {
+        let pct = accounted as f64 * 100.0 / rss_index as f64;
+        println!("  accounted / rss index = {pct:.1}% — phần còn lại: allocator + radix engine");
+    }
+    let busy: Vec<&(String, usize)> = caches.iter().filter(|(_, n)| *n > 0).collect();
+    if !busy.is_empty() {
+        print!("  LRU cache đang dùng: ");
+        println!(
+            "{}",
+            busy.iter()
+                .map(|(n, v)| format!("{n}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "codegraph-mem", about = "Đo RAM của codegraph theo từng phase")]
@@ -76,6 +155,12 @@ struct RepoMem {
     predicted_symbols: u64,
     /// `edges.len() × size_of::<EdgeMeta>()` — phần trong HashMap `edges`.
     predicted_edges: u64,
+    /// Deep size từng cấu trúc, sort giảm dần.
+    breakdown: Vec<BreakdownRow>,
+    /// Tổng bytes đã quy được về cấu trúc (chưa gồm allocator + radix engine).
+    accounted_total: u64,
+    /// LRU cache đang giữ entry (tên → số entry).
+    caches: Vec<(String, usize)>,
 }
 
 fn load_repos(cli: &Cli) -> Vec<Repo> {
@@ -133,6 +218,7 @@ fn measure(repo: &Repo, opts: &BenchOptions) -> anyhow::Result<RepoMem> {
     tracker.mark("query");
 
     let st = idx.stats();
+    let breakdown = runtime().block_on(idx.mem_breakdown());
     let sample = |label: &str| {
         tracker
             .samples()
@@ -157,6 +243,9 @@ fn measure(repo: &Repo, opts: &BenchOptions) -> anyhow::Result<RepoMem> {
         rss_index_delta: after_index.saturating_sub(after_extract),
         predicted_symbols: st.symbols * size_of::<Symbol>() as u64,
         predicted_edges: st.edges * size_of::<EdgeMeta>() as u64,
+        accounted_total: breakdown.accounted_total(),
+        caches: breakdown.caches.clone(),
+        breakdown: breakdown_rows(&breakdown),
     })
 }
 
@@ -241,6 +330,7 @@ fn measure_synthetic(n: usize, fanout: usize) -> anyhow::Result<RepoMem> {
     tracker.mark("index");
 
     let st = idx.stats();
+    let breakdown = runtime().block_on(idx.mem_breakdown());
     let sample = |label: &str| {
         tracker
             .samples()
@@ -265,6 +355,9 @@ fn measure_synthetic(n: usize, fanout: usize) -> anyhow::Result<RepoMem> {
         rss_index_delta: after_index.saturating_sub(after_extract),
         predicted_symbols: st.symbols * size_of::<Symbol>() as u64,
         predicted_edges: st.edges * size_of::<EdgeMeta>() as u64,
+        accounted_total: breakdown.accounted_total(),
+        caches: breakdown.caches.clone(),
+        breakdown: breakdown_rows(&breakdown),
     })
 }
 
@@ -326,6 +419,10 @@ fn main() -> anyhow::Result<()> {
             fmt_bytes(r.predicted_symbols),
             fmt_bytes(r.predicted_edges),
         );
+    }
+    for r in &results {
+        println!("\n=== breakdown: {} ===", r.repo);
+        print_breakdown(&r.breakdown, &r.caches, r.rss_after_index);
     }
     if let Some(peak) = codegraph_graph::meminfo::peak_rss_bytes() {
         println!("\npeak RSS (VmHWM): {}", fmt_bytes(peak));

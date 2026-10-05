@@ -78,6 +78,7 @@ pub mod diff;
 pub mod embeddings;
 mod lru;
 pub mod meminfo;
+pub mod memtrack;
 mod radix;
 mod search;
 mod shared;
@@ -2651,6 +2652,30 @@ impl GraphIndex {
                 phase: SearchCursorPhase::Paged { collected, total },
             }),
         })
+    }
+
+    /// Deep size từng cấu trúc in-memory + occupancy LRU cache.
+    ///
+    /// Dùng để **quy kết quả RSS về đúng cấu trúc**: `GraphIndex` in-memory-first
+    /// nên tổng bytes ở đây mới là thứ quyết định repo lớn tốn bao nhiêu RAM.
+    /// Xem [`crate::memtrack`] để biết phần nào exact và phần nào ước lượng.
+    ///
+    /// Chạy O(tổng số entry) — dùng cho profiler/diagnostics, không phải
+    /// hot path.
+    pub async fn mem_breakdown(&self) -> crate::memtrack::MemBreakdown {
+        use crate::memtrack as mt;
+        let caches = self.storage.read().await.cache_occupancy();
+        mt::MemBreakdown {
+            symbols: mt::symbols_mem(&self.symbols),
+            chains_map: mt::chains_map_mem(&self.chains_map),
+            call_names: mt::call_names_mem(&self.call_names),
+            edges: mt::edges_mem(&self.edges),
+            name_index: mt::name_index_mem(&self.name_index),
+            scope_index: mt::scope_index_mem(&self.scope_index),
+            name_keys: mt::name_keys_mem(&self.name_records, &self.sorted_name_keys),
+            files: mt::files_mem(&self.files),
+            caches,
+        }
     }
 
     /// Số liệu tổng hợp.
