@@ -14,13 +14,13 @@
 
 use camino::Utf8Path;
 use clap::Parser;
-use std::sync::OnceLock;
 use codegraph_bench::{BenchOptions, Repo, extract, index_at, orchestrator, run_queries};
 use codegraph_core::{
     Annotation, CallRecord, EdgeMeta, EffectType, ScopeLevel, Symbol, SymbolKind,
 };
 use codegraph_graph::meminfo::{MemTracker, fmt_bytes, rss_bytes};
 use codegraph_graph::memtrack::MemBreakdown;
+use std::sync::OnceLock;
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -58,7 +58,10 @@ fn breakdown_rows(b: &MemBreakdown) -> Vec<BreakdownRow> {
 /// In breakdown cấu trúc (đã sort giảm dần) — phần trả lời câu hỏi "RAM nằm ở
 /// đâu", tách khỏi RSS tổng.
 fn print_breakdown(rows: &[BreakdownRow], caches: &[(String, usize)], rss_index: u64) {
-    println!("\n  {:<22} {:>9} {:>12} {:>12} {:>12}", "structure", "entries", "fixed", "heap", "total");
+    println!(
+        "\n  {:<22} {:>9} {:>12} {:>12} {:>12}",
+        "structure", "entries", "fixed", "heap", "total"
+    );
     let mut accounted = 0u64;
     for row in rows {
         if row.entries == 0 && row.total_bytes == 0 {

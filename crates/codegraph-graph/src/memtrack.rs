@@ -138,9 +138,7 @@ pub fn call_names_mem(m: &HashMap<String, Vec<CallSite>>) -> StructureMem {
         heap_bytes: m
             .iter()
             .map(|(k, v)| {
-                str_bytes(k)
-                    + vec_bytes::<CallSite>(v)
-                    + v.iter().map(call_site_heap).sum::<u64>()
+                str_bytes(k) + vec_bytes::<CallSite>(v) + v.iter().map(call_site_heap).sum::<u64>()
             })
             .sum(),
     }
@@ -161,10 +159,7 @@ pub fn name_index_mem(m: &HashMap<String, Vec<u64>>) -> StructureMem {
     StructureMem {
         entries: m.len() as u64,
         fixed_bytes: map_bucket_bytes(m),
-        heap_bytes: m
-            .iter()
-            .map(|(k, v)| str_bytes(k) + u64_vec_bytes(v))
-            .sum(),
+        heap_bytes: m.iter().map(|(k, v)| str_bytes(k) + u64_vec_bytes(v)).sum(),
     }
 }
 
@@ -265,7 +260,11 @@ mod tests {
         };
         let mem = symbols_mem(&HashMap::from([(100, sym)]));
         assert_eq!(mem.entries, 1);
-        assert!(mem.heap_bytes >= 6, "phải tính name + file: {}", mem.heap_bytes);
+        assert!(
+            mem.heap_bytes >= 6,
+            "phải tính name + file: {}",
+            mem.heap_bytes
+        );
     }
 
     #[test]
@@ -278,10 +277,7 @@ mod tests {
             is_loop_body: false,
             arg_exprs: vec!["a".into(), "b".into()],
         };
-        let mem = call_names_mem(&HashMap::from([(
-            "lib::helper_0".to_string(),
-            vec![site],
-        )]));
+        let mem = call_names_mem(&HashMap::from([("lib::helper_0".to_string(), vec![site])]));
         assert_eq!(mem.entries, 1);
         // key + call_name + condition + 2 args + Vec buffer.
         assert!(mem.heap_bytes > 30, "heap quá nhỏ: {}", mem.heap_bytes);
