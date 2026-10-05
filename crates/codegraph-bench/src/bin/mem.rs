@@ -303,7 +303,13 @@ fn main() -> anyhow::Result<()> {
 
     println!(
         "{:<14} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>12}",
-        "repo", "symbols", "edges", "rss extract", "rss index", "Δ index", "pred symbols",
+        "repo",
+        "symbols",
+        "edges",
+        "rss extract",
+        "rss index",
+        "Δ index",
+        "pred symbols",
         "pred edges"
     );
     for r in &results {
