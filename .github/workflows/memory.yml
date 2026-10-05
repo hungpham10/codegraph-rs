@@ -52,8 +52,15 @@ jobs:
         env:
           CODEGRAPH_BENCH_REPOS_LIST: ${{ github.workspace }}/.github/benches/repos/list.txt
         run: |
-          ./target/release/mem --json | tee mem-out/repos.json
-          ./target/release/mem | tee mem-out/repos.txt
+          # Mỗi repo một PROCESS riêng — chạy chung process thì RSS của repo
+          # sau cộng dồn vào repo trước, `rss_after_extract` không còn đọc được.
+          : > mem-out/repos.json
+          : > mem-out/repos.txt
+          while read -r repo; do
+            [ -z "$repo" ] && continue
+            ./target/release/mem "$repo" --json >> mem-out/repos.json
+            ./target/release/mem "$repo" | tee -a mem-out/repos.txt
+          done < "$CODEGRAPH_BENCH_REPOS_LIST"
 
       - name: Summary
         run: |
