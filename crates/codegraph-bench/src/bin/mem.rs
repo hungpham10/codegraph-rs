@@ -15,7 +15,9 @@
 use camino::Utf8Path;
 use clap::Parser;
 use codegraph_bench::{BenchOptions, Repo, extract, index_at, orchestrator, run_queries};
-use codegraph_core::{EdgeMeta, Symbol};
+use codegraph_core::{
+    Annotation, CallRecord, EffectType, EdgeMeta, ScopeLevel, Symbol, SymbolKind,
+};
 use codegraph_graph::meminfo::{MemTracker, fmt_bytes, rss_bytes};
 
 #[derive(Parser)]

@@ -23,22 +23,31 @@
 
 /// Page size mặc định khi không đọc được từ hệ thống (Linux arm64/x86_64 đều
 /// 4096). Sai số này chỉ ảnh hưởng con số báo cáo, không ảnh hưởng logic.
+#[cfg(target_os = "linux")]
 const FALLBACK_PAGE_SIZE: u64 = 4096;
 
 /// RSS hiện tại của process (bytes). `None` nếu platform không hỗ trợ.
 pub fn rss_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-        // statm: size resident shared text lib data dt — tính bằng **page**.
-        // resident là field thứ 2 (index 1).
-        let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-        return Some(resident_pages.saturating_mul(page_size()));
+        rss_linux()
     }
     #[cfg(not(target_os = "linux"))]
     {
         rss_via_ps()
     }
+}
+
+/// RSS qua `/proc/self/statm` — Linux. Tách riêng để `rss_bytes()` không cần
+/// `return` (clippy `needless_return`) và để non-linux không phải giữ nhánh
+/// chết.
+#[cfg(target_os = "linux")]
+fn rss_linux() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    // statm: size resident shared text lib data dt — tính bằng **page**.
+    // resident là field thứ 2 (index 1).
+    let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    Some(resident_pages.saturating_mul(page_size()))
 }
 
 /// RSS đỉnh từ lúc process bắt đầu (bytes).
