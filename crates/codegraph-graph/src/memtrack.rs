@@ -82,11 +82,7 @@ fn vec_bytes<T>(v: &Vec<T>) -> u64 {
 
 /// Deep size của `Symbol` (chưa tính slot trong HashMap).
 pub fn symbol_heap(sym: &Symbol) -> u64 {
-    let annotations: u64 = sym
-        .annotations
-        .iter()
-        .map(annotation_heap)
-        .sum::<u64>()
+    let annotations: u64 = sym.annotations.iter().map(annotation_heap).sum::<u64>()
         + vec_bytes::<Annotation>(&sym.annotations);
     str_bytes(&sym.name)
         + str_bytes(&sym.file)
