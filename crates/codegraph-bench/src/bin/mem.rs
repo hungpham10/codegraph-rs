@@ -132,8 +132,8 @@ struct Cli {
     synthetic: Option<usize>,
 
     /// Số callee mỗi function trong chế độ `--synthetic`.
-   #[arg(long, default_value_t = 4, value_name = "K")]
-   fanout: usize,
+    #[arg(long, default_value_t = 4, value_name = "K")]
+    fanout: usize,
 
     /// Thành phần nào của index synthetic cần dựng — dùng để **đo vi sai**:
     /// mỗi shape thiếu một phần, hiệu RSS cho ra chi phí của phần đó (gồm cả
@@ -287,11 +287,7 @@ fn measure(repo: &Repo, opts: &BenchOptions) -> anyhow::Result<RepoMem> {
 /// nhiều RAM nhất trong `GraphIndex`. Call name cố tình trùng lặp (chỉ vài
 /// tên lib giả) để `call_names` có nhiều key chứa nhiều site, đúng hình dạng
 /// repo thật.
-fn synthetic_parse_result(
-    n: usize,
-    fanout: usize,
-    shape: Shape,
-) -> codegraph_graph::ParseResult {
+fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_graph::ParseResult {
     // `n = 0` sẽ làm `% n` panic ở vòng sinh chain — chặn sớm, báo rõ.
     assert!(n > 0, "--synthetic cần N > 0");
     let mut symbols = Vec::with_capacity(n);
@@ -317,7 +313,11 @@ fn synthetic_parse_result(
         });
     }
 
-    let fanout = if shape == Shape::Symbols { 0 } else { fanout.max(1) };
+    let fanout = if shape == Shape::Symbols {
+        0
+    } else {
+        fanout.max(1)
+    };
     for i in 0..n {
         let caller = codegraph_core::SYMBOL_BASE + i as u64;
         let mut chain = vec![caller];
