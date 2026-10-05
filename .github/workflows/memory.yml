@@ -48,6 +48,21 @@ jobs:
           ./target/release/mem --synthetic 50000 --fanout 4 \
             --json | tee mem-out/synthetic-50k.json
 
+      # Đo VI SAI: cùng 50k symbol nhưng bỏ dần từng thành phần. Hiệu giữa các
+      # shape = chi phí của phần vừa bị bỏ, **gồm cả radix engine** — phần mà
+      # `mem_breakdown` (chỉ tính HashMap của GraphIndex) không quy được.
+      #   symbols → chains: + chain engine (trie + rt_shortcuts)
+      #   chains  → full:   + call_names + edges
+      - name: Synthetic differential shapes
+        run: |
+          : > mem-out/shapes.txt
+          for shape in symbols chains full; do
+            ./target/release/mem --synthetic 50000 --fanout 4 --shape "$shape" \
+              | tee -a mem-out/shapes.txt
+            ./target/release/mem --synthetic 50000 --fanout 4 --shape "$shape" --json \
+              >> mem-out/shapes.json
+          done
+
       - name: Real repos
         env:
           CODEGRAPH_BENCH_REPOS_LIST: ${{ github.workspace }}/.github/benches/repos/list.txt
@@ -67,6 +82,10 @@ jobs:
           echo "### Memory profile" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat mem-out/repos.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Differential shapes (50k)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat mem-out/shapes.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           cat mem-out/synthetic-50k.json >> "$GITHUB_STEP_SUMMARY"

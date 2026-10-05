@@ -132,8 +132,36 @@ struct Cli {
     synthetic: Option<usize>,
 
     /// Số callee mỗi function trong chế độ `--synthetic`.
-    #[arg(long, default_value_t = 4, value_name = "K")]
-    fanout: usize,
+   #[arg(long, default_value_t = 4, value_name = "K")]
+   fanout: usize,
+
+    /// Thành phần nào của index synthetic cần dựng — dùng để **đo vi sai**:
+    /// mỗi shape thiếu một phần, hiệu RSS cho ra chi phí của phần đó (gồm cả
+    /// radix engine mà `mem_breakdown` chưa tính).
+    ///
+    /// - `symbols` — chỉ symbol → `symbols` + `name_index` + **name engine**
+    /// - `chains`  — symbol + chain, không call record → thêm **chain engine**
+    /// - `full`    — kèm call record → thêm `call_names` + `edges`
+    #[arg(long, value_enum, default_value_t = Shape::Full)]
+    shape: Shape,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Shape {
+    Symbols,
+    Chains,
+    Full,
+}
+
+impl std::fmt::Display for Shape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Symbols => "symbols",
+            Self::Chains => "chains",
+            Self::Full => "full",
+        };
+        f.write_str(s)
+    }
 }
 
 /// Kết quả 1 repo — RSS từng phase + phần RAM dự đoán theo cấu trúc.
@@ -259,7 +287,11 @@ fn measure(repo: &Repo, opts: &BenchOptions) -> anyhow::Result<RepoMem> {
 /// nhiều RAM nhất trong `GraphIndex`. Call name cố tình trùng lặp (chỉ vài
 /// tên lib giả) để `call_names` có nhiều key chứa nhiều site, đúng hình dạng
 /// repo thật.
-fn synthetic_parse_result(n: usize, fanout: usize) -> codegraph_graph::ParseResult {
+fn synthetic_parse_result(
+    n: usize,
+    fanout: usize,
+    shape: Shape,
+) -> codegraph_graph::ParseResult {
     // `n = 0` sẽ làm `% n` panic ở vòng sinh chain — chặn sớm, báo rõ.
     assert!(n > 0, "--synthetic cần N > 0");
     let mut symbols = Vec::with_capacity(n);
@@ -285,7 +317,7 @@ fn synthetic_parse_result(n: usize, fanout: usize) -> codegraph_graph::ParseResu
         });
     }
 
-    let fanout = fanout.max(1);
+    let fanout = if shape == Shape::Symbols { 0 } else { fanout.max(1) };
     for i in 0..n {
         let caller = codegraph_core::SYMBOL_BASE + i as u64;
         let mut chain = vec![caller];
@@ -294,21 +326,27 @@ fn synthetic_parse_result(n: usize, fanout: usize) -> codegraph_graph::ParseResu
             // không tự gọi chính mình.
             let callee = codegraph_core::SYMBOL_BASE + ((i + k + 1) % n) as u64;
             chain.push(callee);
-            calls.push(CallRecord {
-                caller_id: caller,
-                call_name: format!("lib::helper_{}", k % 4),
-                position: chain.len() - 1,
-                arg_exprs: vec!["x".into()],
-                line: 5 + k as u32,
-                condition: (k % 3 == 0).then(|| "x > 0".to_string()),
-                is_loop_body: k % 5 == 0,
-                effect: EffectType::None,
-                effect_desc: None,
-                target_class: None,
-                target_method: None,
-            });
+            // `shape = chains`: có chain nhưng KHÔNG call record → không dựng
+            // `call_names`/`edges`, chỉ bật chain engine.
+            if shape == Shape::Full {
+                calls.push(CallRecord {
+                    caller_id: caller,
+                    call_name: format!("lib::helper_{}", k % 4),
+                    position: chain.len() - 1,
+                    arg_exprs: vec!["x".into()],
+                    line: 5 + k as u32,
+                    condition: (k % 3 == 0).then(|| "x > 0".to_string()),
+                    is_loop_body: k % 5 == 0,
+                    effect: EffectType::None,
+                    effect_desc: None,
+                    target_class: None,
+                    target_method: None,
+                });
+            }
         }
-        chains.insert(caller, chain);
+        if shape != Shape::Symbols {
+            chains.insert(caller, chain);
+        }
     }
 
     codegraph_graph::ParseResult {
@@ -322,11 +360,11 @@ fn synthetic_parse_result(n: usize, fanout: usize) -> codegraph_graph::ParseResu
     }
 }
 
-fn measure_synthetic(n: usize, fanout: usize) -> anyhow::Result<RepoMem> {
+fn measure_synthetic(n: usize, fanout: usize, shape: Shape) -> anyhow::Result<RepoMem> {
     let mut tracker = MemTracker::new();
     tracker.mark("start");
 
-    let parsed = vec![synthetic_parse_result(n, fanout)];
+    let parsed = vec![synthetic_parse_result(n, fanout, shape)];
     tracker.mark("extract");
 
     let idx = index_at(&parsed, None)?;
@@ -346,7 +384,7 @@ fn measure_synthetic(n: usize, fanout: usize) -> anyhow::Result<RepoMem> {
     let after_index = sample("index");
 
     Ok(RepoMem {
-        repo: format!("synthetic({n})"),
+        repo: format!("synthetic({n},{shape})"),
         symbols: st.symbols,
         chains: st.chains,
         edges: st.edges,
@@ -380,7 +418,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut results = Vec::new();
     if let Some(n) = cli.synthetic {
-        results.push(measure_synthetic(n, cli.fanout)?);
+        results.push(measure_synthetic(n, cli.fanout, cli.shape)?);
     } else {
         for repo in load_repos(&cli) {
             if Utf8Path::from_path(repo.root.as_std_path()).is_none() {
