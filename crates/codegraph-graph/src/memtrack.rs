@@ -85,7 +85,7 @@ pub fn symbol_heap(sym: &Symbol) -> u64 {
     let annotations: u64 = sym
         .annotations
         .iter()
-        .map(|a| annotation_heap(a))
+        .map(annotation_heap)
         .sum::<u64>()
         + vec_bytes::<Annotation>(&sym.annotations);
     str_bytes(&sym.name)
@@ -107,7 +107,7 @@ pub fn call_site_heap(site: &CallSite) -> u64 {
     str_bytes(&site.call_name)
         + opt_str_bytes(&site.condition)
         + vec_bytes::<String>(&site.arg_exprs)
-        + site.arg_exprs.iter().map(|a| str_bytes(a)).sum::<u64>()
+        + site.arg_exprs.iter().map(str_bytes).sum::<u64>()
 }
 
 /// Deep size của `EdgeMeta` (chưa tính slot trong HashMap).
@@ -132,7 +132,7 @@ pub fn chains_map_mem(m: &HashMap<u64, Vec<u64>>) -> StructureMem {
     StructureMem {
         entries: m.len() as u64,
         fixed_bytes: map_bucket_bytes(m),
-        heap_bytes: m.values().map(|v| u64_vec_bytes(v)).sum(),
+        heap_bytes: m.values().map(u64_vec_bytes).sum(),
     }
 }
 
@@ -181,8 +181,8 @@ pub fn name_keys_mem(records: &Vec<String>, sorted: &Vec<String>) -> StructureMe
     StructureMem {
         entries: (records.len() + sorted.len()) as u64,
         fixed_bytes: vec_bytes::<String>(records) + vec_bytes::<String>(sorted),
-        heap_bytes: records.iter().map(|s| str_bytes(s)).sum::<u64>()
-            + sorted.iter().map(|s| str_bytes(s)).sum::<u64>(),
+        heap_bytes: records.iter().map(str_bytes).sum::<u64>()
+            + sorted.iter().map(str_bytes).sum::<u64>(),
     }
 }
 
@@ -240,7 +240,9 @@ impl MemBreakdown {
             ("name_keys", self.name_keys),
             ("files", self.files),
         ];
-        v.sort_by(|a, b| b.1.total_bytes().cmp(&a.1.total_bytes()));
+        // `sort_unstable_by` + tiebreaker theo tên → thứ tự **hoàn toàn xác định**
+        // (không phụ thuộc thứ tự ban đầu khi hai cấu trúc bằng bytes).
+        v.sort_unstable_by(|a, b| b.1.total_bytes().cmp(&a.1.total_bytes()).then(a.0.cmp(b.0)));
         v
     }
 }
