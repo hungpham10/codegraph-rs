@@ -148,8 +148,8 @@ struct Cli {
     /// Cách dựng index để đo.
     ///
     /// - `ingest` — parse + `ingest` thẳng vào in-memory. **RSS đo được ở đây là
-    ///   high-water của allocator**: trong lúc ingest tồn tại 3 bản sao call
-    ///   song song (`results`, `all_calls`, `recs_by_caller`) và drop xong
+    ///   high-water của allocator**: `ParseResult` giữ `CallRecord` xuyên suốt
+    ///   `ingest` (`all_calls`/`recs_by_caller` chỉ giữ borrow/index) và drop xong
     ///   allocator không trả arena về OS → con số này KHÔNG phải chi phí thường trực.
     /// - `open` — ingest vào sqlite, **drop hết**, rồi `open` lại. Lúc này chỉ
     ///   còn `rebuild()` nạp blob từ storage và dựng HashMap, không có bản sao
@@ -433,10 +433,10 @@ fn measure_synthetic(n: usize, fanout: usize, shape: Shape) -> anyhow::Result<Re
 /// Đo chi phí thường trực bằng cách **reopen**: ingest vào sqlite → drop sạch
 /// (`index`, `ParseResult`) → `open` lại.
 ///
-/// Vì sao cần: trong `ingest` tồn tại 3 bản sao call song song
-/// (`results` + `all_calls` + `recs_by_caller`) và drop xong allocator không trả
-/// arena về OS, nên RSS sau `ingest` là **peak**, không phải live. `open` chỉ
-/// chạy `rebuild()` — nạp blob + dựng HashMap, không có bản sao tạm — nên
+/// Vì sao cần: `ParseResult` giữ `CallRecord` xuyên suốt `ingest` và drop xong
+/// allocator không trả arena về OS, nên RSS sau `ingest` là **peak**, không phải
+/// live. `open` chỉ chạy `rebuild()` — nạp blob + dựng HashMap, không giữ `ParseResult`
+/// tạm — nên
 /// `rss_after_open − rss_before_open` mới là chi phí thường trực.
 fn measure_reopen(n: usize, fanout: usize, shape: Shape) -> anyhow::Result<RepoMem> {
     let mut tracker = MemTracker::new();

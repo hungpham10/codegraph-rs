@@ -63,16 +63,20 @@ jobs:
               >> mem-out/shapes.json
           done
 
-      # Reopen = chi phí THƯỜNG TRỰC. Ingest giữ 3 bản sao call song song và
-      # allocator không trả arena về OS → RSS sau ingest là peak, không phải live.
-      # `open` chạy `rebuild()` từ sqlite nên đo đúng phần giữ lại sau restart.
-      - name: Reopen vs ingest (persistent cost)
+      # Reopen = chi phí THƯỜNG TRỰC. `ParseResult` giữ call record xuyên suốt
+      # `ingest` và allocator không trả arena về OS → RSS sau ingest là peak, không
+      # phải live. `open` chạy `rebuild()` từ sqlite nên đo phần giữ lại sau restart.
+      # Quy mô 5k (không phải 50k): `rebuild()` hiện còn nạp `all_call_records()`
+      # + deserialize lần hai nên **rất chậm** — 50k mất ~1h40m/shape, cả job
+      # ~5h. Số liệu RSS của `open` vẫn chỉ để so sánh tương đối (xem ghi chú
+      # đầu file); ở 5k thì đủ thấy xu hướng mà job còn chạy được.
+      - name: Reopen vs ingest (persistent cost, 5k)
         run: |
           : > mem-out/reopen.txt
           for shape in symbols chains full; do
-            ./target/release/mem --synthetic 50000 --fanout 4 --shape "$shape" --mode open \
+            ./target/release/mem --synthetic 5000 --fanout 4 --shape "$shape" --mode open \
               | tee -a mem-out/reopen.txt
-            ./target/release/mem --synthetic 50000 --fanout 4 --shape "$shape" --mode open --json \
+            ./target/release/mem --synthetic 5000 --fanout 4 --shape "$shape" --mode open --json \
               >> mem-out/reopen.json
           done
 
@@ -100,7 +104,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat mem-out/shapes.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo '### Reopen = persistent cost (50k)' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Reopen = persistent cost (5k)' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat mem-out/reopen.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
