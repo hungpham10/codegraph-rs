@@ -131,7 +131,9 @@ impl DiskSource {
                 Ok(md) => (
                     Some(md.len()),
                     md.modified().ok().and_then(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs())
                     }),
                 ),
                 Err(_) => (None, None),

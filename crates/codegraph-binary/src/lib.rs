@@ -42,7 +42,10 @@ pub fn collect_binaries(
         );
         return (Vec::new(), 0);
     }
-    let src = DiskSource::new(SourceConfig::for_kind(SourceKind::Binary, root.to_path_buf()));
+    let src = DiskSource::new(SourceConfig::for_kind(
+        SourceKind::Binary,
+        root.to_path_buf(),
+    ));
     let mut results = Vec::new();
     let mut skipped = 0u64;
     for entry in scan::find_binaries_in(&src) {

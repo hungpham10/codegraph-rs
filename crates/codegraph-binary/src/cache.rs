@@ -41,12 +41,7 @@ pub fn store(path: &camino::Utf8Path, result: &ParseResult) -> std::io::Result<(
     fs::write(path, serde_json::to_string(result).unwrap())
 }
 
-pub fn is_cached(
-    root: &Utf8Path,
-    path: &Path,
-    entry: &SourceEntry,
-    cfg: &BinaryConfig,
-) -> bool {
+pub fn is_cached(root: &Utf8Path, path: &Path, entry: &SourceEntry, cfg: &BinaryConfig) -> bool {
     if !cfg.cache {
         return false;
     }
