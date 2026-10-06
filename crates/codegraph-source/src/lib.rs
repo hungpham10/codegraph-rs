@@ -266,7 +266,7 @@ mod tests {
         assert!(local.is_file());
         assert!(local.starts_with(&root), "phải là path tuyệt đối trên đĩa");
         // radare2 cần đúng path này.
-        assert_eq!(local.read_bytes().unwrap().len(), 8);
+        assert_eq!(std::fs::read(local.as_std_path()).unwrap().len(), 8);
     }
 
     #[tokio::test]

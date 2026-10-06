@@ -87,7 +87,7 @@ impl DiskSource {
                 if exts.is_empty() {
                     return true;
                 }
-                match rel.extension().and_then(|e| e.to_str()) {
+                match rel.extension() {
                     Some(e) => {
                         let e = e.to_ascii_lowercase();
                         exts.iter().any(|x| *x == e)
