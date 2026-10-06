@@ -830,10 +830,7 @@ dsn = "sqlite:///tmp/docs-test.db"
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub").join("b.yaml"), "k: v\n").unwrap();
 
-        let (doc_cfg, files) = fx
-            .load()
-            .doc_config(root)
-            .expect("docgraph enabled");
+        let (doc_cfg, files) = fx.load().doc_config(root).expect("docgraph enabled");
         // Glob khớp đúng 2 file (pattern "nothing/" không có match); format
         // override ":hcl" không nhầm với phần mở rộng thường.
         assert_eq!(files.len(), 2);
