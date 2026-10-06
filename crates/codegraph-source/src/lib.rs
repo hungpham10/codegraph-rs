@@ -72,6 +72,7 @@ impl SourceEntry {
 
 /// Nguồn dữ liệu đầu vào. Provider từ xa (GitHub/GitLab/git) chỉ cần implement
 /// `list` + `read`; `materialize` có sẵn impl mặc định báo lỗi.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
 #[async_trait]
 pub trait Source: Send + Sync {
     /// Dịch vụ nguồn này phục vụ.
@@ -181,7 +182,9 @@ mod tests {
         let root = root_of(&d);
         // 1 MB payload, magic bytes ở 4 byte đầu.
         let mut payload = b"\x7fELF".to_vec();
-        payload.extend(std::iter::repeat(b'x').take(1024 * 1024));
+        // `resize` thay vì `repeat().take()` — `repeat_n` cần Rust 1.82, repo
+        // khai MSRV 1.80.
+        payload.resize(1024 * 1024, b'x');
         write(&root, "app", &payload);
 
         let src = DiskSource::new(SourceConfig::for_kind(SourceKind::Binary, root.clone()));

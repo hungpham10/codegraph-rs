@@ -90,7 +90,7 @@ impl DiskSource {
                 match rel.extension() {
                     Some(e) => {
                         let e = e.to_ascii_lowercase();
-                        exts.iter().any(|x| *x == e)
+                        exts.contains(&e)
                     }
                     None => false,
                 }
