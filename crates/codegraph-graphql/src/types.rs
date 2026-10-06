@@ -125,6 +125,12 @@ pub enum TypeKind {
 
 /// Loại diagram Mermaid cho resolver `mermaid(id, kind, depth)` — render biến
 /// thể hình ảnh của các query diagram (`flow` / `callers` / `callees` / `impact`).
+///
+/// - `FLOW`: logic của hàm — control-flow (nhánh if/else, vòng lặp, switch,
+///   return) với mỗi call ghi rõ callee, số dòng, guard condition và effect.
+/// - `CALLERS` / `CALLEES`: ai gọi hàm / hàm gọi ai (BFS `depth` hop).
+/// - `IMPACT`: callers transitive (bán kính ảnh hưởng khi sửa hàm).
+///
 /// Chỉ hoạt động khi server bật `--mermaid`.
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
 #[graphql(rename_items = "SCREAMING_SNAKE_CASE")]

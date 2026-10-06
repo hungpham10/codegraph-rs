@@ -123,7 +123,7 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_mermaid",
-            "Render a Mermaid diagram (flowchart / graph) for a symbol — the visual variant of the diagram queries. `kind`: 'flow' (control-flow chain), 'callers' (upstream, transitive), 'callees' (downstream), or 'impact' (transitive callers). `depth` limits BFS hops for callers/callees/impact (default 1; ignored for flow). Requires the server to start with --mermaid; otherwise the tool returns an error.",
+            "Render a Mermaid diagram (flowchart / graph) for a symbol — the visual variant of the diagram queries. `kind`: 'flow' (what the function does: control-flow with if/else branches, loops, switch, returns and each call annotated with callee, line, guard condition and effect), 'callers' (upstream, transitive), 'callees' (downstream, where it calls), or 'impact' (transitive callers). `depth` limits BFS hops for callers/callees/impact (default 1; ignored for flow). Requires the server to start with --mermaid; otherwise the tool returns an error.",
             json!({ "type": "object", "properties": {
                 "node": { "type": "integer", "description": "Symbol id to render." },
                 "kind": { "type": "string", "enum": ["flow", "callers", "callees", "impact"], "default": "flow" },
