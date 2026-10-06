@@ -4,7 +4,7 @@
 //! `WalkBuilder` thứ ba cùng cấu hình — trước đây chính sách ignore bị copy ở
 //! `extract/src/walker.rs`, `extract/src/config.rs` và đây.
 use camino::{Utf8Path, Utf8PathBuf};
-use codegraph_source::{DiskSource, SourceConfig, SourceEntry, SourceKind};
+use codegraph_source::{DiskSource, Source, SourceConfig, SourceEntry, SourceKind};
 
 /// Các magic bytes nhận diện binary: ELF, PE (MZ), Mach-O, fat Mach-O.
 const MAGICS: &[&[u8]] = &[
