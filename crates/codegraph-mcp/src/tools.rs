@@ -652,7 +652,9 @@ pub async fn dispatch_with_api(
             // `include_source` đọc qua `Source` trait (đường query), root lấy
             // từ session — không còn `std::fs` rải rác trong context builder.
             let src = codegraph_source::DiskSource::for_query(root.to_path_buf());
-            Ok(api.context_markdown(&req, Some(&src as &dyn codegraph_source::Source)).await?)
+            Ok(api
+                .context_markdown(&req, Some(&src as &dyn codegraph_source::Source))
+                .await?)
         }
         "codegraph_references" => {
             let q = arg_str(&args, "query")?;

@@ -6,7 +6,7 @@
 
 use codegraph_core::{Error, Result, Symbol, SymbolMatch};
 use codegraph_graph::{Pagination, SharedGraphIndex};
-use codegraph_source::{Source, entry_from_symbol_file, read_entry};
+use codegraph_source::{entry_from_symbol_file, read_entry, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -189,7 +189,9 @@ pub async fn build_response(
 /// là ra `SourceEntry` mà không cần thêm cột `source_id` vào schema persist.
 async fn load_source_lines(source: Option<&dyn Source>, file: &str) -> Result<Vec<String>> {
     let Some(src) = source else {
-        return Err(Error::Other("include_source=true nhưng không có Source".into()));
+        return Err(Error::Other(
+            "include_source=true nhưng không có Source".into(),
+        ));
     };
     let entry = entry_from_symbol_file(file, src.root()).ok_or_else(|| {
         Error::Other(format!(
@@ -295,7 +297,10 @@ mod tests {
     /// `sym` nhưng cho phép chỉ định `file` — cần cho test đường query vì
     /// `Symbol.file` phải là `<root>/<rel>` để tách entry được.
     fn sym_at(name: &str, id: u64, file: &str) -> codegraph_core::Symbol {
-        codegraph_core::Symbol { file: file.into(), ..sym(name, id) }
+        codegraph_core::Symbol {
+            file: file.into(),
+            ..sym(name, id)
+        }
     }
 
     /// `include_source` phải đọc **qua trait** và dựng lại được entry từ
@@ -305,7 +310,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         let abs = root.join("RestEndpoint.java");
-        std::fs::write(abs.as_std_path(), "class RestEndpoint {}\nvoid handle() {}\n").unwrap();
+        std::fs::write(
+            abs.as_std_path(),
+            "class RestEndpoint {}\nvoid handle() {}\n",
+        )
+        .unwrap();
 
         let db_str = format!("sqlite://{}", dir.path().join("t.db").to_string_lossy());
         {
@@ -330,8 +339,13 @@ mod tests {
             include_source: true,
             ..ContextRequest::default()
         };
-        let resp = build_response(&sgi, &req, Some(&src as &dyn Source)).await.unwrap();
-        assert_eq!(resp.hits[0].source.as_deref(), Some("class RestEndpoint {}"));
+        let resp = build_response(&sgi, &req, Some(&src as &dyn Source))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.hits[0].source.as_deref(),
+            Some("class RestEndpoint {}")
+        );
     }
 
     /// `Source` không có (CLI/HTTP không truyền) → `source` là None, **không**

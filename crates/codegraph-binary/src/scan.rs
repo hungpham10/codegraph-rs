@@ -21,7 +21,10 @@ const MAGICS: &[&[u8]] = &[
 /// `std::fs::read` — tức đọc và cấp phát **cả file** chỉ để so 4 byte, lãng phí
 /// hàng trăm MB trên binary lớn.
 pub fn find_binaries(root: &Utf8Path) -> Vec<Utf8PathBuf> {
-    let src = DiskSource::new(SourceConfig::for_kind(SourceKind::Binary, root.to_path_buf()));
+    let src = DiskSource::new(SourceConfig::for_kind(
+        SourceKind::Binary,
+        root.to_path_buf(),
+    ));
     find_binaries_in(&src)
 }
 

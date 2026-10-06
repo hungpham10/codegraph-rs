@@ -91,9 +91,7 @@ fn benchmark_context(c: &mut crit::Criterion) {
                 _ => assert!(response.hits.is_empty()),
             }
             group.bench_function(case, |b| {
-                b.iter(|| {
-                    black_box(rt.block_on(build(&shared, black_box(&req), None)).unwrap())
-                });
+                b.iter(|| black_box(rt.block_on(build(&shared, black_box(&req), None)).unwrap()));
             });
         }
         let req = ContextRequest {

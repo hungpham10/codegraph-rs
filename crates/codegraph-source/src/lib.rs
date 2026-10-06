@@ -33,7 +33,7 @@ use codegraph_core::{Error, Result};
 mod disk;
 mod registry;
 
-pub use disk::{DiskSource, disk_walker};
+pub use disk::{disk_walker, DiskSource};
 pub use registry::{SourceConfig, SourceKind, SourceRegistry};
 
 /// Một entry do Source liệt kê ra.
@@ -50,11 +50,17 @@ impl SourceEntry {
     /// Dựng entry chỉ từ path tương đối — dùng ở đường *query* khi đã có
     /// `Symbol.file` và tách được `root`.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
-        Self { path: path.into(), size: None }
+        Self {
+            path: path.into(),
+            size: None,
+        }
     }
 
     pub fn with_size(path: impl Into<Utf8PathBuf>, size: Option<u64>) -> Self {
-        Self { path: path.into(), size }
+        Self {
+            path: path.into(),
+            size,
+        }
     }
 
     /// Path tương đối dạng `&str` — `ParseResult.path` / `FileInfo.path` dùng
@@ -194,7 +200,10 @@ mod tests {
         let mut cfg = SourceConfig::for_kind(SourceKind::Document, root.clone());
         cfg.max_bytes = Some(1024);
         let src = DiskSource::new(cfg);
-        let err = src.read(&SourceEntry::new("big.txt"), None).await.unwrap_err();
+        let err = src
+            .read(&SourceEntry::new("big.txt"), None)
+            .await
+            .unwrap_err();
         assert!(
             format!("{err}").contains("vượt trần"),
             "phải báo vượt trần, không phải lỗi khác: {err}"
@@ -263,10 +272,7 @@ mod tests {
     #[tokio::test]
     async fn materialize_lỗi_khi_file_không_tồn_tại() {
         let d = tmp();
-        let src = DiskSource::new(SourceConfig::for_kind(
-            SourceKind::Binary,
-            root_of(&d),
-        ));
+        let src = DiskSource::new(SourceConfig::for_kind(SourceKind::Binary, root_of(&d)));
         assert!(src.materialize(&SourceEntry::new("nope")).await.is_err());
     }
 
@@ -283,7 +289,10 @@ mod tests {
     fn entry_from_symbol_file_trả_none_khi_ngoài_root() {
         let root = Utf8Path::new("/repo");
         assert!(entry_from_symbol_file("/elsewhere/x.rs", root).is_none());
-        assert!(entry_from_symbol_file("/repo", root).is_none(), "root trần không phải file");
+        assert!(
+            entry_from_symbol_file("/repo", root).is_none(),
+            "root trần không phải file"
+        );
     }
 
     // ── Registry ──────────────────────────────────────────────────────
@@ -313,7 +322,10 @@ mod tests {
             reg.source_for(SourceKind::Document).map(|s| s.kind()),
             Some(SourceKind::Document)
         );
-        assert!(reg.source_for(SourceKind::Binary).is_none(), "không có thì None");
+        assert!(
+            reg.source_for(SourceKind::Binary).is_none(),
+            "không có thì None"
+        );
         assert!(reg.by_name("docs").is_some());
         assert_eq!(reg.iter().count(), 2);
     }

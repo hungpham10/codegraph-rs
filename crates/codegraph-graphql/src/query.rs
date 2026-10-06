@@ -268,10 +268,15 @@ impl Query {
         let core_req: codegraph_context::ContextRequest = req.into();
         // Đường query đọc qua `Source` trait. HTTP/GraphQL không luôn có root
         // (session chưa bind) → `None` ⇒ hit vẫn trả về, `source` rỗng.
-        let src = state_root(ctx).await.map(codegraph_source::DiskSource::for_query);
-        api.context_markdown(&core_req, src.as_ref().map(|s| s as &dyn codegraph_source::Source))
+        let src = state_root(ctx)
             .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))
+            .map(codegraph_source::DiskSource::for_query);
+        api.context_markdown(
+            &core_req,
+            src.as_ref().map(|s| s as &dyn codegraph_source::Source),
+        )
+        .await
+        .map_err(|e| async_graphql::Error::new(e.to_string()))
     }
 
     // ── Class / scope / files ──
