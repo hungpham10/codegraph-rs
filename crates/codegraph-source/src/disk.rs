@@ -23,7 +23,10 @@ use codegraph_core::{Error, Result};
 use ignore::WalkBuilder;
 use std::io::Read as _;
 
-use crate::{Source, SourceConfig, SourceEntry, SourceKind};
+use crate::{
+    Source, SourceConfig, SourceEntry, SourceInfo, SourceKind, SourceListing, SourceMaterializer,
+    SourceReader, CONFIG_MAX_BYTES, CONFIG_REL_PATH,
+};
 
 /// Traversal policy dùng chung — **một nguồn sự thật duy nhất** cho cả 3 dịch
 /// vụ. Xuất ra `pub` để caller blocking (binary scanner) dùng chung thay vì tự
@@ -68,6 +71,19 @@ impl DiskSource {
     pub fn for_query(root: Utf8PathBuf) -> Self {
         let mut config = SourceConfig::for_kind(SourceKind::Code, root);
         config.max_bytes = None;
+        Self::new(config)
+    }
+
+    /// Source chỉ để đọc file **cấu hình** (`.codegraph/config.toml`).
+    ///
+    /// Khác `for_query` ở chỗ **có trần** ([`CONFIG_MAX_BYTES`]): config là
+    /// đường đọc tuỳ chọn lúc khởi tạo, không có lý do nuốt file vô hạn vào
+    /// RAM. Vượt trần → `Err`, và `read_config_blocking` chuyển thành
+    /// `Ok(None)` chỉ khi là `NotFound` — nên config quá lớn sẽ thành lỗi
+    /// thật thay vì âm thầm đọc thiếu rồi parse fail.
+    pub fn for_config(root: Utf8PathBuf) -> Self {
+        let mut config = SourceConfig::for_kind(SourceKind::Code, root);
+        config.max_bytes = Some(CONFIG_MAX_BYTES);
         Self::new(config)
     }
 
@@ -199,10 +215,23 @@ impl DiskSource {
             Err(Error::Invalid(format!("không phải file: {}", abs)))
         }
     }
+
+    /// Đọc [`CONFIG_REL_PATH`] (blocking). `Ok(None)` = không có file.
+    ///
+    /// **Không cần listing trước**: `.codegraph/` là thư mục hidden và thường
+    /// bị gitignore, nên `list()` không bao giờ trả về entry này — đó là lý do
+    /// đường đọc config phải đi bằng path tương đối + `read`, không dựa vào
+    /// discovery.
+    pub fn read_config_blocking(&self) -> Result<Option<Vec<u8>>> {
+        let entry = SourceEntry::new(CONFIG_REL_PATH);
+        match self.read_blocking(&entry, None) {
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            other => other.map(Some),
+        }
+    }
 }
 
-#[async_trait]
-impl Source for DiskSource {
+impl SourceInfo for DiskSource {
     fn kind(&self) -> SourceKind {
         self.config.kind
     }
@@ -214,16 +243,27 @@ impl Source for DiskSource {
     fn config(&self) -> &SourceConfig {
         &self.config
     }
+}
 
+#[async_trait]
+impl SourceListing for DiskSource {
     async fn list(&self) -> Result<Vec<SourceEntry>> {
         self.list_blocking()
     }
+}
 
+#[async_trait]
+impl SourceReader for DiskSource {
     async fn read(&self, entry: &SourceEntry, limit: Option<usize>) -> Result<Vec<u8>> {
         self.read_blocking(entry, limit)
     }
+}
 
+#[async_trait]
+impl SourceMaterializer for DiskSource {
     async fn materialize(&self, entry: &SourceEntry) -> Result<Utf8PathBuf> {
         self.materialize_blocking(entry)
     }
 }
+
+impl Source for DiskSource {}

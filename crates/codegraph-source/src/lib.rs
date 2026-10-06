@@ -25,6 +25,14 @@
 //! là ra là có ngay `SourceEntry`. Nếu `path` là absolute thì thông tin source
 //! bị mất vĩnh viễn và phải thêm cột `source_id` — nên quy ước này ràng buộc
 //! từ đầu.
+//!
+//! # Tách nhiều tầng, không một trait to
+//!
+//! `Source` chỉ là trait **gộp**: `SourceInfo` (nhận diện + policy) →
+//! `SourceListing` (discovery) / `SourceReader` (đọc bytes) /
+//! `SourceMaterializer` (file thật cho binary). Provider mới chỉ implement
+//! tầng nó cần, còn chỗ đã dùng `&dyn Source` thì không phải sửa. Cùng cách
+//! `Storage` trong `codegraph-graph` tách theo nhóm thao tác.
 
 use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -82,11 +90,9 @@ impl SourceEntry {
     }
 }
 
-/// Nguồn dữ liệu đầu vào. Provider từ xa (GitHub/GitLab/git) chỉ cần implement
-/// `list` + `read`; `materialize` có sẵn impl mặc định báo lỗi.
-#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
-#[async_trait]
-pub trait Source: Send + Sync {
+/// Nhận diện + cấu hình — tầng nền, mọi tầng đọc đều cần để biết mình phục vụ
+/// cái gì và policy ra sao.
+pub trait SourceInfo {
     /// Dịch vụ nguồn này phục vụ.
     fn kind(&self) -> SourceKind;
 
@@ -95,10 +101,20 @@ pub trait Source: Send + Sync {
 
     /// Cấu hình đã resolve (sau khi áp default + override).
     fn config(&self) -> &SourceConfig;
+}
 
+/// Tầng **discovery** — liệt kê ra entry để xử lý.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
+#[async_trait]
+pub trait SourceListing: SourceInfo {
     /// Liệt kê entry, đã áp filter theo `kind()`. Thứ tự không đảm bảo.
     async fn list(&self) -> Result<Vec<SourceEntry>>;
+}
 
+/// Tầng **đọc nội dung**.
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
+#[async_trait]
+pub trait SourceReader: SourceInfo {
     /// Đọc nội dung: tối đa `limit` byte đầu, `None` = đọc hết.
     ///
     /// Nếu vượt `config().max_bytes` thì trả `Err` **trước khi** đọc (stat
@@ -106,6 +122,31 @@ pub trait Source: Send + Sync {
     /// "file quá lớn → skip" ở tầng service, không nhét vào trait.
     async fn read(&self, entry: &SourceEntry, limit: Option<usize>) -> Result<Vec<u8>>;
 
+    /// Đọc file **có thể không tồn tại**: `Ok(None)` = không có file.
+    ///
+    /// Tách khỏi [`SourceReader::read`] vì config là đường đọc *tuỳ chọn* —
+    /// thiếu `.codegraph/config.toml` là chuyện bình thường. Nếu bắt caller tự
+    /// `match Err(_)` thì cùng một thói quen nuốt lỗi bị lặp ở mọi nơi.
+    ///
+    /// Chỉ `NotFound` mới thành `None`; lỗi I/O khác (permission, disk lỗi) vẫn
+    /// là `Err` để không giấu sự cố thật.
+    async fn read_optional(
+        &self,
+        entry: &SourceEntry,
+        limit: Option<usize>,
+    ) -> Result<Option<Vec<u8>>> {
+        match self.read(entry, limit).await {
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            other => other.map(Some),
+        }
+    }
+}
+
+/// Tầng **file thật trên đĩa** — chỉ binary mới cần (radare2 là tiến trình
+/// ngoài, tự mở file bằng path hệ thống nên không abstract hoá được sau `read`).
+#[allow(clippy::double_must_use)] // async_trait sinh `must_use` trùng (clippy 1.99)
+#[async_trait]
+pub trait SourceMaterializer: SourceInfo {
     /// Bảo đảm có file thật trên đĩa, trả path cục bộ để đưa cho công cụ ngoài
     /// (radare2). `DiskSource` trả chính path gốc — không tốn gì.
     ///
@@ -118,6 +159,24 @@ pub trait Source: Send + Sync {
         )))
     }
 }
+
+/// Trait gộp — phần lớn nơi chỉ cần cái này.
+///
+/// Tách 4 tầng ở trên (thay vì một trait 6 method) là để **giảm áp lực khi
+/// thêm provider**: provider tài liệu chỉ cần `SourceInfo + SourceListing +
+/// SourceReader`, không phải implement `materialize`. Cùng cách `Storage` tách
+/// `CategoryStorage` / `NodeMetaStorage` / … trong `codegraph-graph`.
+pub trait Source: SourceListing + SourceReader + SourceMaterializer + Send + Sync {}
+
+/// Đường dẫn **quy ước** của file config dự án, tương đối so với root.
+///
+/// Nằm ở đây vì cả `codegraph-extract` và `codegraph-sboxes` đều đọc đúng một
+/// file này — quy ước phải có một chỗ duy nhất, không phải hai chuỗi rời.
+pub const CONFIG_REL_PATH: &str = ".codegraph/config.toml";
+
+/// Trần đọc config (8 MiB) — lớn hơn mọi config hợp lý, nhỏ hơn nhiều so với
+/// RAM một tiến trình server. Trước đây `fs::read_to_string` không trần.
+pub const CONFIG_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Nối 1 entry với provider cụ thể — dùng ở đường *query* khi đã biết
 /// `SourceEntry` nhưng cần truy cập nó.
@@ -311,6 +370,52 @@ mod tests {
             entry_from_symbol_file("/repo", root).is_none(),
             "root trần không phải file"
         );
+    }
+
+    // ── Tầng config: đọc file optional ────────────────────────────────
+
+    #[test]
+    fn config_thiếu_thì_None_không_phải_lỗi() {
+        let d = tmp();
+        let src = DiskSource::for_config(root_of(&d));
+        assert_eq!(src.read_config_blocking().unwrap(), None);
+    }
+
+    #[test]
+    fn config_đọc_đúng_đường_dẫn_quy_ước_kể_cả_khi_hidden() {
+        let d = tmp();
+        let root = root_of(&d);
+        // `.codegraph/` bị `list()` bỏ qua (hidden + gitignore) nhưng config
+        // vẫn phải đọc được — đó là lý do đường này không qua discovery.
+        write(&root, CONFIG_REL_PATH, b"[sandbox]\nloop_cap = 3\n");
+        let src = DiskSource::for_config(root);
+        assert!(src.list_blocking().unwrap().is_empty(), "list phải bỏ qua");
+
+        let bytes = src.read_config_blocking().unwrap().expect("phải đọc được");
+        assert!(String::from_utf8(bytes).unwrap().contains("loop_cap = 3"));
+    }
+
+    #[tokio::test]
+    async fn read_optional_trả_Some_và_dispatch_được_thông_trait_object() {
+        let d = tmp();
+        let root = root_of(&d);
+        write(&root, "a.toml", b"k = v\n");
+        let src = DiskSource::for_config(root);
+        let dyn_src: &dyn Source = &src;
+
+        let got = dyn_src
+            .read_optional(&SourceEntry::new("a.toml"), None)
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some(&b"k = v\n"[..]));
+        // Method của `SourceInfo` cũng phải gọi được qua `dyn Source` — đường
+        // query (`context`) phụ thuộc đúng điều này.
+        assert_eq!(dyn_src.kind(), SourceKind::Code);
+        let missing = dyn_src
+            .read_optional(&SourceEntry::new("missing"), None)
+            .await
+            .unwrap();
+        assert_eq!(missing, None);
     }
 
     // ── Registry ──────────────────────────────────────────────────────

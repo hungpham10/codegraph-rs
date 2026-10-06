@@ -17,8 +17,8 @@
 use crate::runtime::BranchPolicy;
 use camino::{Utf8Path, Utf8PathBuf};
 use codegraph_core::EffectRule;
+use codegraph_source::DiskSource;
 use serde::Deserialize;
-use std::fs;
 
 /// Why config loading failed. Kept small — most callers can fall back to
 /// [`SboxConfig::default`] on error.
@@ -26,6 +26,10 @@ use std::fs;
 pub enum SboxConfigError {
     #[error("sandbox config io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("sandbox config source: {0}")]
+    Source(#[from] codegraph_core::Error),
+    #[error("sandbox config is not valid UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
     #[error("sandbox config parse: {0}")]
     Toml(#[from] toml::de::Error),
     #[error("sandbox config: unknown branch_policy `{0}` (expected if_true/if_false)")]
@@ -83,16 +87,19 @@ impl SboxConfig {
     /// Load `.codegraph/config.toml` under `root`. Missing file → default
     /// (with `root` still set so relative mock dirs resolve correctly).
     pub fn load(root: &Utf8Path) -> Result<Self, SboxConfigError> {
-        let mut cfg = Self::load_from(&root.join(".codegraph").join("config.toml"))?;
+        let mut cfg = Self::load_from(&DiskSource::for_config(root.to_path_buf()))?;
         cfg.root = root.to_path_buf();
         Ok(cfg)
     }
 
-    /// Load from an explicit path. Missing file → default.
-    pub fn load_from(path: &Utf8Path) -> Result<Self, SboxConfigError> {
-        let Ok(text) = fs::read_to_string(path.as_std_path()) else {
+    /// Load config qua Source layer (không còn `std::fs`). Missing file →
+    /// default; lỗi đọc/parse thật thì trả `Err` — khác `ExtractConfig` vốn
+    /// không có kênh lỗi nên phải rơi về default.
+    pub fn load_from(source: &DiskSource) -> Result<Self, SboxConfigError> {
+        let Some(bytes) = source.read_config_blocking()? else {
             return Ok(Self::default());
         };
+        let text = String::from_utf8(bytes)?;
         let cfg: ConfigFile = toml::from_str(&text)?;
         let policy = match cfg.sandbox.branch_policy.as_deref() {
             None => BranchPolicy::IfTrue,
@@ -118,41 +125,66 @@ impl SboxConfig {
 mod tests {
     use super::*;
 
+    /// Root tạm ở đúng hình dạng thật (`.codegraph/config.toml`) — config chỉ
+    /// đọc được ở đường dẫn quy ước nên không còn đường đọc để bypass.
+    struct CfgFixture {
+        dir: std::path::PathBuf,
+        source: DiskSource,
+    }
+
+    impl CfgFixture {
+        /// `None` = không có file config (kiểm tra "thiếu → default").
+        fn new(name: &str, body: Option<&str>) -> Self {
+            let dir = std::env::temp_dir().join(format!("codegraph-sboxes-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            let root = Utf8PathBuf::from_path_buf(dir.clone()).unwrap();
+            let cfg = root.join(codegraph_source::CONFIG_REL_PATH);
+            std::fs::create_dir_all(cfg.parent().unwrap().as_std_path()).unwrap();
+            if let Some(body) = body {
+                std::fs::write(cfg.as_std_path(), body).unwrap();
+            }
+            Self {
+                source: DiskSource::for_config(root),
+                dir,
+            }
+        }
+
+        fn load(&self) -> Result<SboxConfig, SboxConfigError> {
+            SboxConfig::load_from(&self.source)
+        }
+    }
+
     #[test]
     fn missing_file_is_default() {
-        let cfg = SboxConfig::load_from(Utf8Path::new("/nonexistent/x.toml")).unwrap();
+        let fx = CfgFixture::new("cfg-missing", None);
+        let cfg = fx.load().unwrap();
         assert_eq!(cfg.loop_cap, 10);
         assert_eq!(cfg.branch_policy, BranchPolicy::IfTrue);
+        let _ = std::fs::remove_dir_all(&fx.dir);
     }
 
     #[test]
     fn parse_sandbox_section() {
-        let dir = std::env::temp_dir().join("codegraph-sboxes-cfg-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg_path = dir.join("config.toml");
-        let path = Utf8Path::from_path(cfg_path.as_path()).unwrap();
-        std::fs::write(
-            path,
-            "[sandbox]\nmock_dirs = [\"mocks/a\", \"mocks/b\"]\nloop_cap = 3\nbranch_policy = \"if_false\"\n",
-        )
-        .unwrap();
-        let cfg = SboxConfig::load_from(path).unwrap();
+        let fx = CfgFixture::new(
+            "cfg-ok",
+            Some(
+                "[sandbox]\nmock_dirs = [\"mocks/a\", \"mocks/b\"]\nloop_cap = 3\nbranch_policy = \"if_false\"\n",
+            ),
+        );
+        let cfg = fx.load().unwrap();
         assert_eq!(cfg.mock_dirs, vec!["mocks/a", "mocks/b"]);
         assert_eq!(cfg.loop_cap, 3);
         assert_eq!(cfg.branch_policy, BranchPolicy::IfFalse);
-        let _ = std::fs::remove_file(path.as_std_path());
-        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir_all(&fx.dir);
     }
 
     #[test]
     fn unknown_policy_is_error() {
-        let dir = std::env::temp_dir().join("codegraph-sboxes-cfg-bad");
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg_path = dir.join("config.toml");
-        let path = Utf8Path::from_path(cfg_path.as_path()).unwrap();
-        std::fs::write(path, "[sandbox]\nbranch_policy = \"sometimes\"\n").unwrap();
-        assert!(SboxConfig::load_from(path).is_err());
-        let _ = std::fs::remove_file(path.as_std_path());
-        let _ = std::fs::remove_dir(&dir);
+        let fx = CfgFixture::new(
+            "cfg-bad",
+            Some("[sandbox]\nbranch_policy = \"sometimes\"\n"),
+        );
+        assert!(fx.load().is_err());
+        let _ = std::fs::remove_dir_all(&fx.dir);
     }
 }
