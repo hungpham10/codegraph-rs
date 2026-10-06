@@ -344,7 +344,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             resp.hits[0].source.as_deref(),
-            Some("class RestEndpoint {}")
+            Some("class RestEndpoint {}\nvoid handle() {}"),
+            "sym có line=1 end_line=2 → lấy cả 2 dòng"
         );
     }
 
