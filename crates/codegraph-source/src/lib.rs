@@ -44,6 +44,15 @@ pub struct SourceEntry {
     /// Kích thước byte nếu provider biết trước (`None` = không biết, ví dụ
     /// khi listing từ xa mà API không trả size).
     pub size: Option<u64>,
+    /// mtime (giây kể từ epoch) nếu provider biết trước. `None` = không biết
+    /// (provider từ xa có thể không trả mtime) — caller tự chịu trách nhiệm về
+    /// cache invalidation.
+    ///
+    /// Có sẵn **miễn phí**: `DiskSource::list_blocking` đã gọi `metadata` để lấy
+    /// `size` nên mtime là syscall đi chung. Nhờ vậy `cache_path` của binary
+    /// không phải tự gọi `fs::metadata` (I/O nằm ngoài trait), và 3 lần tra
+    /// cache cũng không còn 3 syscall mỗi lần.
+    pub mtime: Option<u64>,
 }
 
 impl SourceEntry {
@@ -53,13 +62,16 @@ impl SourceEntry {
         Self {
             path: path.into(),
             size: None,
+            mtime: None,
         }
     }
 
-    pub fn with_size(path: impl Into<Utf8PathBuf>, size: Option<u64>) -> Self {
+    /// Entry đầy đủ — dùng khi provider biết cả size và mtime (`DiskSource`).
+    pub fn with_stat(path: impl Into<Utf8PathBuf>, size: Option<u64>, mtime: Option<u64>) -> Self {
         Self {
             path: path.into(),
             size,
+            mtime,
         }
     }
 

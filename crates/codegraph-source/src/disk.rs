@@ -126,8 +126,17 @@ impl DiskSource {
                 continue;
             }
             // Stat lỗi (permission, symlink đứt) → bỏ qua, không fail cả list.
-            let size = std::fs::metadata(abs.as_std_path()).ok().map(|m| m.len());
-            out.push(SourceEntry::with_size(rel.to_path_buf(), size));
+            // Một syscall `metadata` lấy **cả** size và mtime — không phải hai.
+            let (size, mtime) = match std::fs::metadata(abs.as_std_path()) {
+                Ok(md) => (
+                    Some(md.len()),
+                    md.modified().ok().and_then(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+                    }),
+                ),
+                Err(_) => (None, None),
+            };
+            out.push(SourceEntry::with_stat(rel.to_path_buf(), size, mtime));
         }
         Ok(out)
     }

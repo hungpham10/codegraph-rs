@@ -24,6 +24,7 @@ pub mod scan;
 pub use crate::extract::extract_binary;
 use camino::Utf8Path;
 use codegraph_graph::ParseResult;
+use codegraph_source::{DiskSource, SourceConfig, SourceKind};
 use tracing::warn;
 
 /// Duyệt các file binary trong workspace, phân tích từng file → `ParseResult`.
@@ -41,12 +42,24 @@ pub fn collect_binaries(
         );
         return (Vec::new(), 0);
     }
-    let files = scan::find_binaries(root);
+    let src = DiskSource::new(SourceConfig::for_kind(SourceKind::Binary, root.to_path_buf()));
     let mut results = Vec::new();
     let mut skipped = 0u64;
-    for path in files {
-        if cache::is_cached(root, path.as_std_path(), cfg) {
-            if let Some(cached) = cache::load(&cache::cache_path(root, path.as_std_path())) {
+    for entry in scan::find_binaries_in(&src) {
+        // `r2` cần path hệ thống → materialize (disk: trả chính path gốc).
+        let path = match src.materialize_blocking(&entry) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("không materialize được {}: {e}", entry.path);
+                skipped += 1;
+                continue;
+            }
+        };
+        // Cache key tính **một lần** — trước đây `cache_path` gọi 2×
+        // `fs::metadata` và được gọi tới 3 lần cho mỗi binary.
+        let cache_p = cache::cache_path(root, path.as_std_path(), &entry);
+        if cache::is_cached(root, path.as_std_path(), &entry, cfg) {
+            if let Some(cached) = cache::load(&cache_p) {
                 results.push(cached);
                 continue;
             }
@@ -54,7 +67,7 @@ pub fn collect_binaries(
         match extract_binary(path.as_std_path(), cfg.depth, cfg.cfg_markers) {
             Ok(res) => {
                 if cfg.cache {
-                    let _ = cache::store(&cache::cache_path(root, path.as_std_path()), &res);
+                    let _ = cache::store(&cache_p, &res);
                 }
                 results.push(res);
             }
