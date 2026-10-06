@@ -161,6 +161,9 @@ mod tests {
         write(&root, "b.go", b"package main");
         write(&root, "notes.md", b"# hi");
         // .gitignore phải được tôn trọng (khớp hành vi `walk` cũ).
+        // `ignore` chỉ áp `.gitignore` bên trong git repo (`require_git` mặc
+        // định = true) — nên phải tạo `.git` trước.
+        std::fs::create_dir(root.join(".git").as_std_path()).unwrap();
         write(&root, ".gitignore", b"ignored.rs\n");
         write(&root, "ignored.rs", b"fn ignored() {}");
 
