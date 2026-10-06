@@ -1,4 +1,5 @@
 use camino::{Utf8Path, Utf8PathBuf};
+use codegraph_source::DiskSource;
 use serde::Deserialize;
 use std::fs;
 
@@ -658,23 +659,18 @@ pub const BINARY_CONFIG_NOTE: &str = r#"
 "#;
 
 /// Quick project scan: returns a hint when the tree is clearly C-only or C++-only.
-pub fn detect_project_header_hint(root: &Utf8Path) -> Option<HeaderLanguage> {
+///
+/// Dùng `Source::list` (traversal chung của crate `codegraph-source`) thay vì
+/// dựng `WalkBuilder` riêng — trước đây policy ignore bị copy y hệt ở 3 nơi.
+pub fn detect_project_header_hint(source: &DiskSource) -> Option<HeaderLanguage> {
     let mut c_files = 0u32;
     let mut cpp_files = 0u32;
 
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .parents(true)
-        .add_custom_ignore_filename(".codegraphignore")
-        .build();
-
-    for entry in walker.flatten() {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) else {
+    let Ok(entries) = source.list_blocking() else {
+        return None;
+    };
+    for entry in entries {
+        let Some(ext) = entry.path.extension() else {
             continue;
         };
         match ext {
