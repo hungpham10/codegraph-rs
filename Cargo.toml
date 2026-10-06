@@ -14,6 +14,7 @@ members = [
     "crates/codegraph-binary",
     "crates/codegraph",
     "crates/codegraph-docs",
+    "crates/codegraph-source",
 ]
 
 [workspace.package]

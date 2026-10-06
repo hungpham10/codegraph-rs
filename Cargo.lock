@@ -720,7 +720,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codegraph"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-api"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -752,6 +752,7 @@ dependencies = [
  "codegraph-extract",
  "codegraph-graph",
  "codegraph-sboxes",
+ "codegraph-source",
  "serde",
  "serde_json",
  "tempfile",
@@ -760,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-bench"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -779,13 +780,13 @@ dependencies = [
 
 [[package]]
 name = "codegraph-binary"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "camino",
  "codegraph-core",
  "codegraph-graph",
+ "codegraph-source",
  "cpp_demangle",
- "ignore",
  "r2pipe",
  "serde",
  "serde_json",
@@ -796,19 +797,22 @@ dependencies = [
 
 [[package]]
 name = "codegraph-context"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
+ "camino",
  "codegraph-core",
  "codegraph-graph",
+ "codegraph-source",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "codegraph-core"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "async-graphql",
  "camino",
@@ -819,11 +823,12 @@ dependencies = [
 
 [[package]]
 name = "codegraph-docs"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "codegraph-core",
  "codegraph-graph",
+ "codegraph-source",
  "hcl-rs",
  "serde",
  "serde_json",
@@ -836,16 +841,16 @@ dependencies = [
 
 [[package]]
 name = "codegraph-extract"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "camino",
  "codegraph-binary",
  "codegraph-core",
  "codegraph-docs",
  "codegraph-graph",
+ "codegraph-source",
  "getrandom 0.2.17",
  "glob",
- "ignore",
  "indicatif",
  "rayon",
  "rusqlite",
@@ -875,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graph"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "async-trait",
  "bincode",
@@ -905,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graphql"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "async-graphql",
@@ -917,6 +922,7 @@ dependencies = [
  "codegraph-core",
  "codegraph-docs",
  "codegraph-graph",
+ "codegraph-source",
  "serde",
  "serde_json",
  "tempfile",
@@ -928,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-installer"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -944,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-mcp"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -956,6 +962,7 @@ dependencies = [
  "codegraph-extract",
  "codegraph-graph",
  "codegraph-sboxes",
+ "codegraph-source",
  "rmcp",
  "serde",
  "serde_json",
@@ -966,8 +973,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegraph-source"
+version = "2.2.5"
+dependencies = [
+ "async-trait",
+ "camino",
+ "codegraph-core",
+ "glob",
+ "ignore",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "codegraph-sboxes"
-version = "2.2.3"
+version = "2.2.5"
 dependencies = [
  "camino",
  "codegraph-core",

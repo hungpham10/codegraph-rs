@@ -1,5 +1,5 @@
 [package]
-name = "codegraph-binary"
+name = "codegraph-source"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,15 +10,11 @@ warnings = "deny"
 
 [dependencies]
 codegraph-core = { path = "../codegraph-core" }
-codegraph-graph = { path = "../codegraph-graph" }
-codegraph-source = { path = "../codegraph-source" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-r2pipe = "0.8"
-tracing = { workspace = true }
+async-trait = { workspace = true }
 camino = { workspace = true }
-sha2 = "0.11"
-cpp_demangle = "0.5.1"
+ignore = { workspace = true }
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros"] }

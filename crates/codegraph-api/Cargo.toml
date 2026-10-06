@@ -10,6 +10,7 @@ codegraph-core     = { path = "../codegraph-core" }
 codegraph-graph    = { path = "../codegraph-graph", features = ["sqlite", "lmdb","redis","postgres","mysql", "bloom-search"] }
 codegraph-context  = { path = "../codegraph-context" }
 codegraph-extract  = { path = "../codegraph-extract" }
+codegraph-source   = { path = "../codegraph-source" }
 codegraph-sboxes   = { path = "../codegraph-sboxes" }
 camino = { workspace = true }
 serde = { workspace = true }

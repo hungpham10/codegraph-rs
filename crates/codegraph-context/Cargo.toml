@@ -8,10 +8,13 @@ repository.workspace = true
 [dependencies]
 codegraph-core  = { path = "../codegraph-core" }
 codegraph-graph = { path = "../codegraph-graph" }
+codegraph-source = { path = "../codegraph-source" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = "3"
+camino = { workspace = true }
 codegraph-graph = { path = "../codegraph-graph", features = ["sqlite"] }

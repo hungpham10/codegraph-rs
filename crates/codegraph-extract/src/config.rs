@@ -1,4 +1,5 @@
 use camino::{Utf8Path, Utf8PathBuf};
+use codegraph_source::DiskSource;
 use serde::Deserialize;
 use std::fs;
 
@@ -251,12 +252,23 @@ pub type DocFiles = (codegraph_docs::DocConfig, Vec<DocFile>);
 
 impl ExtractConfig {
     pub fn load(root: &Utf8Path) -> Self {
-        let path = root.join(".codegraph").join("config.toml");
-        Self::load_from(&path)
+        Self::load_from(&DiskSource::for_config(root.to_path_buf()))
     }
 
-    pub fn load_from(path: &Utf8Path) -> Self {
-        let Ok(text) = fs::read_to_string(path.as_std_path()) else {
+    /// Đọc `.codegraph/config.toml` qua Source layer (không còn `std::fs`).
+    ///
+    /// Nhận `&DiskSource` (cụ thể) vì đây là đường **sync**: `load` được gọi từ
+    /// cả CLI lẫn rayon, mà `block_on` bên trong một tokio runtime đang chạy
+    /// sẽ panic. Provider từ xa sẽ thêm biến thể `&dyn Source` ở đợt provider —
+    /// lúc đó chỉ thêm hàm, không phải sửa lại call site nào ở đây.
+    ///
+    /// Mọi thất bại (thiếu file, không phải UTF-8, TOML hỏng) → `default`,
+    /// đúng như hành vi `fs::read_to_string` + `toml::from_str` trước đây.
+    pub fn load_from(source: &DiskSource) -> Self {
+        let Ok(Some(bytes)) = source.read_config_blocking() else {
+            return Self::default();
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
             return Self::default();
         };
         let Ok(file) = toml::from_str::<ConfigFile>(&text) else {
@@ -361,7 +373,9 @@ impl ExtractConfig {
             let _ = getrandom::getrandom(&mut buf);
             u64::from_le_bytes(buf)
         };
-        let path = root.join(".codegraph").join("config.toml");
+        // Đường dẫn dùng chung const với lần **đọc** — cùng một quy ước, một
+        // chỗ. (Phần đọc/ghi ở đây vẫn gọi `fs` trực tiếp: đây là chiều *ghi*.)
+        let path = root.join(codegraph_source::CONFIG_REL_PATH);
         if let Ok(text) = fs::read_to_string(path.as_std_path()) {
             let inserted = if let Some(idx) = text.find("[storage]") {
                 let header = "[storage]";
@@ -658,23 +672,18 @@ pub const BINARY_CONFIG_NOTE: &str = r#"
 "#;
 
 /// Quick project scan: returns a hint when the tree is clearly C-only or C++-only.
-pub fn detect_project_header_hint(root: &Utf8Path) -> Option<HeaderLanguage> {
+///
+/// Dùng `Source::list` (traversal chung của crate `codegraph-source`) thay vì
+/// dựng `WalkBuilder` riêng — trước đây policy ignore bị copy y hệt ở 3 nơi.
+pub fn detect_project_header_hint(source: &DiskSource) -> Option<HeaderLanguage> {
     let mut c_files = 0u32;
     let mut cpp_files = 0u32;
 
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .parents(true)
-        .add_custom_ignore_filename(".codegraphignore")
-        .build();
-
-    for entry in walker.flatten() {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) else {
+    let Ok(entries) = source.list_blocking() else {
+        return None;
+    };
+    for entry in entries {
+        let Some(ext) = entry.path.extension() else {
             continue;
         };
         match ext {
@@ -719,6 +728,53 @@ pub fn is_cpp_header(source: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Root tạm **có sẵn** `.codegraph/config.toml`.
+    ///
+    /// Trước đây test gọi `load_from(path)` với một path tuỳ ý; giờ config chỉ
+    /// đọc được ở đường dẫn quy ước nên fixture dựng đúng hình dạng thật —
+    /// không còn đường đọc config nào để bypass.
+    struct CfgFixture {
+        _dir: tempfile::TempDir,
+        root: Utf8PathBuf,
+        source: DiskSource,
+    }
+
+    impl CfgFixture {
+        fn with_config(body: &str) -> Self {
+            let this = Self::without_config();
+            this.rewrite(body);
+            this
+        }
+
+        /// Chỉ có thư mục `.codegraph/`, **không** có file — dùng để kiểm tra
+        /// "thiếu config → default".
+        fn without_config() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+            let cfg = root.join(codegraph_source::CONFIG_REL_PATH);
+            std::fs::create_dir_all(cfg.parent().unwrap().as_std_path()).unwrap();
+            Self {
+                source: DiskSource::for_config(root.clone()),
+                root,
+                _dir: dir,
+            }
+        }
+
+        /// Ghi đè nội dung config để test đổi kịch bản mà không dựng lại root.
+        fn rewrite(&self, body: &str) {
+            let p = self.root.join(codegraph_source::CONFIG_REL_PATH);
+            std::fs::write(p.as_std_path(), body).unwrap();
+        }
+
+        fn root(&self) -> &Utf8Path {
+            &self.root
+        }
+
+        fn load(&self) -> ExtractConfig {
+            ExtractConfig::load_from(&self.source)
+        }
+    }
+
     #[test]
     fn parse_config_headers() {
         let cfg = toml::from_str::<ConfigFile>(
@@ -759,15 +815,7 @@ headers = "cpp"
     /// override; không khai báo `paths` → `doc_config` trả `None`.
     #[test]
     fn docgraph_parse_and_glob() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join("a.tf"), "resource {}\n").unwrap();
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("sub").join("b.yaml"), "k: v\n").unwrap();
-        let cfg_path = root.join("config.toml");
-        let cfg_path = Utf8Path::from_path(&cfg_path).unwrap();
-        std::fs::write(
-            cfg_path.as_std_path(),
+        let fx = CfgFixture::with_config(
             r#"
 [docgraph]
 paths = ["*.tf", "sub/*.yaml", "nothing/:hcl"]
@@ -776,11 +824,13 @@ paths = ["*.tf", "sub/*.yaml", "nothing/:hcl"]
 type = "sqlite"
 dsn = "sqlite:///tmp/docs-test.db"
 "#,
-        )
-        .unwrap();
-        let root = Utf8Path::from_path(root).unwrap();
-        let cfg = ExtractConfig::load_from(cfg_path);
-        let (doc_cfg, files) = cfg.doc_config(root).expect("docgraph enabled");
+        );
+        let root = fx.root();
+        std::fs::write(root.join("a.tf"), "resource {}\n").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("b.yaml"), "k: v\n").unwrap();
+
+        let (doc_cfg, files) = fx.load().doc_config(root).expect("docgraph enabled");
         // Glob khớp đúng 2 file (pattern "nothing/" không có match); format
         // override ":hcl" không nhầm với phần mở rộng thường.
         assert_eq!(files.len(), 2);
@@ -790,26 +840,19 @@ dsn = "sqlite:///tmp/docs-test.db"
         assert_eq!(storage.dsn.as_deref(), Some("sqlite:///tmp/docs-test.db"));
 
         // Không `paths` → không ingest.
-        std::fs::write(cfg_path.as_std_path(), "[docgraph]\nenabled = true\n").unwrap();
-        let cfg = ExtractConfig::load_from(cfg_path);
-        assert!(cfg.doc_config(root).is_none());
+        fx.rewrite("[docgraph]\nenabled = true\n");
+        assert!(fx.load().doc_config(root).is_none());
 
         // Không `[docgraph]` → dsn mặc định vẫn có (docs.sqlite cho sqlite).
-        std::fs::write(cfg_path.as_std_path(), "").unwrap();
-        let cfg = ExtractConfig::load_from(cfg_path);
-        let dsn = cfg.doc_storage_dsn(root).unwrap();
+        fx.rewrite("");
+        let dsn = fx.load().doc_storage_dsn(root).unwrap();
         assert!(dsn.ends_with("docs.sqlite"), "got {dsn}");
     }
 
     /// `doc_storage_dsn` override bằng `[docgraph.storage] dsn` thắng kind.
     #[test]
     fn doc_storage_dsn_override() {
-        let dir = std::env::temp_dir().join("codegraph-extract-docdsn-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let path = Utf8Path::from_path(path.as_path()).unwrap();
-        std::fs::write(
-            path.as_std_path(),
+        let fx = CfgFixture::with_config(
             r#"
 [storage]
 type = "lmdb"
@@ -817,89 +860,65 @@ type = "lmdb"
 [docgraph.storage]
 dsn = "sqlite:///tmp/custom-docs.db"
 "#,
-        )
-        .unwrap();
-        let cfg = ExtractConfig::load_from(path);
+        );
+        let cfg = fx.load();
         assert_eq!(
             cfg.doc_storage_dsn(Utf8Path::new("/repo")).unwrap(),
             "sqlite:///tmp/custom-docs.db"
         );
 
         // Không override → theo kind của [storage] (lmdb → docs.lmdb).
-        std::fs::write(path.as_std_path(), "[storage]\ntype = \"lmdb\"\n").unwrap();
-        let cfg = ExtractConfig::load_from(path);
+        fx.rewrite("[storage]\ntype = \"lmdb\"\n");
+        let cfg = fx.load();
         let dsn = cfg.doc_storage_dsn(Utf8Path::new("/repo")).unwrap();
         assert!(
             dsn.starts_with("lmdb://") && dsn.ends_with("docs.lmdb"),
             "got {dsn}"
         );
-
-        let _ = std::fs::remove_file(path.as_std_path());
-        let _ = std::fs::remove_dir(&dir);
     }
 
     /// `storage_dsn` dựng DSN theo kind; `dsn` override thắng.
     #[test]
     fn storage_dsn_built_or_overridden() {
-        let dir = std::env::temp_dir().join("codegraph-extract-dsn-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let path = Utf8Path::from_path(path.as_path()).unwrap();
-
-        std::fs::write(
-            path.as_std_path(),
+        let fx = CfgFixture::with_config(
             r#"
 [storage]
 type = "lmdb"
 "#,
-        )
-        .unwrap();
-        let cfg = ExtractConfig::load_from(path);
+        );
+        let cfg = fx.load();
         let dsn = cfg.storage_dsn(Utf8Path::new("/repo")).unwrap();
         assert!(dsn.starts_with("lmdb://"), "got {dsn}");
         assert!(dsn.contains("/repo/.codegraph/db.lmdb"), "got {dsn}");
 
         // override dsn thắng kind.
-        std::fs::write(
-            path.as_std_path(),
+        fx.rewrite(
             r#"
 [storage]
 type = "lmdb"
 dsn = "sqlite:///tmp/custom.db"
 "#,
-        )
-        .unwrap();
-        let cfg = ExtractConfig::load_from(path);
+        );
+        let cfg = fx.load();
         assert_eq!(
             cfg.storage_dsn(Utf8Path::new("/repo")).unwrap(),
             "sqlite:///tmp/custom.db"
         );
 
         // memory → None (in-memory).
-        std::fs::write(
-            path.as_std_path(),
+        fx.rewrite(
             r#"
 [storage]
 type = "memory"
 "#,
-        )
-        .unwrap();
-        let cfg = ExtractConfig::load_from(path);
-        assert!(cfg.storage_dsn(Utf8Path::new("/repo")).is_none());
-
-        let _ = std::fs::remove_file(path.as_std_path());
-        let _ = std::fs::remove_dir(&dir);
+        );
+        assert!(fx.load().storage_dsn(Utf8Path::new("/repo")).is_none());
     }
 
     /// Parse từ file tạm với `[[effect_rules]]` → classifier áp dụng được.
     #[test]
     fn load_from_file_applies_effect_rules() {
-        let dir = std::env::temp_dir().join("codegraph-extract-cfg-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let path = Utf8Path::from_path(path.as_path()).unwrap();
-        std::fs::write(
-            path.as_std_path(),
+        let fx = CfgFixture::with_config(
             r#"
 [languages]
 headers = "cpp"
@@ -916,10 +935,9 @@ effect = "event_emit"
 call = { contains = "legacy-" }
 effect = "not_a_real_effect"
 "#,
-        )
-        .unwrap();
+        );
 
-        let cfg = ExtractConfig::load_from(path);
+        let cfg = fx.load();
         assert_eq!(cfg.header_language, HeaderLanguage::Cpp);
         // Rule config xét trước default: "db.Exec" → SqlQuery (không phải
         // SqlWrite như default ".Exec").
@@ -935,8 +953,14 @@ effect = "not_a_real_effect"
             cfg.effect_classifier.classify("legacy-writer").0,
             codegraph_core::EffectType::None
         );
+    }
 
-        let _ = std::fs::remove_file(path.as_std_path());
-        let _ = std::fs::remove_dir(&dir);
+    /// Thiếu file config → `default`, không phải lỗi.
+    #[test]
+    fn config_thiếu_trả_default() {
+        let fx = CfgFixture::without_config();
+        let cfg = fx.load();
+        assert_eq!(cfg.header_language, HeaderLanguage::Auto);
+        assert_eq!(cfg.storage.kind, StorageKind::default());
     }
 }

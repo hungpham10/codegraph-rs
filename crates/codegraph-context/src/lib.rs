@@ -4,8 +4,9 @@
 //! còn `Db`/`Traversal` cũ — query surface mới của `GraphIndex`:
 //! `search_symbol` → `callers`/`callees` (BFS trên chain engine).
 
-use codegraph_core::{Result, Symbol, SymbolMatch};
+use codegraph_core::{Error, Result, Symbol, SymbolMatch};
 use codegraph_graph::{Pagination, SharedGraphIndex};
+use codegraph_source::{entry_from_symbol_file, read_entry, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -60,8 +61,12 @@ pub struct ContextResponse {
 }
 
 /// Build context markdown/json trên shared index (snapshot fresh).
-pub async fn build(index: &Arc<SharedGraphIndex>, req: &ContextRequest) -> Result<String> {
-    let response = build_response(index, req).await?;
+pub async fn build(
+    index: &Arc<SharedGraphIndex>,
+    req: &ContextRequest,
+    source: Option<&dyn Source>,
+) -> Result<String> {
+    let response = build_response(index, req, source).await?;
     match req.format {
         Format::Json => Ok(serde_json::to_string_pretty(&response).unwrap_or_default()),
         Format::Markdown => Ok(render_markdown(&response, req.strip_prefix.as_deref())),
@@ -71,6 +76,7 @@ pub async fn build(index: &Arc<SharedGraphIndex>, req: &ContextRequest) -> Resul
 pub async fn build_response(
     index: &Arc<SharedGraphIndex>,
     req: &ContextRequest,
+    source: Option<&dyn Source>,
 ) -> Result<ContextResponse> {
     let idx = index.ensure_fresh().await;
     // Try symbol-name search first, then fallback to file-path search.
@@ -119,13 +125,30 @@ pub async fn build_response(
             .page;
     }
 
-    // Pre-load mỗi file một lần khi cần source.
+    // Pre-load mỗi file một lần khi cần source. Đọc qua `Source` trait để
+    // đường query không còn đọc `std::fs` trực tiếp — cùng abstraction với
+    // đường ingest, nên đổi provider (disk → git/remote) là một chỗ.
     let file_cache: HashMap<String, Vec<String>> = if req.include_source {
         let mut cache = HashMap::new();
         for s in &candidates {
-            if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(s.file.clone()) {
-                if let Ok(text) = std::fs::read_to_string(&s.file) {
-                    e.insert(text.lines().map(str::to_owned).collect());
+            // Đọc **trước**, xong mới insert — `cache.entry(..)` giữ borrow `&mut`
+            // không qua được `.await`.
+            if cache.contains_key(&s.file) {
+                continue;
+            }
+            match load_source_lines(source, &s.file).await {
+                Ok(lines) => {
+                    cache.insert(s.file.clone(), lines);
+                }
+                Err(err) => {
+                    // Trước đây lỗi ở đây bị `if let Ok` **nuốt im lặng**: file
+                    // không đọc được → `source` trả None mà không ai biết vì
+                    // sao. Giờ log để debug được.
+                    tracing::warn!(
+                        file = %s.file,
+                        error = %err,
+                        "include_source: bỏ qua file không đọc được"
+                    );
                 }
             }
         }
@@ -158,6 +181,30 @@ pub async fn build_response(
         query: req.query.clone(),
         hits,
     })
+}
+
+/// Đọc nội dung 1 file qua `Source`, trả về dạng dòng.
+///
+/// `Symbol.file` lưu dạng `<root>/<rel>` — nhờ quy ước đó, tách `source.root()`
+/// là ra `SourceEntry` mà không cần thêm cột `source_id` vào schema persist.
+async fn load_source_lines(source: Option<&dyn Source>, file: &str) -> Result<Vec<String>> {
+    let Some(src) = source else {
+        return Err(Error::Other(
+            "include_source=true nhưng không có Source".into(),
+        ));
+    };
+    let entry = entry_from_symbol_file(file, src.root()).ok_or_else(|| {
+        Error::Other(format!(
+            "file `{file}` nằm ngoài root `{}` — index tạo từ nguồn khác?",
+            src.root()
+        ))
+    })?;
+    let bytes = read_entry(src, &entry, None).await?;
+    // Provider từ xa có thể trả bytes thô (không phải source code) — báo lỗi
+    // tường minh thay vì nuốt.
+    let text = String::from_utf8(bytes)
+        .map_err(|e| Error::Other(format!("`{file}` không phải UTF-8: {e}")))?;
+    Ok(text.lines().map(str::to_owned).collect())
 }
 
 /// Strip `root/` prefix khỏi path (boundary-aware) — `None` giữ nguyên.
@@ -247,6 +294,92 @@ mod tests {
         }
     }
 
+    /// `sym` nhưng cho phép chỉ định `file` — cần cho test đường query vì
+    /// `Symbol.file` phải là `<root>/<rel>` để tách entry được.
+    fn sym_at(name: &str, id: u64, file: &str) -> codegraph_core::Symbol {
+        codegraph_core::Symbol {
+            file: file.into(),
+            ..sym(name, id)
+        }
+    }
+
+    /// `include_source` phải đọc **qua trait** và dựng lại được entry từ
+    /// `Symbol.file` (`<root>/<rel>`) — không cần cột `source_id`.
+    #[tokio::test]
+    async fn include_source_đọc_qua_source_trait() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let abs = root.join("RestEndpoint.java");
+        std::fs::write(
+            abs.as_std_path(),
+            "class RestEndpoint {}\nvoid handle() {}\n",
+        )
+        .unwrap();
+
+        let db_str = format!("sqlite://{}", dir.path().join("t.db").to_string_lossy());
+        {
+            let mut idx = codegraph_graph::GraphIndex::open(&db_str).await.unwrap();
+            let r = codegraph_graph::ParseResult {
+                path: abs.as_str().to_string(),
+                language: "java".into(),
+                bytes: 0,
+                lines: 2,
+                symbols: vec![sym_at("RestEndpoint", 100, abs.as_str())],
+                chains: std::collections::HashMap::new(),
+                calls: vec![],
+            };
+            idx.ingest(&[r]).await.unwrap();
+        }
+        let sgi: Arc<SharedGraphIndex> =
+            Arc::new(SharedGraphIndex::open(Some(db_str)).await.unwrap());
+
+        let src = codegraph_source::DiskSource::for_query(root);
+        let req = ContextRequest {
+            query: "RestEndpoint".into(),
+            include_source: true,
+            ..ContextRequest::default()
+        };
+        let resp = build_response(&sgi, &req, Some(&src as &dyn Source))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.hits[0].source.as_deref(),
+            Some("class RestEndpoint {}\nvoid handle() {}"),
+            "sym có line=1 end_line=2 → lấy cả 2 dòng"
+        );
+    }
+
+    /// `Source` không có (CLI/HTTP không truyền) → `source` là None, **không**
+    /// panic — và không được âm thầm đọc `std::fs`.
+    #[tokio::test]
+    async fn include_source_không_có_source_thì_trả_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_str = format!("sqlite://{}", dir.path().join("t.db").to_string_lossy());
+        {
+            let mut idx = codegraph_graph::GraphIndex::open(&db_str).await.unwrap();
+            let r = codegraph_graph::ParseResult {
+                path: "RestEndpoint.java".into(),
+                language: "java".into(),
+                bytes: 0,
+                lines: 1,
+                symbols: vec![sym("RestEndpoint", 100)],
+                chains: std::collections::HashMap::new(),
+                calls: vec![],
+            };
+            idx.ingest(&[r]).await.unwrap();
+        }
+        let sgi: Arc<SharedGraphIndex> =
+            Arc::new(SharedGraphIndex::open(Some(db_str)).await.unwrap());
+
+        let req = ContextRequest {
+            query: "RestEndpoint".into(),
+            include_source: true,
+            ..ContextRequest::default()
+        };
+        let resp = build_response(&sgi, &req, None).await.unwrap();
+        assert!(resp.hits[0].source.is_none());
+    }
+
     #[tokio::test]
     async fn context_fallback_matches_filename() {
         // Tạo index với symbol "RestEndpoint" trong file "RestEndpoint.java" dùng sqlite temp.
@@ -280,7 +413,7 @@ mod tests {
             strip_prefix: None,
         };
         let sgi_arc: Arc<SharedGraphIndex> = Arc::new(sgi);
-        let resp = build_response(&sgi_arc, &req).await.unwrap();
+        let resp = build_response(&sgi_arc, &req, None).await.unwrap();
         assert!(!resp.hits.is_empty(), "phải match qua fallback filename");
         assert_eq!(resp.hits[0].symbol.name, "RestEndpoint");
 
@@ -289,7 +422,7 @@ mod tests {
             query: "RestEndpoint".into(),
             ..req
         };
-        let resp2 = build_response(&sgi_arc, &req2).await.unwrap();
+        let resp2 = build_response(&sgi_arc, &req2, None).await.unwrap();
         assert!(!resp2.hits.is_empty());
         assert_eq!(resp2.hits[0].symbol.name, "RestEndpoint");
     }

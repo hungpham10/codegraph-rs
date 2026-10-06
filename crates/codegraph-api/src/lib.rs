@@ -720,8 +720,14 @@ impl GraphApi {
         })
     }
 
-    pub async fn context_markdown(&self, req: &ContextRequest) -> Result<String> {
-        codegraph_context::build(&self.shared_index, req).await
+    /// Dựng context markdown/json. `source` là nguồn đọc cho
+    /// `include_source` — `None` thì hit vẫn trả về, `source` rỗng.
+    pub async fn context_markdown(
+        &self,
+        req: &ContextRequest,
+        source: Option<&dyn codegraph_source::Source>,
+    ) -> Result<String> {
+        codegraph_context::build(&self.shared_index, req, source).await
     }
 
     /// Files trong graph (filter theo prefix đường dẫn).
