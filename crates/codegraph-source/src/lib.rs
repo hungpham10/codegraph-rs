@@ -375,7 +375,7 @@ mod tests {
     // ── Tầng config: đọc file optional ────────────────────────────────
 
     #[test]
-    fn config_thiếu_thì_None_không_phải_lỗi() {
+    fn config_thiếu_thì_trả_none_không_phải_lỗi() {
         let d = tmp();
         let src = DiskSource::for_config(root_of(&d));
         assert_eq!(src.read_config_blocking().unwrap(), None);
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_optional_trả_Some_và_dispatch_được_thông_trait_object() {
+    async fn read_optional_trả_some_và_dispatch_được_thông_trait_object() {
         let d = tmp();
         let root = root_of(&d);
         write(&root, "a.toml", b"k = v\n");
