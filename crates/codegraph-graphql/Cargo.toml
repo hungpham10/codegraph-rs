@@ -11,7 +11,9 @@ codegraph-core    = { path = "../codegraph-core", features = ["graphql"] }
 codegraph-context = { path = "../codegraph-context" }
 codegraph-graph   = { path = "../codegraph-graph", features = ["sqlite"] }
 codegraph-docs   = { path = "../codegraph-docs" }
+codegraph-extract = { path = "../codegraph-extract" }
 codegraph-source = { path = "../codegraph-source" }
+codegraph-web    = { path = "../codegraph-web" }
 
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }

@@ -9,6 +9,7 @@ use codegraph_core::{
     SemgraphStats, Symbol, SymbolKind, SymbolMatch,
 };
 use codegraph_docs::tokenize::DocToken;
+use codegraph_source::GitRepo;
 use std::sync::Arc;
 
 use crate::types::*;
@@ -20,17 +21,34 @@ fn parse_id(id: &ID) -> GqlResult<u64> {
         .map_err(|_| async_graphql::Error::new(format!("invalid id: {id:?}")))
 }
 
-/// Build một `GraphApi` trên snapshot index mới nhất của session hiện tại.
-async fn api_for(ctx: &Context<'_>) -> GqlResult<GraphApi> {
+/// Session đã bind root + index đã refresh xong.
+///
+/// `GraphIndex::rebuild` mất hàng chục giây với repo lớn. Server warm index
+/// ố task nến lúc khởi động, nên Ồ đây ta **không chờ** rebuild
+/// mà trả lỗi rõ ràng — request treo chờ rebuild làm UI trông như treo máy.
+pub(crate) async fn fresh_index(
+    ctx: &Context<'_>,
+) -> GqlResult<Arc<codegraph_graph::SharedGraphIndex>> {
     let state = ctx.data::<Arc<AppState>>()?;
     let sgi = state
         .session
         .ensure_ready()
         .await
         .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+    if sgi.fresh_snapshot().await.is_none() {
+        return Err(async_graphql::Error::new(
+            "index chưa refresh xong (đang rebuild từ storage) — thử lại sau vài giây",
+        ));
+    }
+    Ok(sgi)
+}
+
+/// Build một `GraphApi` trên snapshot index mới nhất của session hiện tại.
+async fn api_for(ctx: &Context<'_>) -> GqlResult<GraphApi> {
+    let sgi = fresh_index(ctx).await?;
     Ok(GraphApi::new_with_sessions(
         sgi,
-        state.search_sessions.clone(),
+        ctx.data::<Arc<AppState>>()?.search_sessions.clone(),
     ))
 }
 
@@ -293,7 +311,22 @@ impl Query {
 
     /// Thông số index (symbols/chains/edges/files/next_id) — health check.
     async fn status(&self, ctx: &Context<'_>) -> GqlResult<SemgraphStats> {
-        Ok(api_for(ctx).await?.stats_cached().await)
+        let state = ctx.data::<Arc<AppState>>()?;
+        let sgi = state
+            .session
+            .ensure_ready()
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        // Đọc counts từ `sg_stats` trên đĩa (O(1)) — không cần index in-memory,
+        // nên vẫn trả lỗi đẵ server cóng đang rebuild. UI poll query này
+        // để biết khi náo warm xong.
+        Ok(sgi.stats_cached().await.unwrap_or(SemgraphStats {
+            symbols: 0,
+            chains: 0,
+            edges: 0,
+            files: 0,
+            next_id: 0,
+        }))
     }
 
     /// Class info: symbol + fields + methods.
@@ -318,6 +351,24 @@ impl Query {
             TypeKind::Enum => SymbolKind::Enum,
         };
         let (items, total) = api_for(ctx).await?.list_by_kind(sk, limit, offset).await;
+        let has_more = (offset as usize + items.len()) < total;
+        Ok(ListResult {
+            items,
+            total: total as u64,
+            has_more,
+        })
+    }
+
+    /// Liệt kê symbol theo kind (mọi SymbolKind), phân trang. Dùng cho Browse.
+    async fn graphcode_list_symbols(
+        &self,
+        ctx: &Context<'_>,
+        kind: SymbolKind,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> GqlResult<ListResult> {
+        let (limit, offset) = paging(limit, offset);
+        let (items, total) = api_for(ctx).await?.list_by_kind(kind, limit, offset).await;
         let has_more = (offset as usize + items.len()) < total;
         Ok(ListResult {
             items,
@@ -364,55 +415,160 @@ impl Query {
         Ok(api_for(ctx).await?.dependencies().await)
     }
 
+    /// Liệt kê branch local của workspace (cho branch compare trong Review).
+    async fn git_branches(&self, ctx: &Context<'_>) -> GqlResult<Vec<String>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let root = state
+            .session
+            .root()
+            .await
+            .ok_or_else(|| async_graphql::Error::new("session root unavailable"))?;
+        let git = codegraph_source::DiskGit::new(root);
+        // Không phải repo (hoặc lỗi) → trả rỗng thay vì lỗi cứng.
+        Ok(git.branches().await.unwrap_or_default())
+    }
+
     // ── Document queries ──
 
-    /// List all documents in the document graph.
-    async fn graphdoc_list(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocStatsView>> {
+    /// Module UI đang bật (từ config server) — sidebar lọc theo danh sách này.
+    async fn ui_config(&self, ctx: &Context<'_>) -> GqlResult<Vec<String>> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let stats = state
-            .doc_graph
-            .read()
-            .await
+        Ok(state.ui_modules.clone())
+    }
+
+    /// Thống kê document graph (số doc + node).
+    async fn graphdoc_stats(&self, ctx: &Context<'_>) -> GqlResult<DocStatsView> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let graph = state.doc_graph.graph().await;
+        let graph = graph.read().await;
+        let stats = graph
             .stats()
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        Ok(vec![DocStatsView {
+        Ok(DocStatsView {
             docs: stats.docs,
             nodes: stats.nodes,
-        }])
+        })
     }
 
-    /// Search document nodes by pattern string.
+    /// Liệt kê mọi document (path, format, số node).
+    async fn graphdoc_list(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocInfoView>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let graph = state.doc_graph.graph().await;
+        let graph = graph.read().await;
+        Ok(graph.list_docs().into_iter().map(Into::into).collect())
+    }
+
+    /// Search node theo pattern đường dẫn (vd `spec.replicas`) hoặc fuzzy key.
+    /// Trả node đã hydrate (có path) — depth = số tầng con kế tiếp.
     async fn graphdoc_search(
         &self,
         ctx: &Context<'_>,
-        _pattern: String,
+        pattern: String,
         depth: Option<i32>,
     ) -> GqlResult<Vec<DocNodePayload>> {
         let state = ctx.data::<Arc<AppState>>()?;
         let depth = depth.unwrap_or(1).max(1) as usize;
-        let tokens = vec![DocToken::root()];
-        let ids = state
-            .doc_graph
-            .read()
-            .await
-            .search_path(&tokens, Some(depth))
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let graph = state.doc_graph.graph().await;
+        let graph = graph.read().await;
+
+        // Pattern "spec.replicas" → [root, FIELD(spec), FIELD(replicas)].
+        let mut tokens = vec![DocToken::root()];
+        let mut unknown_seg = false;
+        let mut fuzzy_seg: Option<String> = None;
+        for seg in pattern.split('.') {
+            if let Some(fz) = seg.strip_prefix('~') {
+                fuzzy_seg = Some(fz.to_string());
+                break;
+            }
+            match graph.intern_id(seg) {
+                Some(id) => tokens.push(DocToken::field(id)),
+                None => {
+                    unknown_seg = true;
+                    break;
+                }
+            }
+        }
+
+        let mut ids: Vec<u64> = Vec::new();
+        if !unknown_seg && fuzzy_seg.is_none() {
+            let mut found = graph
+                .search_path(&tokens, Some(tokens.len() - 1 + depth))
+                .await
+                .unwrap_or_default();
+            found.extend(graph.search_path_scan(&tokens, 100));
+            found.sort_unstable();
+            found.dedup();
+            ids = found;
+        }
+
+        if ids.is_empty() {
+            // Fallback: fuzzy key substring.
+            let last = fuzzy_seg
+                .clone()
+                .unwrap_or_else(|| pattern.rsplit('.').next().unwrap_or(&pattern).to_string());
+            let hits = graph.search_key_fuzzy(&last, 50);
+            let mut results = Vec::new();
+            for h in hits {
+                if let Some(payload) = graph.hydrate_depth(h.node.id, Some(1)).await {
+                    results.push(payload.into());
+                }
+            }
+            return Ok(results);
+        }
+
         let mut results = Vec::new();
-        for id in &ids {
-            if let Some(payload) = state.doc_graph.read().await.hydrate(*id).await {
-                results.push(DocNodePayload {
-                    id: payload.id,
-                    path: payload.path,
-                    kind: format!("{:?}", payload.kind),
-                    value: payload.value.map(|v| format!("{:?}", v)),
-                    key: payload.key,
-                    doc: payload.doc,
-                    children: vec![],
-                });
+        for id in ids.iter().take(100) {
+            if let Some(payload) = graph.hydrate_depth(*id, Some(1)).await {
+                results.push(payload.into());
             }
         }
         Ok(results)
+    }
+
+    /// Hydrate một node theo id (cây con theo max_depth).
+    async fn graphdoc_hydrate(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        max_depth: Option<i32>,
+    ) -> GqlResult<Option<DocNodePayload>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let id = id
+            .parse::<u64>()
+            .map_err(|_| async_graphql::Error::new("invalid id"))?;
+        let max_depth = max_depth.map(|d| d.max(0) as usize);
+        let graph = state.doc_graph.graph().await;
+        let graph = graph.read().await;
+        Ok(graph.hydrate_depth(id, max_depth).await.map(Into::into))
+    }
+
+    /// Search theo giá trị scalar (substring).
+    async fn graphdoc_search_value(
+        &self,
+        ctx: &Context<'_>,
+        query: String,
+        limit: Option<i32>,
+    ) -> GqlResult<Vec<DocNodePayload>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let limit = limit.unwrap_or(50).max(1) as usize;
+        let graph = state.doc_graph.graph().await;
+        let graph = graph.read().await;
+        let hits = graph.search_value_substring(&query, limit);
+        let mut results = Vec::new();
+        for n in hits {
+            if let Some(payload) = graph.hydrate_depth(n.id, Some(1)).await {
+                results.push(payload.into());
+            }
+        }
+        Ok(results)
+    }
+
+    /// Liệt kê structural patterns đã mine.
+    async fn graphdoc_list_patterns(&self, ctx: &Context<'_>) -> GqlResult<Vec<DocPatternView>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let graph = state.doc_graph.graph().await;
+        let graph = graph.read().await;
+        Ok(graph.list_patterns().into_iter().map(Into::into).collect())
     }
 }

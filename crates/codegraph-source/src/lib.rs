@@ -39,9 +39,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use codegraph_core::{Error, Result};
 
 mod disk;
+mod git;
 mod registry;
 
 pub use disk::{disk_walker, DiskSource};
+pub use git::{DiskGit, Git, GitArchive, GitDiff, GitInfo, GitRepo};
 pub use registry::{SourceConfig, SourceKind, SourceRegistry};
 
 /// Một entry do Source liệt kê ra.

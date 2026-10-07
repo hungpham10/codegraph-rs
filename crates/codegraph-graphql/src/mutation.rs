@@ -3,15 +3,14 @@
 //! string (output phức tạp, ít dùng cho UI; passthrough qua `serde_json::Value`).
 //! + Document ingest/search/hydrate/list/stats.
 
-use async_graphql::{Context, Object, Result as GqlResult};
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use camino::Utf8PathBuf;
 use codegraph_api::session::{DetailLevel, OutputStyle};
 use codegraph_api::tools;
-use codegraph_docs::{DocConfig, DocumentGraph};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::sync::RwLock as TokioRwLock;
 
+use crate::types::*;
 use crate::AppState;
 
 pub struct Mutation;
@@ -40,9 +39,11 @@ impl Mutation {
         let format = format.as_deref().and_then(OutputStyle::parse);
         let outcome = state
             .session
-            .init(root, do_index, detail, format)
+            .init(root.clone(), do_index, detail, format)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        // Re-point doc graph sang root mới (lazy open lần doc op tiếp theo).
+        state.doc_graph.reinit(root);
         let v = json!({
             "root": outcome.root,
             "dir": outcome.dir,
@@ -91,11 +92,7 @@ impl Mutation {
     /// `args: JSON` = `{ node?, name?, args?: [i64], mocks?: {callee: rhai}, branchPolicy?, loopCap? }`.
     async fn graphcode_sandbox(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let sgi = state
-            .session
-            .ensure_ready()
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let sgi = crate::query::fresh_index(ctx).await?;
         let root = state
             .session
             .root()
@@ -110,11 +107,7 @@ impl Mutation {
     /// `args: JSON` = `{ diff: "...", entry?, baseRef?, ... }`.
     async fn graphcode_diff(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let sgi = state
-            .session
-            .ensure_ready()
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let sgi = crate::query::fresh_index(ctx).await?;
         let root = state
             .session
             .root()
@@ -129,133 +122,156 @@ impl Mutation {
     /// `{ diff, entry?, baseRef?, args?, mocks?, branchPolicy?, loopCap? }`.
     async fn graphcode_diff_simulate(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let sgi = state
-            .session
-            .ensure_ready()
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let sgi = crate::query::fresh_index(ctx).await?;
         let root = state
             .session
             .root()
             .await
             .ok_or_else(|| async_graphql::Error::new("session root unavailable"))?;
-        tools::dispatch_diff_simulate(&root, sgi, args)
+        let git = codegraph_source::DiskGit::new(root.clone());
+        tools::dispatch_diff_simulate(&root, sgi, &git, args)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))
     }
 
-    /// Ref → simulate: so sánh trace trên `git archive <ref>` vs working tree.
+    /// Ref → simulate: so sánh trace trên `git export <ref>` vs working tree.
     /// `args: JSON` = `{ entry, ref?, args?, mocks?, branchPolicy?, loopCap? }`.
     async fn graphcode_origin_simulate(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let sgi = state
-            .session
-            .ensure_ready()
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let sgi = crate::query::fresh_index(ctx).await?;
         let root = state
             .session
             .root()
             .await
             .ok_or_else(|| async_graphql::Error::new("session root unavailable"))?;
-        tools::dispatch_origin_simulate(&root, sgi, args)
+        let git = codegraph_source::DiskGit::new(root.clone());
+        tools::dispatch_origin_simulate(&root, sgi, &git, args)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))
+    }
+
+    /// Branch compare: diff giữa `base` và `head` + báo cáo tác động + (tuỳ
+    /// chọn) mermaid flow 2 màu cho `entry`. `args: JSON` = `{ base, head?, entry? }`.
+    async fn graphcode_branch_compare(&self, ctx: &Context<'_>, args: Value) -> GqlResult<String> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let sgi = crate::query::fresh_index(ctx).await?;
+        let root = state
+            .session
+            .root()
+            .await
+            .ok_or_else(|| async_graphql::Error::new("session root unavailable"))?;
+        let git = codegraph_source::DiskGit::new(root.clone());
+        tools::dispatch_branch_compare(&root, sgi, &git, args)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))
     }
 
     // ── Document mutations ──
 
-    /// Ingest a document file into the document graph.
+    /// Ingest một file document (YAML/JSON/TOML/HCL) vào doc graph persist.
+    /// Trả doc_id (u64 dạng string).
     async fn graphdoc_ingest(
         &self,
         ctx: &Context<'_>,
         path: String,
         format: Option<String>,
-    ) -> GqlResult<String> {
+    ) -> GqlResult<ID> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let source =
-            std::fs::read_to_string(&path).map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        let ext = std::path::Path::new(&path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            .unwrap_or_default();
-        let fmt: String = match format {
-            Some(f) => f,
-            None => match ext.as_str() {
-                "tf" | "hcl" => "hcl".to_string(),
-                "yaml" | "yml" => "yaml".to_string(),
-                "json" => "json".to_string(),
-                "toml" => "toml".to_string(),
-                _ => {
-                    return Err(async_graphql::Error::new(format!(
-                        "unknown format for extension .{ext}"
-                    )))
-                }
-            },
-        };
-        let _doc_graph = state.doc_graph.clone();
-        let parser: Box<dyn codegraph_docs::DocParser> = match fmt.as_str() {
-            "hcl" => Box::new(codegraph_docs::parsers::HclParser),
-            "yaml" => Box::new(codegraph_docs::parsers::YamlParser),
-            "json" => Box::new(codegraph_docs::parsers::JsonParser),
-            "toml" => Box::new(codegraph_docs::parsers::TomlParser),
-            _ => {
-                return Err(async_graphql::Error::new(format!(
-                    "unsupported format: {fmt}"
-                )))
-            }
-        };
-        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
-            Arc::new(TokioRwLock::new(codegraph_graph::InMemoryStorage::default()));
-        let mut graph = DocumentGraph::new(storage, DocConfig::default());
-        let doc_id = 1; // doc in-memory per-mutation — id không quan trọng
-        let doc = parser
-            .parse(&path, &source, doc_id)
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        let inserted = graph
-            .upsert_document(doc)
+        let graph = state.doc_graph.graph().await;
+        let mut graph = graph.write().await;
+        let doc_id = graph
+            .ingest_file(&path, format.as_deref())
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        Ok(format!("ingested {path} → doc_id={inserted}"))
+        Ok(ID::from(doc_id))
     }
 
-    /// Search document nodes.
-    async fn graphdoc_search(
+    /// Ingest hàng loạt mọi file document trong thư mục (đệ quy, theo extension).
+    async fn graphdoc_ingest_dir(
         &self,
         ctx: &Context<'_>,
-        _pattern: String,
-        depth: Option<i32>,
-    ) -> GqlResult<String> {
+        path: String,
+        limit: Option<i32>,
+    ) -> GqlResult<DocIngestSummary> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let depth = depth.unwrap_or(1).max(1) as usize;
-        let ids = state
-            .doc_graph
-            .read()
-            .await
-            .search_path(&[codegraph_docs::tokenize::DocToken::root()], Some(depth))
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        let mut results = Vec::new();
-        for id in &ids {
-            if let Some(payload) = state.doc_graph.read().await.hydrate(*id).await {
-                results.push(json!({ "id": payload.id, "path": payload.path, "kind": format!("{:?}", payload.kind) }));
+        let limit = limit.unwrap_or(500).max(1) as usize;
+        const EXTS: [&str; 6] = ["yaml", "yml", "json", "toml", "tf", "hcl"];
+        let mut files = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(&path)];
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+                {
+                    files.push(p);
+                }
             }
         }
-        Ok(serde_json::to_string_pretty(&results)
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?)
+        files.sort();
+        if files.len() > limit {
+            files.truncate(limit);
+        }
+        let total = files.len();
+        let graph = state.doc_graph.graph().await;
+        let mut graph = graph.write().await;
+        let mut ingested = 0usize;
+        let mut failed = 0usize;
+        for f in &files {
+            let Some(p) = f.to_str() else { continue };
+            match graph.ingest_file(p, None).await {
+                Ok(_) => ingested += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        Ok(DocIngestSummary {
+            requested: total,
+            ingested,
+            failed,
+        })
     }
 
-    /// Get document stats.
-    async fn graphdoc_stats(&self, ctx: &Context<'_>) -> GqlResult<String> {
+    /// Xoá một document theo id.
+    async fn graphdoc_remove(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         let state = ctx.data::<Arc<AppState>>()?;
-        let stats = state
-            .doc_graph
-            .read()
-            .await
-            .stats()
+        let id = id
+            .parse::<u64>()
+            .map_err(|_| async_graphql::Error::new("invalid id"))?;
+        let graph = state.doc_graph.graph().await;
+        let mut graph = graph.write().await;
+        graph
+            .remove_document(id)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        Ok(format!("documents: {}\nnodes: {}", stats.docs, stats.nodes))
+        Ok(true)
+    }
+
+    /// Mine structural patterns (kind chain) trên toàn bộ node lá scalar.
+    async fn graphdoc_mine_patterns(
+        &self,
+        ctx: &Context<'_>,
+        top_k: Option<i32>,
+        min_count: Option<i32>,
+        max_depth: Option<i32>,
+    ) -> GqlResult<Vec<DocPatternView>> {
+        let state = ctx.data::<Arc<AppState>>()?;
+        let top_k = top_k.unwrap_or(20).max(1) as usize;
+        let min_count = min_count.unwrap_or(3).max(1) as usize;
+        let max_depth = max_depth.unwrap_or(4).max(1) as usize;
+        let graph = state.doc_graph.graph().await;
+        let mut graph = graph.write().await;
+        let mined = graph
+            .mine_patterns(top_k, min_count, max_depth)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        Ok(mined.into_iter().map(Into::into).collect())
     }
 }

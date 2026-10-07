@@ -24,11 +24,9 @@ use axum::{
 use camino::Utf8PathBuf;
 use codegraph_api::session::{OutputStyle, Session};
 use codegraph_api::SearchSessionStore;
-use codegraph_docs::{DocConfig, DocumentGraph};
-use codegraph_graph::InMemoryStorage;
+use codegraph_extract::SharedDocGraph;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock as TokioRwLock;
 use tower_http::cors::{Any, CorsLayer};
 
 pub use types::*;
@@ -43,7 +41,10 @@ pub struct AppState {
     /// resolver này trả lỗi rõ ràng. Đây là config mức server (`--mermaid`).
     pub mermaid: bool,
     /// Document graph cho structured document operations (HCL, YAML, JSON, TOML).
-    pub doc_graph: Arc<TokioRwLock<DocumentGraph>>,
+    /// Lazy theo root (persist qua `[docgraph]`); in-memory khi chưa bind root.
+    pub doc_graph: Arc<SharedDocGraph>,
+    /// Module UI đang bật (từ config) — frontend lọc sidebar theo danh sách.
+    pub ui_modules: Vec<String>,
 }
 
 /// Cấu hình cho [`serve`].
@@ -62,6 +63,26 @@ pub struct ServeConfig {
     pub allow_hosts: Vec<String>,
     /// Bật Mermaid diagram output (tương ứng flag `--mermaid` ở CLI).
     pub mermaid: bool,
+    /// Phục vụ web UI nhúng tại `/` (tương ứng cờ tắt `--no-web`).
+    pub web: bool,
+    /// Module UI được bật (mặc định = tất cả). Tắt module để thu gọn sidebar.
+    pub ui_modules: Vec<String>,
+}
+
+/// Module UI mặc định (khi `--ui-modules` không truyền).
+pub const DEFAULT_UI_MODULES: [&str; 3] = ["explore", "review", "documents"];
+
+/// Module UI đang bật (trả về cho frontend).
+pub fn enabled_modules(cfg_modules: &[String]) -> Vec<String> {
+    if cfg_modules.is_empty() {
+        DEFAULT_UI_MODULES.iter().map(|s| s.to_string()).collect()
+    } else {
+        cfg_modules
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
 }
 
 /// Chạy GraphQL server (blocking — bind + serve đến khi shutdown).
@@ -70,18 +91,36 @@ pub async fn serve(cfg: ServeConfig) -> anyhow::Result<()> {
         Some(ref r) => Session::with_root_and_format(r.clone(), cfg.format).await?,
         None => Session::new_with_format(cfg.format),
     };
-    let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
-        Arc::new(TokioRwLock::new(InMemoryStorage::default()));
-    let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
-        storage,
-        DocConfig::default(),
-    )));
+    // Doc graph lazy theo root (nếu có) — persist qua `[docgraph]`/`[storage]`.
+    let doc_graph = Arc::new(match cfg.root.clone() {
+        Some(root) => SharedDocGraph::lazy(root),
+        None => SharedDocGraph::in_memory(),
+    });
     let state = Arc::new(AppState {
         session: Arc::new(session),
         search_sessions: Arc::new(SearchSessionStore::new()),
         mermaid: cfg.mermaid,
         doc_graph,
+        ui_modules: crate::enabled_modules(&cfg.ui_modules),
     });
+
+    // Warm index nền ngay lúc khởi động. `GraphIndex::rebuild` mất hàng chục
+    // giây với repo lớn; để nó chạy ở task tách rời thay vì chặn request đầu
+    // tiên của UI (request đó sẽ phải chờ `ensure_fresh`).
+    {
+        let warm = state.clone();
+        tokio::spawn(async move {
+            match warm.session.ensure_ready().await {
+                Ok(sgi) => {
+                    let _ = sgi.ensure_fresh().await;
+                }
+                Err(e) => {
+                    tracing::debug!("index warm skipped: {e}");
+                }
+            }
+        });
+    }
+
     let app = build_app(&cfg, state);
 
     let listener = tokio::net::TcpListener::bind(cfg.addr).await?;
@@ -94,7 +133,7 @@ pub async fn serve(cfg: ServeConfig) -> anyhow::Result<()> {
 /// port). Đây là nơi gắn CORS, api-key auth middleware và GraphQL handler.
 pub(crate) fn build_app(cfg: &ServeConfig, state: Arc<AppState>) -> Router {
     let schema = Schema::build(query::Query, mutation::Mutation, EmptySubscription)
-        .data(state)
+        .data(state.clone())
         .finish();
 
     // Clone các giá trị cần thiết vào owned data để middleware closure không
@@ -119,10 +158,18 @@ pub(crate) fn build_app(cfg: &ServeConfig, state: Arc<AppState>) -> Router {
         }
     };
 
-    Router::new()
+    let mut app = Router::new()
         .route("/health", get(health))
         .route_service("/graphql", GraphQL::new(schema))
-        .layer(cors)
+        .with_state(state);
+
+    // Web UI nhúng: mọi route không khớp (không phải /graphql, /health) trả
+    // về SPA. Tắt bằng `--no-web` để chỉ còn API.
+    if cfg.web {
+        app = app.fallback_service(codegraph_web::web_router());
+    }
+
+    app.layer(cors)
         .layer(from_fn(move |req: Request<Body>, next: Next| {
             let api_key = api_key.clone();
             async move {
@@ -148,8 +195,30 @@ pub(crate) fn build_app(cfg: &ServeConfig, state: Arc<AppState>) -> Router {
         }))
 }
 
-async fn health() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+/// Health check — `200` khi index đã refresh xong, `503` khi đang rebuild.
+///
+/// Rebuild index mất hàng chục giây với repo lớn. Trong lúc đó server
+/// chưa phục vục để query đước data — báo `503` để client/UI
+/// retry thay vì treo chờ.
+async fn health(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let sgi = match state.session.ensure_ready().await {
+        Ok(sgi) => sgi,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("no session bound: {e}"),
+            )
+        }
+    };
+    if sgi.fresh_snapshot().await.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "index chưa refresh xong (đang rebuild từ storage)".to_string(),
+        );
+    }
+    (StatusCode::OK, "ok".to_string())
 }
 
 #[cfg(test)]
@@ -159,24 +228,18 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use codegraph_api::session::{OutputStyle, Session};
     use codegraph_api::SearchSessionStore;
+    use codegraph_extract::SharedDocGraph;
     use tower::ServiceExt;
-
-    use codegraph_graph::InMemoryStorage;
-    use tokio::sync::RwLock as TokioRwLock;
 
     fn make_state(mermaid: bool) -> Arc<AppState> {
         let session = Session::new_with_format(OutputStyle::Minimal);
-        let storage: Arc<TokioRwLock<dyn codegraph_graph::Storage>> =
-            Arc::new(TokioRwLock::new(InMemoryStorage::default()));
-        let doc_graph = Arc::new(TokioRwLock::new(DocumentGraph::new(
-            storage,
-            DocConfig::default(),
-        )));
+        let doc_graph = Arc::new(SharedDocGraph::in_memory());
         Arc::new(AppState {
             session: Arc::new(session),
             search_sessions: Arc::new(SearchSessionStore::new()),
             mermaid,
             doc_graph,
+            ui_modules: vec![],
         })
     }
 
@@ -188,6 +251,9 @@ mod tests {
             format: OutputStyle::Minimal,
             allow_hosts: vec![],
             mermaid,
+            // Test không phụ thuộc asset đã build — tắt web cho ổn định.
+            web: false,
+            ui_modules: vec![],
         }
     }
 
@@ -209,15 +275,78 @@ mod tests {
         (status, json)
     }
 
+    /// Session chưa bind workspace → server chưa phục vục để query index → `503`.
     #[tokio::test]
-    async fn health_ok() {
+    async fn health_503_without_session() {
         let app = build_app(&cfg(false), make_state(false));
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Bind workspace + warm index xong — giửe `200`.
+    #[tokio::test]
+    async fn health_ok_after_warm() {
+        use codegraph_api::session::DetailLevel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let session = Session::new_with_format(OutputStyle::Minimal);
+        session
+            .init(root, false, DetailLevel::default(), None)
+            .await
+            .unwrap();
+        // Đúng warm y nhết `serve()` lúc khởi động.
+        let sgi = session.ensure_ready().await.unwrap();
+        let _ = sgi.ensure_fresh().await;
+
+        let state = Arc::new(AppState {
+            session: Arc::new(session),
+            search_sessions: Arc::new(SearchSessionStore::new()),
+            mermaid: false,
+            doc_graph: Arc::new(SharedDocGraph::in_memory()),
+            ui_modules: vec![],
+        });
+        let app = build_app(&cfg(false), state);
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// Query cần index mà index đang rebuild → lỗi rõ ràng ngay, không treo request.
+    #[tokio::test]
+    async fn graphql_query_fails_fast_while_index_warming() {
+        use codegraph_api::session::DetailLevel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let session = Session::new_with_format(OutputStyle::Minimal);
+        session
+            .init(root, false, DetailLevel::default(), None)
+            .await
+            .unwrap();
+        // KHÔNG warm — index chưa build, đúng trong trạng thái `serve()` lúc khởi động.
+        let state = Arc::new(AppState {
+            session: Arc::new(session),
+            search_sessions: Arc::new(SearchSessionStore::new()),
+            mermaid: false,
+            doc_graph: Arc::new(SharedDocGraph::in_memory()),
+            ui_modules: vec![],
+        });
+        let app = build_app(&cfg(false), state);
+        let (_status, json) = post_graphql(
+            &app,
+            "{ graphcodeListSymbols(kind: FUNCTION, limit: 1) { total } }",
+        )
+        .await;
+        let msg = json["errors"][0]["message"].as_str().unwrap();
+        assert!(msg.contains("refresh"), "unexpected error: {msg}");
     }
 
     #[tokio::test]

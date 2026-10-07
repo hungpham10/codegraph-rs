@@ -396,6 +396,20 @@ pub struct FlowResult {
     pub chain_desc: Vec<String>,
     /// Danh sách call-site (kể cả unresolved — hiện tên thô).
     pub calls: Vec<FlowCall>,
+    /// Nhãn trigger của marker nhánh (if/loop/switch) theo vị trí trong `chain`
+    /// — cho UI render `IF_TRUE: x > 0`, `LOOP: i < n`, `SWITCH_CASE: Cmd::Init`.
+    #[serde(default)]
+    pub branch_labels: Vec<BranchLabel>,
+}
+
+/// Nhãn trigger tại một vị trí marker trong chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
+pub struct BranchLabel {
+    /// Index trong `FlowResult.chain` (vị trí marker).
+    pub position: usize,
+    /// Text trigger: điều kiện `if`/`while`, giá trị `case`/`match arm`.
+    pub label: String,
 }
 
 /// Một call-site trong flow.

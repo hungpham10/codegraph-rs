@@ -9,9 +9,14 @@ class Codegraph < Formula
   url "https://github.com/hungpham10/codegraph-rs/archive/refs/tags/@@TAG@@.tar.gz"
   sha256 "@@SRC_SHA@@"
 
+  depends_on "node" => :build
   depends_on "rust" => :build
 
   def install
+    # The Svelte UI is embedded at compile time by rust-embed but its build
+    # output is not committed, so build it first from web/.
+    system "npm", "--prefix", "web", "ci", "--no-audit", "--no-fund"
+    system "npm", "--prefix", "web", "run", "build"
     system "cargo", "build", "--release", "--locked", "-p", "codegraph"
     bin.install "target/release/codegraph"
   end

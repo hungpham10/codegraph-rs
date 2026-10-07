@@ -14,8 +14,33 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Build the Svelte UI once; every Rust job below downloads these assets so
+  # `rust-embed` embeds the real web UI (parity with the release build).
+  web:
+    name: web (svelte assets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install + check + build
+        run: |
+          npm --prefix web ci --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Upload built assets (for embedding)
+        uses: actions/upload-artifact@v4
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
+          if-no-files-found: error
+
   clippy:
     name: clippy
+    needs: web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,11 +48,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p codegraph-graph --features postgres,mysql,redis --tests -- -D warnings
 
   clippy-windows:
     name: clippy (windows)
+    needs: web
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,10 +66,15 @@ jobs:
           components: clippy
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
       - run: cargo clippy -p codegraph --target x86_64-pc-windows-msvc -- -D warnings
 
   test-windows:
     name: test (windows)
+    needs: web
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +82,10 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
       - name: Build
         run: cargo build -p codegraph
       - name: Build (fastembed feature)
@@ -62,6 +101,7 @@ jobs:
 
   test:
     name: test (${{ matrix.os }})
+    needs: web
     runs-on: ${{ matrix.os }}
     services:
       redis:
@@ -93,6 +133,10 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
       - name: Install DB clients
         run: sudo apt-get update && sudo apt-get install -y postgresql-client mysql-client
       - name: Install radare2 (binary analysis integration tests)
@@ -148,6 +192,7 @@ jobs:
 
   slim:
     name: slim build (no visualize)
+    needs: web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -155,6 +200,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
       - run: cargo clippy -p codegraph --no-default-features -- -D warnings
       - run: cargo build -p codegraph --no-default-features
       - run: |

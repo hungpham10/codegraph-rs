@@ -12,6 +12,7 @@ use codegraph_core::{is_marker, Error, Result, SymbolKind, SymbolMatch};
 use codegraph_extract::Orchestrator;
 use codegraph_graph::{GraphIndex, SharedGraphIndex};
 use codegraph_sboxes::{compile_with_mocks, BranchPolicy, SboxConfig};
+use codegraph_source::Git;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -335,11 +336,11 @@ async fn run_sim(
     }))
 }
 
-/// Build index của cây git tại `base_ref` (`git archive` → temp dir →
+/// Build index của cây git tại `base_ref` (`git export tree` → temp dir →
 /// parse+ingest vào `GraphIndex::in_memory`). Luôn trả kèm tmp dir để caller
 /// dọn dẹp, kể cả khi thất bại (trả `None` + `note` lý do).
 async fn build_before_index(
-    root: &Utf8Path,
+    git: &dyn Git,
     base_ref: &str,
 ) -> Result<(Option<GraphIndex>, Utf8PathBuf, String)> {
     let millis = std::time::SystemTime::now()
@@ -351,35 +352,12 @@ async fn build_before_index(
     )
     .map_err(|p| Error::Invalid(format!("temp path not UTF-8: {p:?}")))?;
     let tree = tmp.join("tree");
-    let tar = tmp.join("tree.tar");
-    if let Err(e) = std::fs::create_dir_all(&tree) {
+    if let Err(e) = std::fs::create_dir_all(tree.as_std_path()) {
         return Ok((None, tmp, format!("temp dir failed: {e}")));
     }
 
-    let st = match std::process::Command::new("git")
-        .args(["archive", "--format=tar"])
-        .arg(base_ref)
-        .arg("-o")
-        .arg(&tar)
-        .current_dir(root.as_std_path())
-        .status()
-    {
-        Ok(s) => s,
-        Err(e) => return Ok((None, tmp, format!("git unavailable: {e}"))),
-    };
-    if !st.success() {
-        return Ok((None, tmp, format!("git archive `{base_ref}` failed")));
-    }
-    let ok = std::process::Command::new("tar")
-        .arg("-xf")
-        .arg(&tar)
-        .arg("-C")
-        .arg(&tree)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        return Ok((None, tmp, "tar extract failed".into()));
+    if let Err(e) = git.export_tree(base_ref, &tree).await {
+        return Ok((None, tmp, e.to_string()));
     }
 
     let mut before = GraphIndex::in_memory();
@@ -392,12 +370,94 @@ async fn build_before_index(
     }
 }
 
-/// Diff → simulate: chạy sandbox trên flow entry cho cả bản "trước" (git
+/// Tìm symbol Function/Method theo tên (contains) trong một index cụ thể.
+async fn find_fn(idx: &GraphIndex, name: &str) -> Option<codegraph_core::Symbol> {
+    idx.search_symbol_paged_resumable(
+        name,
+        None,
+        SymbolMatch::Contains,
+        codegraph_graph::Pagination {
+            limit: 20,
+            offset: 0,
+        },
+        None,
+        None,
+    )
+    .await
+    .ok()?
+    .page
+    .into_iter()
+    .find(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
+}
+
+/// Branch compare: diff giữa `base` và `head` (mặc định = working tree) + báo
+/// cáo tác động lên index hiện tại, kèm (tuỳ chọn) mermaid flow 2 màu cho
+/// `entry` — so sánh call thêm/xoá giữa 2 nhánh. Read-only.
+pub async fn dispatch_branch_compare(
+    root: &Utf8Path,
+    shared: Arc<SharedGraphIndex>,
+    git: &dyn Git,
+    args: Value,
+) -> Result<String> {
+    let base = arg_str(&args, "base")?;
+    let head = args.get("head").and_then(|v| v.as_str());
+    let diff = git.diff(base, head).await?;
+    let parsed = codegraph_graph::diff::parse_unified_diff(&diff)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+
+    let idx = shared.ensure_fresh().await;
+    let report = idx.diff_assess(&parsed, Some(root.as_std_path())).await;
+
+    // Mermaid flow 2 màu cho entry (nếu có): head = index hiện tại,
+    // base = index tạm từ `git export <base>`.
+    let mut mermaid = Value::Null;
+    let mut entry_out = Value::Null;
+    if let Some(entry) = args.get("entry").and_then(|v| v.as_str()) {
+        entry_out = json!(entry);
+        let (base_idx, tmp, note) = build_before_index(git, base).await?;
+        let head_flow = match find_fn(&idx, entry).await {
+            Some(s) => idx.flow(s.id).await.ok(),
+            None => None,
+        };
+        let base_flow = match &base_idx {
+            Some(b) => match find_fn(b, entry).await {
+                Some(s) => b.flow(s.id).await.ok(),
+                None => None,
+            },
+            None => None,
+        };
+        if let (Some(hf), Some(bf)) = (&head_flow, &base_flow) {
+            mermaid = json!(crate::mermaid::control_flow_diff(hf, bf));
+        } else if let Some(hf) = &head_flow {
+            mermaid = json!(crate::mermaid::control_flow(hf));
+        }
+        if !note.is_empty() {
+            mermaid = json!({ "diagram": mermaid, "base_index_note": note });
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    emit_value(
+        root.as_str(),
+        json!({
+            "draft": true,
+            "tool": "codegraph_git_branch_compare",
+            "base": base,
+            "head": head,
+            "diff": diff,
+            "report": report,
+            "entry": entry_out,
+            "mermaid": mermaid,
+        }),
+    )
+}
+
 /// archive tại `base_ref`) và bản "sau" (index hiện tại = post-MR), so sánh
 /// trace. Read-only — không mutate index.
 pub async fn dispatch_diff_simulate(
     root: &Utf8Path,
     shared: Arc<SharedGraphIndex>,
+    git: &dyn Git,
     args: Value,
 ) -> Result<String> {
     let diff = arg_str(&args, "diff")?;
@@ -441,7 +501,7 @@ pub async fn dispatch_diff_simulate(
     };
 
     // Build index "trước" + tmp dir (caller dọn tmp kể cả khi thất bại).
-    let (before_idx, tmp, build_note) = build_before_index(root, &base_ref).await?;
+    let (before_idx, tmp, build_note) = build_before_index(git, &base_ref).await?;
 
     let result = async {
         let before = match &before_idx {
@@ -478,6 +538,7 @@ pub async fn dispatch_diff_simulate(
 pub async fn dispatch_origin_simulate(
     root: &Utf8Path,
     shared: Arc<SharedGraphIndex>,
+    git: &dyn Git,
     args: Value,
 ) -> Result<String> {
     let entry = arg_str(&args, "entry")?;
@@ -489,7 +550,7 @@ pub async fn dispatch_origin_simulate(
     let (call_args, mocks, config) = parse_run_options(root, &args)?;
 
     let idx = shared.ensure_fresh().await;
-    let (origin_idx, tmp, build_note) = build_before_index(root, &git_ref).await?;
+    let (origin_idx, tmp, build_note) = build_before_index(git, &git_ref).await?;
 
     let result = async {
         let origin = match &origin_idx {

@@ -167,6 +167,10 @@ impl SharedGraphIndex {
     ///
     /// Fresh (ready + đúng version) → trả ngay. Stale hoặc chưa build → rebuild
     /// đồng bộ dưới `rebuild_lock` rồi trả snapshot mới.
+    ///
+    /// **Chặn** tới khi rebuild xong (với repo lớn có thể hàng chục giây) — dùng
+    /// cho CLI/one-shot. Server (`codegraph serve`) không nên gọi trực tiếp:
+    /// xem [`Self::fresh_snapshot`] (non-blocking) + warm task lúc khởi động.
     pub async fn ensure_fresh(self: &Arc<Self>) -> Arc<GraphIndex> {
         // Fast path: snapshot mới nhất sẵn sàng.
         {
@@ -189,6 +193,17 @@ impl SharedGraphIndex {
             eprintln!("[codegraph] shared index rebuild failed: {e}");
         }
         self.state.read().await.index.clone()
+    }
+
+    /// Snapshot hiện tại **nếu đã build và khớp version trên đĩa**, `None` khi
+    /// stale / chưa build. Không bao giờ rebuild và không chặn — dùng cho server
+    /// để báo "đang refresh" thay vì treo request.
+    pub async fn fresh_snapshot(&self) -> Option<Arc<GraphIndex>> {
+        let state = self.state.read().await;
+        if state.ready && self.is_fresh(state.version).await {
+            return Some(state.index.clone());
+        }
+        None
     }
 
     /// Build index từ route hiện tại rồi swap snapshot (gọi trong `rebuild_lock`).
@@ -355,6 +370,49 @@ mod tests {
 
     /// Re-index ngoài (bump version) → ensure_fresh phát hiện stale → rebuild.
     #[cfg(feature = "sqlite")]
+    /// Name engine đã persist ở dataset riêng + stamp version → mở lại index
+    /// không phải dựng lại trie (đây là phần chậm nhất của `rebuild`).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn name_engine_stamp_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+
+        {
+            let mut idx = GraphIndex::open(&db_str).await.unwrap();
+            let r = mk_result(
+                "a.ts",
+                vec![sym("alpha", SYMBOL_BASE), sym("beta", SYMBOL_BASE + 1)],
+                vec![SYMBOL_BASE, SYMBOL_BASE + 1],
+            );
+            idx.ingest(&[r]).await.unwrap();
+            assert!(idx.name_engine_is_current().await, "stamp sau ingest");
+        }
+
+        // Dataset riêng của name engine phải tồn tại cạnh db chính.
+        assert!(dir.path().join("names.sqlite").exists(), "names.sqlite");
+
+        // Mở lại → stamp khớp version → bỏ qua rebuild trie.
+        let idx = GraphIndex::open(&db_str).await.unwrap();
+        assert!(
+            idx.name_engine_is_current().await,
+            "stamp phải khớp sau reopen"
+        );
+        assert_eq!(idx.name_records.len(), 2);
+        assert_eq!(idx.name_records, vec!["alpha", "beta"]);
+
+        // Re-index → version bump → stamp cũ thành stale.
+        let mut idx = GraphIndex::open(&db_str).await.unwrap();
+        let r = mk_result(
+            "b.ts",
+            vec![sym("gamma", SYMBOL_BASE + 9)],
+            vec![SYMBOL_BASE + 9],
+        );
+        idx.ingest(&[r]).await.unwrap();
+        assert!(idx.name_engine_is_current().await, "stamp mới sau ingest");
+    }
+
     #[tokio::test]
     async fn sqlite_stale_version_rebuilds() {
         let dir = tempfile::tempdir().unwrap();

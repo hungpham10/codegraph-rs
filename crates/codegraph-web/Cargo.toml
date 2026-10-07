@@ -1,0 +1,19 @@
+[package]
+name = "codegraph-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded Svelte web UI assets for the codegraph GraphQL server."
+
+[lints.rust]
+warnings = "deny"
+
+[dependencies]
+axum = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = "2"
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

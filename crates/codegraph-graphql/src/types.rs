@@ -10,6 +10,7 @@
 use async_graphql::{Enum, InputObject, SimpleObject};
 use codegraph_context::Format as CoreCtxFormat;
 use codegraph_core::{CallSiteResult, SearchFlowResult, Symbol, SymbolKind, SymbolMatch};
+use codegraph_docs::{Kind as DocKind, NodePayload, Scalar};
 
 // ==================== Pagination wrappers ====================
 
@@ -143,7 +144,7 @@ pub enum MermaidKind {
 
 // ==================== Document types ====================
 
-/// Định dạng tài liệu hỗ trợ.
+/// Định dạng tài liệu hỗ trợ (input cho ingest).
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
 #[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
 pub enum DocFormat {
@@ -153,7 +154,22 @@ pub enum DocFormat {
     Yaml,
 }
 
-/// Node payload trong document graph — dạng GraphQL-friendly.
+/// Nhãn hiển thị của một `Kind` trong document graph.
+fn kind_label(k: DocKind) -> String {
+    format!("{k:?}").to_uppercase()
+}
+
+/// Chuỗi hiển thị của một scalar.
+fn scalar_label(s: &Scalar) -> String {
+    match s {
+        Scalar::String(v) => v.clone(),
+        Scalar::Number(n) => n.to_string(),
+        Scalar::Bool(b) => b.to_string(),
+        Scalar::Null => "null".to_string(),
+    }
+}
+
+/// Node document đã hydrate — cây con.
 #[derive(SimpleObject, Clone, Debug)]
 pub struct DocNodePayload {
     pub id: u64,
@@ -161,13 +177,109 @@ pub struct DocNodePayload {
     pub kind: String,
     pub value: Option<String>,
     pub key: Option<String>,
+    pub index: Option<u32>,
     pub doc: u64,
     pub children: Vec<DocNodePayload>,
 }
 
-/// Summary của document graph (GraphQL view).
+impl From<NodePayload> for DocNodePayload {
+    fn from(p: NodePayload) -> Self {
+        Self {
+            id: p.id,
+            path: p.path,
+            kind: kind_label(p.kind),
+            value: p.value.as_ref().map(scalar_label),
+            key: p.key,
+            index: p.index,
+            doc: p.doc,
+            children: p.children.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Node document dạng phẳng (kết quả search) — không kèm children.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct DocNodeView {
+    pub id: u64,
+    pub path: Vec<String>,
+    pub kind: String,
+    pub value: Option<String>,
+    pub key: Option<String>,
+    pub index: Option<u32>,
+    pub doc: u64,
+}
+
+impl From<codegraph_docs::Node> for DocNodeView {
+    fn from(n: codegraph_docs::Node) -> Self {
+        // path không có sẵn trên Node thô — dựng từ key/index chain (rỗng ở đây,
+        // caller có path từ hydrate khi cần).
+        Self {
+            id: n.id,
+            path: Vec::new(),
+            kind: kind_label(n.kind),
+            value: n.value.as_ref().map(scalar_label),
+            key: n.key,
+            index: n.index,
+            doc: n.doc,
+        }
+    }
+}
+
+/// Summary của một document.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct DocInfoView {
+    pub doc_id: u64,
+    pub path: String,
+    pub format: String,
+    pub root_node_id: u64,
+    pub nodes: usize,
+}
+
+impl From<codegraph_docs::graph::DocInfo> for DocInfoView {
+    fn from(d: codegraph_docs::graph::DocInfo) -> Self {
+        Self {
+            doc_id: d.doc_id,
+            path: d.path,
+            format: d.format,
+            root_node_id: d.root_node_id,
+            nodes: d.nodes,
+        }
+    }
+}
+
+/// Summary của document graph.
 #[derive(SimpleObject, Clone, Debug)]
 pub struct DocStatsView {
     pub docs: usize,
     pub nodes: usize,
+}
+
+/// Một structural pattern đã mine.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct DocPatternView {
+    pub pattern_id: u64,
+    pub tokens: Vec<String>,
+    pub node_count: usize,
+    pub doc_count: usize,
+    pub doc_freq: f64,
+}
+
+impl From<codegraph_docs::graph::PatternEntry> for DocPatternView {
+    fn from(p: codegraph_docs::graph::PatternEntry) -> Self {
+        Self {
+            pattern_id: p.pattern_id,
+            tokens: p.tokens,
+            node_count: p.node_count,
+            doc_count: p.doc_count,
+            doc_freq: p.doc_freq,
+        }
+    }
+}
+
+/// Kết quả ingest hàng loạt document.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct DocIngestSummary {
+    pub requested: usize,
+    pub ingested: usize,
+    pub failed: usize,
 }

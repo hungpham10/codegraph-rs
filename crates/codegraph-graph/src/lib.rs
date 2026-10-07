@@ -18,8 +18,10 @@
 //!   đọc chain, skip marker/self/0. Persistent — dùng chung storage với entity
 //!   store (`rt_*` radix tables + `sg_*` entity tables trong cùng sqlite).
 //! - **Name engine** `Search<u8>`: key = tên symbol (lowercase bytes), record =
-//!   synthetic id (1-based vào `name_records`). Luôn **in-memory** (như
-//!   `SearchIndex` của semgraph) — rebuild từ `name_index` khi open/ingest.
+//!   synthetic id (1-based vào `name_records`). Persist ở dataset riêng
+//!   (`names.lmdb`/`names.sqlite` cạnh DB chính) + version stamp — mở lại index
+//!   chỉ tốn `load_name_records`; backend không có dataset file riêng
+//!   (postgres/mysql/memory) fallback in-memory và rebuild từ `name_index`.
 //!
 //! `name_index: HashMap<lowercase name, Vec<id>>` là nguồn mở rộng symbol trùng
 //! tên: radix chỉ lưu mỗi tên khác nhau 1 lần (insert_chain trả `Duplicated` với
@@ -61,10 +63,10 @@ pub use crate::storage::{
 };
 use crate::vector_index::VectorIndex;
 use codegraph_core::{
-    CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency, EdgeMeta,
-    EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult,
-    SYMBOL_BASE, SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch,
-    is_marker, marker_name,
+    BranchLabel, CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency,
+    EdgeMeta, EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo,
+    ResolveResult, SYMBOL_BASE, SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind,
+    SymbolMatch, is_marker, marker_name,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -143,6 +145,51 @@ fn serr_search(e: crate::search::Error) -> Error {
 ///   (feature `redis`) — tách khỏi index `codegraph:idx:<db>`
 pub async fn open_doc_storage(dsn: &str) -> Result<Arc<RwLock<dyn Storage>>> {
     open_keyspace_storage(dsn, "codegraph:docs").await
+}
+
+/// DSN dataset thứ hai (name engine) suy ra từ DSN chính — cùng backend, file
+/// cạnh bên nhau (`db.lmdb` → `names.lmdb`). Mirror pattern của docs
+/// (`db.lmdb` → `docs.lmdb`) nên không phải viết adapter namespace.
+///
+/// `None` = backend không có dataset file riêng (postgres/mysql/memory) —
+/// giống `doc_storage_dsn`, name engine fallback in-memory.
+#[cfg(any(feature = "sqlite", feature = "lmdb", feature = "redis"))]
+fn name_dsn(main_dsn: &str) -> Option<String> {
+    if let Some(path) = main_dsn.strip_prefix("sqlite://") {
+        return Some(format!("sqlite://{}", sibling_file(path, "names.sqlite")));
+    }
+    if let Some(path) = main_dsn.strip_prefix("lmdb://") {
+        return Some(format!("lmdb://{}", sibling_file(path, "names.lmdb")));
+    }
+    // Redis không tách file — cùng DSN, khác namespace ố do keyspace.
+    if main_dsn.starts_with("redis://") || main_dsn.starts_with("rediss://") {
+        return Some(main_dsn.to_string());
+    }
+    None
+}
+
+/// Thay tên file cuối của `path` (giữ nguyên thư mục cha) — `names.lmdb`
+/// đặt cạnh `db.lmdb` dù `a/b/db.lmdb` → `a/b/names.lmdb`.
+#[cfg(any(feature = "sqlite", feature = "lmdb", feature = "redis"))]
+fn sibling_file(path: &str, file: &str) -> String {
+    match path.rfind('/') {
+        Some(i) => format!("{}/{}", &path[..i], file),
+        None => file.to_string(),
+    }
+}
+
+/// Mở dataset riêng cho name engine. `None` = không mừ đưọc (fallback
+/// in-memory trong `new_with_storage`) — không chến nhạp và náy.
+#[cfg(any(feature = "sqlite", feature = "lmdb", feature = "redis"))]
+async fn open_name_store(main_dsn: &str) -> Option<Arc<RwLock<dyn crate::storage::Storage>>> {
+    let dsn = name_dsn(main_dsn)?;
+    match open_keyspace_storage(&dsn, "codegraph:names").await {
+        Ok(store) => Some(store),
+        Err(e) => {
+            eprintln!("[codegraph] name engine dataset unavailable ({e}) — fallback in-memory");
+            None
+        }
+    }
 }
 
 /// Mở storage cho một dataset theo DSN + keyspace (backend redis dùng prefix
@@ -249,7 +296,8 @@ struct CallRef<'a> {
 ///
 /// `storage` giữ cả entity store (`sg_*` / InMemory maps) lẫn radix của chain
 /// engine (`rt_*`); `chains` (Search) đọc ghi qua chính `storage` đó. Name
-/// engine `names` luôn chạy trên storage in-memory riêng — không persist.
+/// engine `names` chạy trên dataset **riêng** (`name_store`) — persist khi
+/// backend có dataset file riêng, fallback in-memory nếu không.
 pub struct GraphIndex {
     /// Entity + chain engine storage.
     storage: Arc<RwLock<dyn crate::storage::Storage>>,
@@ -258,11 +306,15 @@ pub struct GraphIndex {
     /// Name engine: key = tên lowercase (bytes), record = 1-based vào
     /// `name_records`.
     names: Search<u8>,
-    /// `record - 1` → tên (song song với thứ tự insert name engine).
+    /// Dataset riêng của name engine (`names.lmdb`/`names.sqlite` cạnh
+    /// `db.lmdb`) — `None` = in-memory (không persist, luôn rebuild).
+    /// Giữ handle để đọc/ghi version stamp, bỏ qua việc dựng lại trie.
+    name_store: Option<Arc<RwLock<dyn crate::storage::Storage>>>,
+    /// Tên distinct (lowercase) **đã sort**; `name_records[record - 1]` là tên
+    /// của engine record `record` (name engine insert theo đúng thứ tự sort
+    /// này). Cũng dùng trực tiếp cho scan Prefix/Suffix/Exact — không cần sort
+    /// lại (resume chỉ lưu vị trí, không lưu mảng).
     name_records: Vec<String>,
-    /// Các tên distinct (lowercase) **đã sort** — dùng cho scan Prefix/Suffix/
-    /// Exact không cần sort lại (resume chỉ lưu vị trí, không lưu mảng).
-    sorted_name_keys: Vec<String>,
     /// symbol id → Symbol (registry — nguồn chân lý in-memory).
     symbols: HashMap<u64, Symbol>,
     /// tên (lowercase) → symbol ids (mở rộng trùng tên khi search/resolve).
@@ -305,7 +357,7 @@ pub enum SearchCursorPhase {
     /// engine trả records không theo thứ tự tên — phase A xong phải sort
     /// trước khi chuyển sang `Expand`.
     Engine(SearchResume),
-    /// Mode `Prefix`/`Suffix`/`Exact`: đang quét `sorted_name_keys` từ
+    /// Mode `Prefix`/`Suffix`/`Exact`: đang quét `name_records` (đã sort) từ
     /// `name_pos` (mảng đã sort sẵn — resume chỉ cần lưu vị trí).
     ScanNames { name_pos: usize },
     /// Phase A xong: stream ids theo từng tên đã sort — filter `kind`, gom
@@ -434,7 +486,7 @@ impl GraphIndex {
     /// model. Nếu process đã set config fastembed trước đó mà model lỗi → panic.
     pub fn in_memory() -> Self {
         let storage: Box<dyn crate::storage::Storage> = Box::new(InMemoryStorage::default());
-        Self::new_with_storage(storage).expect("in_memory embedding backend init failed")
+        Self::new_with_storage(storage, None).expect("in_memory embedding backend init failed")
     }
 
     /// Mở index từ một backend persistent bằng DSN — rebuild từ entity store.
@@ -549,8 +601,9 @@ impl GraphIndex {
         let storage = crate::storage::lmdb::LmdbStorage::open(path)
             .await
             .map_err(serr)?;
+        let name_store = open_name_store(&format!("lmdb://{path}")).await;
         let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
-        let mut idx = Self::new_with_storage(storage)?;
+        let mut idx = Self::new_with_storage(storage, name_store)?;
         idx.rebuild().await?;
         Ok(idx)
     }
@@ -560,8 +613,9 @@ impl GraphIndex {
         let storage = crate::storage::sqlite::SqliteStorage::open(path)
             .await
             .map_err(serr)?;
+        let name_store = open_name_store(&format!("sqlite://{path}")).await;
         let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
-        let mut idx = Self::new_with_storage(storage)?;
+        let mut idx = Self::new_with_storage(storage, name_store)?;
         idx.rebuild().await?;
         Ok(idx)
     }
@@ -591,8 +645,9 @@ impl GraphIndex {
             crate::storage::redis::RedisStorage::new(client, &format!("codegraph:idx:{db}"))
                 .await
                 .map_err(serr)?;
+        let name_store = open_name_store(dsn).await;
         let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
-        let mut idx = Self::new_with_storage(storage)?;
+        let mut idx = Self::new_with_storage(storage, name_store)?;
         idx.rebuild().await?;
         Ok(idx)
     }
@@ -634,8 +689,10 @@ impl GraphIndex {
                             .ensure_registered(shard, route.root())
                             .await
                             .map_err(serr)?;
+                        // RDBMS không có dataset file riêng — name engine
+                        // fallback in-memory (giống `doc_storage_dsn`).
                         let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
-                        let mut idx = Self::new_with_storage(storage)?;
+                        let mut idx = Self::new_with_storage(storage, None)?;
                         idx.rebuild().await?;
                         Ok(idx)
                     }
@@ -653,8 +710,10 @@ impl GraphIndex {
                             .ensure_registered(shard, route.root())
                             .await
                             .map_err(serr)?;
+                        // RDBMS không có dataset file riêng — name engine
+                        // fallback in-memory (giống `doc_storage_dsn`).
                         let storage: Box<dyn crate::storage::Storage> = Box::new(storage);
-                        let mut idx = Self::new_with_storage(storage)?;
+                        let mut idx = Self::new_with_storage(storage, None)?;
                         idx.rebuild().await?;
                         Ok(idx)
                     }
@@ -670,15 +729,21 @@ impl GraphIndex {
         }
     }
 
-    fn new_with_storage(storage: Box<dyn crate::storage::Storage>) -> Result<Self> {
+    fn new_with_storage(
+        storage: Box<dyn crate::storage::Storage>,
+        name_store: Option<Arc<RwLock<dyn crate::storage::Storage>>>,
+    ) -> Result<Self> {
         // Wrap mọi backend bằng LRU read-cache để giảm gọi xuống storage
         // (SQL/remote) cho các read path nóng (node/children/chain/entity).
         const CACHE_CAPACITY: usize = 8192;
         let storage = CachedStorage::wrap(storage, CACHE_CAPACITY);
-        // Name engine luôn in-memory (như semgraph SearchIndex) — storage riêng
-        // để record id (1..N) không đụng record của chain engine (func ids).
-        let name_storage =
-            CachedStorage::wrap(Box::new(InMemoryStorage::default()), CACHE_CAPACITY);
+        // Name engine dùng dataset RIÉNG (cùng backend theo config) — record id
+        // (1..N) không đụng func id của chain trie, và `Search::clear()`
+        // không cần global nữa. Không mừ dataset (in-memory / RDBMS)
+        // → fallback in-memory như cư.
+        let name_storage = name_store.clone().unwrap_or_else(|| {
+            CachedStorage::wrap(Box::new(InMemoryStorage::default()), CACHE_CAPACITY)
+        });
         // Embedding chỉ bật khi config `[embedding].backend = "fastembed"` (opt-in).
         // Nếu bật mà model tải thất bại → lỗi rõ ràng (KHÔNG fallback silent).
         let (backend, enabled) = if embedding_enabled() {
@@ -691,10 +756,10 @@ impl GraphIndex {
         };
         Ok(Self {
             chains: Search::new(CHAIN_SHARDING, storage.clone()),
-            names: Search::new(CHAIN_SHARDING, name_storage),
+            names: Search::new(CHAIN_SHARDING, name_storage.clone()),
+            name_store,
             storage,
             name_records: Vec::new(),
-            sorted_name_keys: Vec::new(),
             symbols: HashMap::new(),
             name_index: HashMap::new(),
             scope_index: HashMap::new(),
@@ -719,6 +784,19 @@ impl GraphIndex {
     )]
     // chỉ open() dùng — không backend thì không ai gọi.
     async fn rebuild(&mut self) -> Result<()> {
+        // Đo bằng sink `codegraph_core::prof` — stderr bị MCP host nuốt mất
+        // khi `serve --mcp`, nên log chỉ ra được khi bật qua env (xem prof.rs).
+        macro_rules! cg_t {
+            ($n:expr) => {{
+                codegraph_core::prof::stage($n)
+            }};
+        }
+        macro_rules! cg_d {
+            ($t:expr, $n:expr) => {{
+                codegraph_core::prof::stage_done($n, $t);
+            }};
+        }
+        let __t = cg_t!("rebuild TOTAL");
         self.next_id = self
             .storage
             .read()
@@ -726,6 +804,7 @@ impl GraphIndex {
             .load_next_id()
             .await
             .map_err(serr)?;
+        let __t_load_all_symbols = cg_t!("load_all_symbols");
         let symbols = self
             .storage
             .read()
@@ -733,7 +812,11 @@ impl GraphIndex {
             .load_all_symbols()
             .await
             .map_err(serr)?;
+        cg_d!(__t_load_all_symbols, "load_all_symbols");
+        let __t_all_chains = cg_t!("all_chains");
         let chains_raw = self.storage.read().await.all_chains().await.map_err(serr)?;
+        cg_d!(__t_all_chains, "all_chains");
+        let __t_all_call_name_indexes = cg_t!("all_call_name_indexes");
         let call_names_raw = self
             .storage
             .read()
@@ -741,6 +824,8 @@ impl GraphIndex {
             .all_call_name_indexes()
             .await
             .map_err(serr)?;
+        cg_d!(__t_all_call_name_indexes, "all_call_name_indexes");
+        let __t_all_call_records = cg_t!("all_call_records");
         let call_records_raw = self
             .storage
             .read()
@@ -748,6 +833,8 @@ impl GraphIndex {
             .all_call_records()
             .await
             .map_err(serr)?;
+        cg_d!(__t_all_call_records, "all_call_records");
+        let __t_load_all_files = cg_t!("load_all_files");
         self.files = self
             .storage
             .read()
@@ -755,24 +842,29 @@ impl GraphIndex {
             .load_all_files()
             .await
             .map_err(serr)?;
+        cg_d!(__t_load_all_files, "load_all_files");
         self.version = self.storage.read().await.version().await.map_err(serr)?;
 
         // Registry (scope ids trong entity đã là global — persist sau remap).
         self.symbols.clear();
         self.name_index.clear();
         self.scope_index.clear();
+        let __t_a = cg_t!("index_symbol_loop");
         for sym in symbols {
             self.index_symbol(sym);
         }
+        cg_d!(__t_a, "index_symbol_loop");
 
         // Chains.
+        let __t_b = cg_t!("chains_decode");
         self.chains_map.clear();
         for (func_id, bytes) in chains_raw {
             self.chains_map
                 .insert(func_id, crate::storage::decode_chain(&bytes));
         }
 
-        // Call-name index.
+        cg_d!(__t_b, "chains_decode");
+        let __t_c = cg_t!("call_names_json");
         self.call_names.clear();
         for (name, bytes) in call_names_raw {
             if let Ok(sites) = serde_json::from_slice::<Vec<CallSite>>(&bytes) {
@@ -787,12 +879,28 @@ impl GraphIndex {
                 recs.insert(func, r);
             }
         }
+        cg_d!(__t_c, "call_names_json");
+        let __t_d = cg_t!("rebuild_edges");
         self.rebuild_edges(&recs);
+        cg_d!(__t_d, "rebuild_edges");
 
         // Engines.
+        let __t_e = cg_t!("rebuild_chain_engine");
         self.rebuild_chain_engine(None).await?;
-        self.rebuild_name_engine(None).await?;
+        cg_d!(__t_e, "rebuild_chain_engine");
+        let __t_f = cg_t!("rebuild_name_engine");
+        // Name trie đã persist ở dataset riêng — nếu version khớp thì dựng
+        // lại 2 Vec phụ, không clear + insert lại ~70k tên (11-20s).
+        if self.name_engine_is_current().await {
+            self.load_name_records();
+        } else {
+            self.rebuild_name_engine(None).await?;
+            self.stamp_name_engine().await;
+        }
+        cg_d!(__t_f, "rebuild_name_engine");
+        let __t_g = cg_t!("rebuild_vector_index");
         self.rebuild_vector_index(None).await?;
+        cg_d!(__t_g, "rebuild_vector_index");
         // Persist counts để `codegraph_status` đọc O(1) (không rebuild lại).
         {
             let mut st = self.storage.write().await;
@@ -806,6 +914,7 @@ impl GraphIndex {
             .await
             .map_err(serr)?;
         }
+        cg_d!(__t, "rebuild TOTAL");
         Ok(())
     }
 
@@ -900,6 +1009,54 @@ impl GraphIndex {
         Ok(())
     }
 
+    /// Slot record dành cho version stamp — name record bắt đầu từ 1 nên không
+    /// va chạm. Stamp = `[version: u64 LE][count: u64 LE]`.
+    const NAME_STAMP_SLOT: usize = 0;
+
+    /// Name trie trên đĩa còn đúng version + khớp số record đã ghi (chống dataset
+    /// bị xoá giữa chừng → coi như stale).
+    async fn name_engine_is_current(&self) -> bool {
+        let Some(store) = &self.name_store else {
+            return false;
+        };
+        let guard = store.read().await;
+        let Ok(Some(bytes)) = guard.get_meta(Self::NAME_STAMP_SLOT).await else {
+            return false;
+        };
+        if bytes.len() != 16 {
+            return false;
+        }
+        let version = u64::from_le_bytes(bytes[0..8].try_into().unwrap_or([0; 8]));
+        let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap_or([0; 8])) as usize;
+        if version != self.version {
+            return false;
+        }
+        guard.get_key_len(count).await.ok().flatten().is_some()
+    }
+
+    /// Ghi stamp sau khi trie dựng lại — `version` + số tên distinct.
+    async fn stamp_name_engine(&self) {
+        let Some(store) = &self.name_store else {
+            return;
+        };
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&self.version.to_le_bytes());
+        bytes[8..16].copy_from_slice(&(self.name_index.len() as u64).to_le_bytes());
+        let mut guard = store.write().await;
+        if let Err(e) = guard.set_meta(Self::NAME_STAMP_SLOT, &bytes).await {
+            eprintln!("[codegraph] name engine stamp failed: {e}");
+        }
+    }
+
+    /// Dựng lại `name_records` từ `name_index` (nằm sẵn trong RAM) — thay cho
+    /// vòng trie insert khi đã bỏ qua rebuild. Mảng giữ thứ tự sort để vừa map
+    /// record→tên vừa dùng cho scan Prefix/Suffix/Exact.
+    fn load_name_records(&mut self) {
+        let mut distinct: Vec<&String> = self.name_index.keys().collect();
+        distinct.sort();
+        self.name_records = distinct.into_iter().cloned().collect();
+    }
+
     /// Rebuild name engine từ `name_index` (clear + insert mỗi tên distinct).
     async fn rebuild_name_engine(&mut self, progress: Option<&dyn IngestProgress>) -> Result<()> {
         self.names.clear().await.map_err(serr_search)?;
@@ -910,7 +1067,6 @@ impl GraphIndex {
             p.phase("rebuild name-search engine", distinct.len());
         }
         let mut record = 0usize;
-        self.sorted_name_keys = distinct.iter().map(|s| s.to_string()).collect();
         for name in distinct {
             record += 1;
             let metas: Vec<Option<&[u8]>> = vec![None; name.len()];
@@ -1024,7 +1180,6 @@ impl GraphIndex {
         self.edges.clear();
         self.files.clear();
         self.name_records.clear();
-        self.sorted_name_keys.clear();
         self.next_id = SYMBOL_BASE;
 
         // ── Phase 1: register + remap ──
@@ -1104,6 +1259,10 @@ impl GraphIndex {
         self.rebuild_name_engine(p).await?;
         self.rebuild_vector_index(p).await?;
         self.version += 1;
+        // Stamp SAU khi bump version: đây là chỗ duy nhất ghi name trie ra
+        // đĩa, nên `rebuild()` lúc mở index chỉ cần đọc stamp là bỏ qua
+        // `rebuild_name_engine` (11-32s) — thay vì dựng lại mỗi lần mở.
+        self.stamp_name_engine().await;
         {
             let mut st = self.storage.write().await;
             st.save_next_id(self.next_id).await.map_err(serr)?;
@@ -1399,6 +1558,13 @@ impl GraphIndex {
         for (i, entry) in calls.iter().enumerate() {
             let (c, caller) = (entry.rec, entry.caller);
             recs_by_caller.entry(caller).or_default().push(i as u32);
+
+            // Record nhãn nhánh (`call_name` rỗng, `condition` = trigger) vẫn được
+            // persist để `flow()` đọc lại — nhưng KHÔNG vào call-name index
+            // (không phải call thật).
+            if c.call_name.is_empty() {
+                continue;
+            }
 
             // Call-site index: key theo tên thô + alias type-qualified (nếu có).
             let site = CallSite {
@@ -1792,6 +1958,21 @@ impl GraphIndex {
         let rec_by_pos: HashMap<usize, &CallRecord> =
             recs.iter().map(|r| (r.position, r)).collect();
 
+        // Nhãn trigger của marker nhánh: record có `call_name` rỗng + `condition`
+        // đặt tại đúng vị trí marker (xem `emit_branch_label` phía extractor).
+        let branch_labels: Vec<BranchLabel> = recs
+            .iter()
+            .filter(|r| {
+                r.call_name.is_empty()
+                    && r.condition.is_some()
+                    && chain.get(r.position).is_some_and(|&e| is_marker(e))
+            })
+            .map(|r| BranchLabel {
+                position: r.position,
+                label: r.condition.clone().unwrap_or_default(),
+            })
+            .collect();
+
         let chain_desc = chain
             .iter()
             .enumerate()
@@ -1819,6 +2000,9 @@ impl GraphIndex {
             }
             if e == 0 {
                 if let Some(rec) = rec_by_pos.get(&i) {
+                    if rec.call_name.is_empty() {
+                        continue; // record nhãn nhánh, không phải call
+                    }
                     calls.push(FlowCall {
                         position: i,
                         to_name: rec.call_name.clone(),
@@ -1868,6 +2052,7 @@ impl GraphIndex {
             chain,
             chain_desc,
             calls,
+            branch_labels,
         })
     }
 
@@ -2334,7 +2519,7 @@ impl GraphIndex {
     /// true, cursor: Some(phase dở) }` — caller gọi lại với `resume =
     /// Some(cursor)` để tiếp tục từ đúng vị trí (không lặp phần đã duyệt).
     ///
-    /// - Phase A (Contains: engine resumable; khác: scan `sorted_name_keys`)
+    /// - Phase A (Contains: engine resumable; khác: scan `name_records`)
     ///   sinh danh sách tên khớp **đã sort** — chỉ hoàn tất sau khi quét hết
     ///   (không thể sort từng phần vì tên mới có thể chèn vào giữa).
     /// - Phase B (`Expand`) stream ids theo tên đã sort — `name_index[name]`
@@ -2447,10 +2632,10 @@ impl GraphIndex {
                             timed_out = true;
                             break;
                         }
-                        if pos >= self.sorted_name_keys.len() {
+                        if pos >= self.name_records.len() {
                             break;
                         }
-                        let name = &self.sorted_name_keys[pos];
+                        let name = &self.name_records[pos];
                         let ok = match mode {
                             SymbolMatch::Prefix => name.starts_with(&q),
                             SymbolMatch::Suffix => name.ends_with(&q),
@@ -2692,7 +2877,7 @@ impl GraphIndex {
             edges: mt::edges_mem(&self.edges),
             name_index: mt::name_index_mem(&self.name_index),
             scope_index: mt::scope_index_mem(&self.scope_index),
-            name_keys: mt::name_keys_mem(&self.name_records, &self.sorted_name_keys),
+            name_keys: mt::name_keys_mem(&self.name_records),
             files: mt::files_mem(&self.files),
             caches,
         }
