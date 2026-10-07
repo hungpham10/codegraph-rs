@@ -112,7 +112,11 @@ impl GitRepo for DiskGit {
     }
 
     async fn branches(&self) -> Result<Vec<String>> {
-        let text = self.run(&["branch", "--format=%(refname:short)", "--sort=-committerdate"])?;
+        let text = self.run(&[
+            "branch",
+            "--format=%(refname:short)",
+            "--sort=-committerdate",
+        ])?;
         Ok(text
             .lines()
             .map(|l| l.trim().to_string())

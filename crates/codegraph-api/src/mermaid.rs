@@ -608,7 +608,15 @@ mod tests {
         let f = flow_labelled(
             chain,
             vec![
-                "root", "IF_TRUE", "a", "BRANCH_END", "SWITCH_CASE", "b", "SWITCH_END", "LOOP", "c",
+                "root",
+                "IF_TRUE",
+                "a",
+                "BRANCH_END",
+                "SWITCH_CASE",
+                "b",
+                "SWITCH_END",
+                "LOOP",
+                "c",
                 "LOOP_BACK",
             ],
             vec![
@@ -616,11 +624,7 @@ mod tests {
                 call(5, "b", Some(2), 5),
                 call(8, "c", Some(3), 8),
             ],
-            vec![
-                (1, "x > 0"),
-                (4, "Cmd::Init"),
-                (7, "i < n"),
-            ],
+            vec![(1, "x > 0"), (4, "Cmd::Init"), (7, "i < n")],
         );
         let m = control_flow(&f);
         assert!(m.contains("c1{\"IF_TRUE: x > 0\"}"), "{m}");

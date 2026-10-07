@@ -787,9 +787,7 @@ impl GraphIndex {
         // Đo bằng sink `codegraph_core::prof` — stderr bị MCP host nuốt mất
         // khi `serve --mcp`, nên log chỉ ra được khi bật qua env (xem prof.rs).
         macro_rules! cg_t {
-            ($n:expr) => {{
-                codegraph_core::prof::stage($n)
-            }};
+            ($n:expr) => {{ codegraph_core::prof::stage($n) }};
         }
         macro_rules! cg_d {
             ($t:expr, $n:expr) => {{

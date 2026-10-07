@@ -504,8 +504,13 @@ impl CodegraphServer {
             }
             "codegraph_graphcode_origin_simulate" => {
                 let git = codegraph_source::DiskGit::new(root.clone());
-                codegraph_api::tools::dispatch_origin_simulate(&root, sgi.clone(), &git, args.clone())
-                    .await
+                codegraph_api::tools::dispatch_origin_simulate(
+                    &root,
+                    sgi.clone(),
+                    &git,
+                    args.clone(),
+                )
+                .await
             }
             _ => {
                 tools::dispatch_with_api(
