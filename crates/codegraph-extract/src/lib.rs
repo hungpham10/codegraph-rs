@@ -20,7 +20,7 @@ pub mod bingraph;
 #[cfg(feature = "binary")]
 pub use bingraph::{BinFlag, BinPage, BinSymbolRow, BinaryGraph, ListOrder, NameMatch};
 pub use config::{DocGraphSection, ExtractConfig, HeaderLanguage, DEFAULT_CONFIG_TOML};
-pub use docgraph::open_doc_graph;
+pub use docgraph::{open_doc_graph, SharedDocGraph};
 pub use orchestrator::{ExtractStats, Orchestrator};
 pub use project::{init_project, project_db_path, project_dir, CODEGRAPH_DIR};
 

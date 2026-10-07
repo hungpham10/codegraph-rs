@@ -27,11 +27,16 @@ use std::collections::{HashMap, HashSet};
 /// `LOOP_BACK` vẽ cạnh quay về header; `SWITCH_CASE` toả ra từ node trước switch.
 pub fn control_flow(flow: &FlowResult) -> String {
     let calls: HashMap<usize, &FlowCall> = flow.calls.iter().map(|c| (c.position, c)).collect();
+    let labels: HashMap<usize, &str> = flow
+        .branch_labels
+        .iter()
+        .map(|b| (b.position, b.label.as_str()))
+        .collect();
 
     let mut out = String::from("flowchart TD\n");
     for (i, &raw) in flow.chain.iter().enumerate() {
         let desc = flow.chain_desc.get(i).map(String::as_str).unwrap_or("");
-        let (open, close, label) = node_style(&flow.chain, i, raw, desc, &calls);
+        let (open, close, label) = node_style(&flow.chain, i, raw, desc, &calls, &labels);
         out.push_str(&format!("  c{i}{open}\"{}\"{close}\n", sanitize(&label)));
     }
 
@@ -52,6 +57,7 @@ fn node_style(
     raw: u64,
     desc: &str,
     calls: &HashMap<usize, &FlowCall>,
+    labels: &HashMap<usize, &str>,
 ) -> (&'static str, &'static str, String) {
     if is_marker(raw) {
         let name = marker_name(raw).unwrap_or("MARKER");
@@ -61,10 +67,19 @@ fn node_style(
             | "SWITCH_END" | "RECURSIVE_CALL" => ("([", "])"),
             _ => ("[", "]"),
         };
+        // Nhãn trigger: ưu tiên `branch_labels` (điều kiện/case persist), rồi
+        // fallback suy từ guard của call trong nhánh (dữ liệu cũ chưa có label).
+        let branch = labels
+            .get(&i)
+            .map(|s| s.to_string())
+            .or_else(|| match name {
+                "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "LOOP" => guard_for(chain, i, calls),
+                _ => None,
+            });
         let label = match name {
-            "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" => match guard_for(chain, i, calls) {
-                Some(g) => format!("{name}: {g}"),
-                None => name.to_string(),
+            "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "LOOP" => match branch {
+                Some(g) if !g.is_empty() => format!("{name}: {g}"),
+                _ => name.to_string(),
             },
             _ => name.to_string(),
         };
@@ -180,6 +195,83 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
         i += 1;
     }
     edges
+}
+
+/// Control-flow của `head` với 2 màu so với `base` (branch review):
+///
+/// - call/step **chỉ có ở head** (không thấy ở base) → node `added` (xanh lá);
+/// - call **chỉ có ở base** (đã bị xoá ở head) → node `removed` (đỏ), nối từ
+///   root bằng cạnh nét đứt;
+/// - còn lại giữ style mặc định.
+///
+/// Dùng để render "branch A vs branch B" trong màn review — thay đổi nổi bật
+/// bằng 2 màu, vẫn là giao diện mermaid.
+pub fn control_flow_diff(head: &FlowResult, base: &FlowResult) -> String {
+    let calls: HashMap<usize, &FlowCall> = head.calls.iter().map(|c| (c.position, c)).collect();
+    let labels: HashMap<usize, &str> = head
+        .branch_labels
+        .iter()
+        .map(|b| (b.position, b.label.as_str()))
+        .collect();
+    let base_names: HashSet<&str> = base
+        .calls
+        .iter()
+        .map(|c| c.to_name.as_str())
+        .filter(|n| !n.is_empty())
+        .collect();
+    let head_names: HashSet<&str> = head
+        .calls
+        .iter()
+        .map(|c| c.to_name.as_str())
+        .filter(|n| !n.is_empty())
+        .collect();
+
+    let mut out = String::from("flowchart TD\n");
+    let mut added_idx = Vec::new();
+    for (i, &raw) in head.chain.iter().enumerate() {
+        let desc = head.chain_desc.get(i).map(String::as_str).unwrap_or("");
+        let (open, close, label) = node_style(&head.chain, i, raw, desc, &calls, &labels);
+        out.push_str(&format!("  c{i}{open}\"{}\"{close}\n", sanitize(&label)));
+        if let Some(c) = calls.get(&i) {
+            if !c.to_name.is_empty() && !base_names.contains(c.to_name.as_str()) {
+                added_idx.push(i);
+            }
+        }
+    }
+
+    let mut edges = structural_edges(&head.chain);
+    edges.sort_unstable();
+    edges.dedup();
+    for (a, b) in edges {
+        out.push_str(&format!("  c{a} --> c{b}\n"));
+    }
+
+    // Call có ở base nhưng không còn ở head → node đỏ nét đứt từ root.
+    let mut removed_idx = Vec::new();
+    let mut k = 0usize;
+    for c in &base.calls {
+        if !c.to_name.is_empty() && !head_names.contains(c.to_name.as_str()) {
+            out.push_str(&format!(
+                "  r{k}[[\"{} · removed\"]]\n",
+                sanitize(&c.to_name)
+            ));
+            out.push_str(&format!("  c0 -.-> r{k}\n"));
+            removed_idx.push(k);
+            k += 1;
+        }
+    }
+
+    if !added_idx.is_empty() || !removed_idx.is_empty() {
+        out.push_str("  classDef added fill:#14532d,stroke:#22c55e,color:#dcfce7\n");
+        out.push_str("  classDef removed fill:#450a0a,stroke:#ef4444,color:#fecaca\n");
+        for i in &added_idx {
+            out.push_str(&format!("  class c{i} added\n"));
+        }
+        for i in &removed_idx {
+            out.push_str(&format!("  class r{i} removed\n"));
+        }
+    }
+    out
 }
 
 /// Call graph (callers + callees) quanh một symbol, BFS tới `depth` hop.
@@ -312,7 +404,7 @@ fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_core::{ScopeLevel, Symbol, SymbolKind};
+    use codegraph_core::{BranchLabel, ScopeLevel, Symbol, SymbolKind};
 
     fn flow(chain: Vec<u64>, desc: Vec<&str>, calls: Vec<FlowCall>) -> FlowResult {
         FlowResult {
@@ -335,7 +427,26 @@ mod tests {
             chain,
             chain_desc: desc.into_iter().map(String::from).collect(),
             calls,
+            branch_labels: Vec::new(),
         }
+    }
+
+    /// flow kèm branch_labels (position, label).
+    fn flow_labelled(
+        chain: Vec<u64>,
+        desc: Vec<&str>,
+        calls: Vec<FlowCall>,
+        labels: Vec<(usize, &str)>,
+    ) -> FlowResult {
+        let mut f = flow(chain, desc, calls);
+        f.branch_labels = labels
+            .into_iter()
+            .map(|(position, label)| BranchLabel {
+                position,
+                label: label.into(),
+            })
+            .collect();
+        f
     }
 
     fn call(pos: usize, name: &str, to_id: Option<u64>, line: u32) -> FlowCall {
@@ -480,6 +591,48 @@ mod tests {
     }
 
     #[test]
+    fn branch_labels_override_guard_and_label_switch_and_loop() {
+        // if + match + while, nhãn persist ở đúng vị trí marker.
+        let chain = vec![
+            100,
+            MARKER_IF_TRUE,
+            0,
+            MARKER_BRANCH_END,
+            MARKER_SWITCH_CASE,
+            0,
+            MARKER_SWITCH_END,
+            MARKER_LOOP,
+            0,
+            MARKER_LOOP_BACK,
+        ];
+        let f = flow_labelled(
+            chain,
+            vec![
+                "root",
+                "IF_TRUE",
+                "a",
+                "BRANCH_END",
+                "SWITCH_CASE",
+                "b",
+                "SWITCH_END",
+                "LOOP",
+                "c",
+                "LOOP_BACK",
+            ],
+            vec![
+                call(2, "a", Some(1), 2),
+                call(5, "b", Some(2), 5),
+                call(8, "c", Some(3), 8),
+            ],
+            vec![(1, "x > 0"), (4, "Cmd::Init"), (7, "i < n")],
+        );
+        let m = control_flow(&f);
+        assert!(m.contains("c1{\"IF_TRUE: x > 0\"}"), "{m}");
+        assert!(m.contains("c4{\"SWITCH_CASE: Cmd::Init\"}"), "{m}");
+        assert!(m.contains("c7([\"LOOP: i < n\"])"), "{m}");
+    }
+
+    #[test]
     fn root_has_no_incoming_edge() {
         let chain = vec![100, 0];
         let f = flow(
@@ -490,5 +643,40 @@ mod tests {
         let m = control_flow(&f);
         assert!(!m.contains("--> c0\n"), "{m}");
         assert!(m.contains("c0 --> c1"), "{m}");
+    }
+
+    #[test]
+    fn diff_colors_added_and_removed_calls() {
+        // base: root → a(), b()
+        let base = flow(
+            vec![100, 0, 0],
+            vec!["root", "a", "b"],
+            vec![call(1, "a", Some(101), 2), call(2, "b", Some(102), 3)],
+        );
+        // head: root → a(), c()  (b xoá, c thêm)
+        let head = flow(
+            vec![100, 0, 0],
+            vec!["root", "a", "c"],
+            vec![call(1, "a", Some(101), 2), call(2, "c", Some(103), 3)],
+        );
+        let m = control_flow_diff(&head, &base);
+        // c (index 2) là added; b (không còn) là removed node r0.
+        assert!(m.contains("classDef added"), "{m}");
+        assert!(m.contains("class c2 added"), "{m}");
+        assert!(m.contains("r0[[\"b · removed\"]]"), "{m}");
+        assert!(m.contains("class r0 removed"), "{m}");
+        // a không đổi → không được tô.
+        assert!(!m.contains("class c1 added"), "{m}");
+    }
+
+    #[test]
+    fn diff_without_changes_has_no_classes() {
+        let f = flow(
+            vec![100, 0],
+            vec!["root", "a"],
+            vec![call(1, "a", Some(101), 2)],
+        );
+        let m = control_flow_diff(&f, &f);
+        assert!(!m.contains("classDef"), "{m}");
     }
 }

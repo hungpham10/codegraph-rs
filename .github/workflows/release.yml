@@ -87,12 +87,39 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
+  # Build the web UI once (platform-independent) → artifact consumed by the
+  # per-target build jobs so rust-embed can include it in every binary.
+  build-web:
+    name: build-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build web assets
+        run: |
+          npm --prefix web ci --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Upload web assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
+          if-no-files-found: error
+
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
+      - build-web
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
@@ -136,6 +163,11 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      - name: Fetch web assets (for rust-embed)
+        uses: actions/download-artifact@v8
+        with:
+          name: codegraph-web-assets
+          path: crates/codegraph-web/assets/
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}

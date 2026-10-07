@@ -103,6 +103,14 @@ enum Cmd {
         /// `--graphql` và `--mcp`/`--http`.
         #[arg(long)]
         mermaid: bool,
+        /// Tắt web UI nhúng (mặc định BẬT khi `--graphql`): UI Svelte phục vụ
+        /// tại `/`, gọi chính `/graphql`. Dùng `--no-web` để chỉ chạy API.
+        #[arg(long = "no-web")]
+        no_web: bool,
+        /// Module UI được bật (lặp được, phân cách dấu phẩy). Mặc định = tất
+        /// cả: explore, review, documents. Tắt module để thu gọn sidebar.
+        #[arg(long = "ui-modules")]
+        ui_modules: Vec<String>,
         /// Serve qua Streamable HTTP (POST/GET/DELETE + SSE) thay vì stdio —
         /// mount ở cả `/` và `/mcp`. Default bind 0.0.0.0:8123 (docker-friendly).
         #[arg(long)]
@@ -190,6 +198,8 @@ async fn main() -> Result<()> {
             mcp,
             graphql,
             mermaid,
+            no_web,
+            ui_modules,
             http,
             addr,
             allow_host,
@@ -203,6 +213,8 @@ async fn main() -> Result<()> {
                 mcp,
                 graphql,
                 mermaid,
+                no_web,
+                ui_modules,
                 http,
                 addr,
                 allow_host,
@@ -624,6 +636,8 @@ async fn cmd_serve(
     mcp: bool,
     graphql: bool,
     mermaid: bool,
+    no_web: bool,
+    ui_modules: Vec<String>,
     http: bool,
     addr: std::net::SocketAddr,
     allow_host: Vec<String>,
@@ -662,6 +676,8 @@ async fn cmd_serve(
             format,
             allow_hosts: allowed,
             mermaid,
+            web: !no_web,
+            ui_modules,
         };
         return codegraph_graphql::serve(cfg).await;
     }

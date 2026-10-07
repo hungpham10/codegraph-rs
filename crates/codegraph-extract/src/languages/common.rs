@@ -641,6 +641,10 @@ fn walk_chain(
         } else {
             Some(cond_text)
         };
+        // Nhãn trigger của nhánh if (`IF_TRUE: <cond>`); else dùng phủ định.
+        if let Some(c) = &if_cond {
+            emit_branch_label(ctx, c);
+        }
         // Calls TRONG condition (`if (a() && b(c()))`) được emit ngay sau IF_TRUE
         // — trước đây rớt khỏi chain (không tìm/search được).
         if let Some(cn) = cond_node {
@@ -659,6 +663,9 @@ fn walk_chain(
                     walk_alternative(ctx, &alt, depth, in_loop, if_cond);
                 } else {
                     chain_push(ctx, MARKER_IF_FALSE);
+                    if let Some(c) = &if_cond {
+                        emit_branch_label(ctx, &format!("!{c}"));
+                    }
                     walk_alternative(ctx, &alt, depth, in_loop, negate_cond(if_cond));
                 }
             }
@@ -676,10 +683,17 @@ fn walk_chain(
         // Condition của loop (while/for/do): emit calls trong condition + giữ
         // text làm metadata — trước đây loop mất cả calls lẫn text.
         let cond_node = loop_condition_node(node, ctx.spec);
-        let loop_cond = cond_node
+        // Text điều kiện của chính loop (`while (x)`, `for (i=0; i<n; i++)`).
+        // `for x in xs` / `for-each` không có condition → None (không gán nhãn,
+        // tránh lẫn với điều kiện `if` bao ngoài).
+        let loop_cond_text = cond_node
             .and_then(|c| text(&c, ctx.src))
-            .filter(|t| !t.is_empty())
-            .or_else(|| condition.clone());
+            .filter(|t| !t.is_empty());
+        let loop_cond = loop_cond_text.clone().or_else(|| condition.clone());
+        // Nhãn trigger của loop ngay tại marker LOOP.
+        if let Some(l) = &loop_cond_text {
+            emit_branch_label(ctx, l);
+        }
         // do-while/repeat: condition chạy SAU body → emit sau.
         let is_do_while =
             k.contains("do") || k == "repeat_statement" || k == "repeat_while_statement";
@@ -710,10 +724,12 @@ fn walk_chain(
         }
         for case in switch_cases(node, ctx.spec) {
             chain_push(ctx, MARKER_SWITCH_CASE);
-            // String-literal case label (`case 'optimize_text':`) — dispatch key
-            // không phải identifier call; emit call-name ảo để search_by_call
-            // tìm được function chứa switch.
-            emit_case_label_call(ctx, &case, in_loop, condition.clone());
+            // Nhãn trigger của case (`Cmd::Init`, `1`, `_`, `'store'`).
+            if let Some(l) = case_pattern_text(&case, ctx.src) {
+                emit_branch_label(ctx, &l);
+            }
+            // String-literal case label → call-name ảo (search_by_call).
+            emit_case_label(ctx, &case, in_loop, condition.clone());
             walk_block(ctx, &case, depth + 1, in_loop, condition.clone());
             chain_push(ctx, MARKER_SWITCH_END);
         }
@@ -814,6 +830,9 @@ fn walk_alternative(
         } else {
             Some(cond_text)
         };
+        if let Some(c) = &elif_cond {
+            emit_branch_label(ctx, c);
+        }
         if let Some(cn) = cond_node {
             walk_chain(ctx, &cn, depth + 1, in_loop, elif_cond.clone());
         }
@@ -942,11 +961,14 @@ fn switch_cases<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Vec<Node<'a>> {
     out
 }
 
-/// Case label là string literal (`case 'optimize_text':`) — dispatch key theo
+/// Case label **string literal** (`case 'optimize_text':`) — dispatch key theo
 /// chuỗi, không phải call thật. Emit placeholder `0` + CallRecord với
 /// `call_name = literal` (bỏ quote) để `search_by_call` index được. Không có
 /// symbol tương ứng trong repo → không resolve được → giữ unresolved call.
-fn emit_case_label_call(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition: Option<String>) {
+///
+/// (Nhãn hiển thị cho UI — kể cả pattern `Cmd::Init`/`1`/`_` — do
+/// [`emit_branch_label`] gắn ở vị trí marker, không đi qua đường này.)
+fn emit_case_label(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition: Option<String>) {
     // Field `value` là expression của case (`case X:` → X). Fallback: named child
     // đầu tiên (một số grammar không đặt field).
     let value = case
@@ -978,6 +1000,57 @@ fn emit_case_label_call(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition
         is_loop_body: in_loop > 0,
         effect,
         effect_desc,
+        target_class: None,
+        target_method: None,
+    });
+}
+
+/// Nhãn **trigger** của một case/switch (`Cmd::Init`, `Some(v)`, `1`, `_`,
+/// `'store'`) — text thô của pattern. Không dùng cho search (đã có đường
+/// string-literal ở [`emit_case_label`]); chỉ để mermaid hiện `SWITCH_CASE: <nhãn>`.
+fn case_pattern_text(case: &Node, src: &[u8]) -> Option<String> {
+    let value = case
+        .child_by_field_name("value")
+        .or_else(|| case.child_by_field_name("pattern"))
+        .or_else(|| {
+            named_children(case)
+                .into_iter()
+                .find(|c| !is_case_body_kind(c.kind()))
+        })?;
+    text(&value, src).map(|t| t.trim().to_string())
+}
+
+/// Node kind là *thân* của một case (không phải pattern) — dùng để fallback lấy
+/// pattern khi grammar không đặt field. Bỏ qua block/statement-list/body.
+fn is_case_body_kind(kind: &str) -> bool {
+    kind.contains("block")
+        || kind.contains("statement")
+        || kind == "declaration_list"
+        || kind == "compound_statement"
+}
+
+/// Gắn **nhãn nhánh** vào đúng vị trí marker trong chain (không thêm node):
+/// thêm một `CallRecord` với `position = <marker vừa push>`, `condition = label`,
+/// `call_name = ""`. Marker không bao giờ có call thật ở cùng position nên record
+/// này tách hẳn khỏi call — không tạo edge, không lọt vào call-name index, và
+/// `flow()` đọc lại thành `branch_labels` cho UI (`IF_TRUE: x > 0`, `LOOP: i < n`,
+/// `SWITCH_CASE: Cmd::Init`).
+fn emit_branch_label(ctx: &mut ChainCtx, label: &str) {
+    let name = label.trim();
+    if name.is_empty() {
+        return;
+    }
+    let position = ctx.chain.len().saturating_sub(1); // marker vừa push
+    ctx.calls.push(CallRecord {
+        caller_id: ctx.func_id,
+        call_name: String::new(),
+        position,
+        arg_exprs: Vec::new(),
+        line: 0,
+        condition: Some(name.to_string()),
+        is_loop_body: false,
+        effect: codegraph_core::EffectType::None,
+        effect_desc: None,
         target_class: None,
         target_method: None,
     });

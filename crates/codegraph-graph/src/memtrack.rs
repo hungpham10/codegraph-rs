@@ -171,14 +171,13 @@ pub fn scope_index_mem(m: &HashMap<u64, Vec<u64>>) -> StructureMem {
     chains_map_mem(m)
 }
 
-/// RAM của `name_records: Vec<String>` + `sorted_name_keys: Vec<String>`.
+/// RAM của `name_records: Vec<String>`.
 #[allow(clippy::ptr_arg)] // xem `vec_bytes` — cần `capacity()` của `Vec`.
-pub fn name_keys_mem(records: &Vec<String>, sorted: &Vec<String>) -> StructureMem {
+pub fn name_keys_mem(records: &Vec<String>) -> StructureMem {
     StructureMem {
-        entries: (records.len() + sorted.len()) as u64,
-        fixed_bytes: vec_bytes::<String>(records) + vec_bytes::<String>(sorted),
-        heap_bytes: records.iter().map(str_bytes).sum::<u64>()
-            + sorted.iter().map(str_bytes).sum::<u64>(),
+        entries: records.len() as u64,
+        fixed_bytes: vec_bytes::<String>(records),
+        heap_bytes: records.iter().map(str_bytes).sum::<u64>(),
     }
 }
 

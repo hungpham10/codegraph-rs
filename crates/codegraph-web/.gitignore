@@ -1,0 +1,5 @@
+# Output build của web UI (SvelteKit adapter-static) — sinh bởi
+# scripts/build-web.sh hoặc job `build-web` trong CI/release.
+# KHÔNG commit: mọi clone sạch build lại từ web/ rồi nhúng qua rust-embed.
+/assets/*
+!/assets/.gitkeep

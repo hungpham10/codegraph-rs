@@ -263,6 +263,14 @@ RUST_LOG=codegraph_mcp=debug codegraph serve --mcp
 
 # Watcher debug
 RUST_LOG=codegraph=debug codegraph serve --mcp
+
+# Profiling [CGPROF] — đo từng stage của index rebuild (mặc định tắt).
+# `serve --mcp` nói JSON-RPC qua stdout và stderr bị MCP host sở hữu (Claude
+# Code, Codex… pipe stderr của tiến trình con vào log riêng), nên muốn đọc
+# timing thì ghi ra file thay vì stderr.
+CODEGRAPH_PROFILE=stderr codegraph serve --mcp       # ra stderr (chạy tay trong terminal)
+CODEGRAPH_PROFILE_FILE=/tmp/cgprof.log codegraph serve --mcp && tail -f /tmp/cgprof.log
+CODEGRAPH_PROFILE=0 codegraph serve --mcp            # tắt tường minh
 ```
 
 ---

@@ -498,11 +498,19 @@ impl CodegraphServer {
                 codegraph_api::tools::dispatch_diff(&root, sgi.clone(), args.clone()).await
             }
             "codegraph_graphcode_diff_simulate" => {
-                codegraph_api::tools::dispatch_diff_simulate(&root, sgi.clone(), args.clone()).await
+                let git = codegraph_source::DiskGit::new(root.clone());
+                codegraph_api::tools::dispatch_diff_simulate(&root, sgi.clone(), &git, args.clone())
+                    .await
             }
             "codegraph_graphcode_origin_simulate" => {
-                codegraph_api::tools::dispatch_origin_simulate(&root, sgi.clone(), args.clone())
-                    .await
+                let git = codegraph_source::DiskGit::new(root.clone());
+                codegraph_api::tools::dispatch_origin_simulate(
+                    &root,
+                    sgi.clone(),
+                    &git,
+                    args.clone(),
+                )
+                .await
             }
             _ => {
                 tools::dispatch_with_api(

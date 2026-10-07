@@ -864,6 +864,7 @@ impl BinaryGraph {
             chain,
             chain_desc,
             calls,
+            branch_labels: Vec::new(),
         })
     }
 
