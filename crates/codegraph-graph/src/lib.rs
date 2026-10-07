@@ -169,11 +169,17 @@ fn name_dsn(main_dsn: &str) -> Option<String> {
 }
 
 /// Thay tên file cuối của `path` (giữ nguyên thư mục cha) — `names.lmdb`
-/// đặt cạnh `db.lmdb` dù `a/b/db.lmdb` → `a/b/names.lmdb`.
+/// đặt cạnh `db.lmdb` dù `a/b/db.lmdb` → `a/b/names.lmdb`. Xử lý **cả** dấu
+/// phân cách `/` (Unix/DSN) lẫn `\` (Windows) để path `<drive>:\...\db.sqlite`
+/// giữ nguyên thư mục cha thay vì rơi về cwd.
 #[cfg(any(feature = "sqlite", feature = "lmdb", feature = "redis"))]
 fn sibling_file(path: &str, file: &str) -> String {
-    match path.rfind('/') {
-        Some(i) => format!("{}/{}", &path[..i], file),
+    let sep = match (path.rfind('/'), path.rfind('\\')) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    match sep {
+        Some(i) => format!("{}{}", &path[..=i], file),
         None => file.to_string(),
     }
 }
@@ -2906,6 +2912,20 @@ mod tests {
     use codegraph_core::{
         Annotation, MARKER_BRANCH_END, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, ScopeLevel,
     };
+
+    #[test]
+    #[cfg(any(feature = "sqlite", feature = "lmdb", feature = "redis"))]
+    fn sibling_file_handles_both_separators() {
+        // Unix / DSN style.
+        assert_eq!(sibling_file("db.sqlite", "names.sqlite"), "names.sqlite");
+        assert_eq!(sibling_file("a/b/db.lmdb", "names.lmdb"), "a/b/names.lmdb");
+        // Windows backslash must keep the parent dir (regression:
+        // name_engine_stamp_survives_reopen failed on windows).
+        assert_eq!(
+            sibling_file(r"C:\repo\.codegraph\db.sqlite", "names.sqlite"),
+            r"C:\repo\.codegraph\names.sqlite"
+        );
+    }
 
     fn sym(file: &str, name: &str, id: u64) -> Symbol {
         Symbol {
