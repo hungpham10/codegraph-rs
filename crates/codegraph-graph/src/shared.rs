@@ -413,6 +413,53 @@ mod tests {
         assert!(idx.name_engine_is_current().await, "stamp mới sau ingest");
     }
 
+    /// Chain trie persist trong `rt_*` + stamp version → mở lại index bỏ qua
+    /// `rebuild_chain_engine` (phần tốn nhất: ~113s@20k). Trie vẫn đọc lại được
+    /// cho `callers`/`search_flow`.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn chain_engine_stamp_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let db_str = format!("sqlite://{}", db_path.to_string_lossy());
+
+        {
+            let mut idx = GraphIndex::open(&db_str).await.unwrap();
+            let r = mk_result(
+                "a.ts",
+                vec![sym("a", SYMBOL_BASE), sym("b", SYMBOL_BASE + 1)],
+                vec![SYMBOL_BASE, SYMBOL_BASE + 1],
+            );
+            idx.ingest(&[r]).await.unwrap();
+            assert!(idx.chain_engine_is_current().await, "stamp sau ingest");
+        }
+
+        // Mở lại → stamp khớp version → bỏ qua rebuild trie; trie vẫn sống.
+        let idx = GraphIndex::open(&db_str).await.unwrap();
+        assert!(
+            idx.chain_engine_is_current().await,
+            "stamp phải khớp sau reopen"
+        );
+        // `search_flow` đọc thẳng chain trie persist (plain `search`, không cần shortcuts).
+        let sf = idx.search_flow(&[SYMBOL_BASE + 1]).await.unwrap();
+        assert_eq!(sf.len(), 1);
+        assert_eq!(sf[0].function_name, "a");
+        // `callers` (substring search qua shortcuts) cũng phải sống lại.
+        let cers = idx.callers(SYMBOL_BASE + 1, 1).await.unwrap();
+        assert_eq!(cers.len(), 1);
+        assert_eq!(cers[0].name, "a");
+
+        // Re-index → version bump → stamp cũ thành stale, rebuild lại.
+        let mut idx = GraphIndex::open(&db_str).await.unwrap();
+        let r = mk_result(
+            "b.ts",
+            vec![sym("gamma", SYMBOL_BASE + 9)],
+            vec![SYMBOL_BASE + 9],
+        );
+        idx.ingest(&[r]).await.unwrap();
+        assert!(idx.chain_engine_is_current().await, "stamp mới sau ingest");
+    }
+
     #[tokio::test]
     async fn sqlite_stale_version_rebuilds() {
         let dir = tempfile::tempdir().unwrap();

@@ -890,7 +890,14 @@ impl GraphIndex {
 
         // Engines.
         let __t_e = cg_t!("rebuild_chain_engine");
-        self.rebuild_chain_engine(None).await?;
+        // Chain trie đã persist trong `rt_*` — version khớp thì bỏ qua
+        // `clear()` + re-insert toàn bộ func id (chiếm >99% thời gian rebuild:
+        // ~11s@5k, ~113s@20k). `chains_map` đã decode ở trên nên `callees`/`flow`
+        // vẫn đủ; chỉ trie (dùng cho `callers`/`search_flow`) là giữ nguyên.
+        if !self.chain_engine_is_current().await {
+            self.rebuild_chain_engine(None).await?;
+            self.stamp_chain_engine().await;
+        }
         cg_d!(__t_e, "rebuild_chain_engine");
         let __t_f = cg_t!("rebuild_name_engine");
         // Name trie đã persist ở dataset riêng — nếu version khớp thì dựng
@@ -1016,7 +1023,6 @@ impl GraphIndex {
     /// Slot record dành cho version stamp — name record bắt đầu từ 1 nên không
     /// va chạm. Stamp = `[version: u64 LE][count: u64 LE]`.
     const NAME_STAMP_SLOT: usize = 0;
-
     /// Name trie trên đĩa còn đúng version + khớp số record đã ghi (chống dataset
     /// bị xoá giữa chừng → coi như stale).
     async fn name_engine_is_current(&self) -> bool {
@@ -1049,6 +1055,52 @@ impl GraphIndex {
         let mut guard = store.write().await;
         if let Err(e) = guard.set_meta(Self::NAME_STAMP_SLOT, &bytes).await {
             eprintln!("[codegraph] name engine stamp failed: {e}");
+        }
+    }
+
+    /// Slot record cho version stamp của **chain engine** — chain trie lưu trên
+    /// storage chính (`rt_*`), func id ≥ `SYMBOL_BASE` nên slot `0` không va chạm
+    /// với node nào. Stamp = `[version: u64 LE][chain_count: u64 LE][sample_func:
+    /// u64 LE]` (24 byte) — `sample_func` = func id nhỏ nhất, dùng để probe trie
+    /// còn sống (record id của chain engine là func id **thưa**, không phải 1..N).
+    const CHAIN_STAMP_SLOT: usize = 0;
+
+    /// Chain trie trên đĩa còn đúng version + khớp số func + còn node mẫu (chống
+    /// `rt_*` bị xoá dở → coi như stale). Giống `name_engine_is_current` nhưng
+    /// đọc trên storage chính, và probe bằng `sample_func` (func id thật).
+    async fn chain_engine_is_current(&self) -> bool {
+        let guard = self.storage.read().await;
+        let Ok(Some(bytes)) = guard.get_meta(Self::CHAIN_STAMP_SLOT).await else {
+            return false;
+        };
+        if bytes.len() != 24 {
+            return false;
+        }
+        let version = u64::from_le_bytes(bytes[0..8].try_into().unwrap_or([0; 8]));
+        let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap_or([0; 8])) as usize;
+        let sample = u64::from_le_bytes(bytes[16..24].try_into().unwrap_or([0; 8])) as usize;
+        if version != self.version || count != self.chains_map.len() {
+            return false;
+        }
+        // Index rỗng là hợp lệ (không có chain nào).
+        if count == 0 {
+            return true;
+        }
+        // Triet còn sống nếu record mẫu (func id thật) còn độ dài key.
+        guard.get_key_len(sample).await.ok().flatten().is_some()
+    }
+
+    /// Ghi stamp sau khi chain trie dựng lại — `version` + số func + func id nhỏ
+    /// nhất làm mẫu probe.
+    async fn stamp_chain_engine(&self) {
+        let mut bytes = [0u8; 24];
+        bytes[0..8].copy_from_slice(&self.version.to_le_bytes());
+        bytes[8..16].copy_from_slice(&(self.chains_map.len() as u64).to_le_bytes());
+        let sample = self.chains_map.keys().min().copied().unwrap_or(0);
+        bytes[16..24].copy_from_slice(&sample.to_le_bytes());
+        let mut guard = self.storage.write().await;
+        if let Err(e) = guard.set_meta(Self::CHAIN_STAMP_SLOT, &bytes).await {
+            eprintln!("[codegraph] chain engine stamp failed: {e}");
         }
     }
 
@@ -1267,6 +1319,9 @@ impl GraphIndex {
         // đĩa, nên `rebuild()` lúc mở index chỉ cần đọc stamp là bỏ qua
         // `rebuild_name_engine` (11-32s) — thay vì dựng lại mỗi lần mở.
         self.stamp_name_engine().await;
+        // Chain trie cũng persist trong `rt_*` — stamp version để reopen bỏ qua
+        // `rebuild_chain_engine` (>99% thời gian rebuild: ~113s@20k).
+        self.stamp_chain_engine().await;
         {
             let mut st = self.storage.write().await;
             st.save_next_id(self.next_id).await.map_err(serr)?;
