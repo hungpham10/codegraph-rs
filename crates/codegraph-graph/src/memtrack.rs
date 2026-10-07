@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use codegraph_core::{Annotation, CallSite, EdgeMeta, FileInfo, Symbol};
+use codegraph_core::{Annotation, CallSite, FileInfo, Symbol};
 
 /// Một cấu trúc: số phần tử + bytes đã cấp (fixed + heap).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -106,11 +106,6 @@ pub fn call_site_heap(site: &CallSite) -> u64 {
         + site.arg_exprs.iter().map(str_bytes).sum::<u64>()
 }
 
-/// Deep size của `EdgeMeta` (chưa tính slot trong HashMap).
-pub fn edge_meta_heap(m: &EdgeMeta) -> u64 {
-    opt_str_bytes(&m.condition) + opt_str_bytes(&m.effect_desc) + u64_vec_bytes(&m.arg_ids)
-}
-
 // ── Tổng hợp theo cấu trúc ──
 
 /// RAM của `symbols: HashMap<u64, Symbol>`.
@@ -144,15 +139,6 @@ pub fn call_names_mem(m: &HashMap<String, Vec<CallSite>>) -> StructureMem {
                 str_bytes(k) + vec_bytes::<CallSite>(v) + v.iter().map(call_site_heap).sum::<u64>()
             })
             .sum(),
-    }
-}
-
-/// RAM của `edges: HashMap<(u64, u64), EdgeMeta>`.
-pub fn edges_mem(m: &HashMap<(u64, u64), EdgeMeta>) -> StructureMem {
-    StructureMem {
-        entries: m.len() as u64,
-        fixed_bytes: map_bucket_bytes(m),
-        heap_bytes: m.values().map(edge_meta_heap).sum(),
     }
 }
 
@@ -197,7 +183,6 @@ pub struct MemBreakdown {
     pub symbols: StructureMem,
     pub chains_map: StructureMem,
     pub call_names: StructureMem,
-    pub edges: StructureMem,
     pub name_index: StructureMem,
     pub scope_index: StructureMem,
     pub name_keys: StructureMem,
@@ -213,7 +198,6 @@ impl MemBreakdown {
             self.symbols.total_bytes(),
             self.chains_map.total_bytes(),
             self.call_names.total_bytes(),
-            self.edges.total_bytes(),
             self.name_index.total_bytes(),
             self.scope_index.total_bytes(),
             self.name_keys.total_bytes(),
@@ -229,7 +213,6 @@ impl MemBreakdown {
             ("symbols", self.symbols),
             ("chains_map", self.chains_map),
             ("call_names", self.call_names),
-            ("edges", self.edges),
             ("name_index", self.name_index),
             ("scope_index", self.scope_index),
             ("name_keys", self.name_keys),
@@ -297,7 +280,7 @@ mod tests {
                 fixed_bytes: 0,
                 heap_bytes: 100,
             },
-            edges: StructureMem {
+            call_names: StructureMem {
                 entries: 1,
                 fixed_bytes: 0,
                 heap_bytes: 10,
@@ -306,7 +289,7 @@ mod tests {
         };
         let r = b.ranked();
         assert_eq!(r[0].0, "symbols");
-        assert_eq!(r[1].0, "edges");
+        assert_eq!(r[1].0, "call_names");
         assert_eq!(b.accounted_total(), 110);
     }
 }

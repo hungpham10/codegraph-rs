@@ -56,7 +56,7 @@ fn result(
 }
 
 /// Ingest → reopen: mọi entity (symbols/chains/files/version) + query surface
-/// sống lại từ file; edges tái dựng từ chains + call records.
+/// sống lại từ file; edge count đếm lại từ chains (metadata đọc từ call records).
 #[tokio::test]
 async fn index_ingest_reopen_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
