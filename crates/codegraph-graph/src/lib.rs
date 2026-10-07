@@ -33,8 +33,9 @@
 //! toàn bộ symbol (id global) + remap (idMap bỏ `0` — placeholder phải giữ 0) →
 //! `resolve_calls` (thay placeholder 0 trong chain bằng id thật: structural hint
 //! → exact name → short name → best-candidate: @Override +10 / has-chain +5 /
-//! same-file +3) → `build_edges_from_calls` (edge = chain[position], CallSite +
-//! var-type alias, gom SaveCallRecords) → files → rebuild engines → bump version.
+//! same-file +3) → `build_call_indexes` (đếm edge = chain[position],
+//! CallSite + var-type alias, gom SaveCallRecords) → files → rebuild engines →
+//! bump version.
 
 use crate::embeddings::{EmbeddingBackend, default_backend, embedding_enabled, make_backend};
 pub use crate::radix::Element;
@@ -64,9 +65,9 @@ pub use crate::storage::{
 use crate::vector_index::VectorIndex;
 use codegraph_core::{
     BranchLabel, CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency,
-    EdgeMeta, EffectType, Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo,
-    ResolveResult, SYMBOL_BASE, SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind,
-    SymbolMatch, is_marker, marker_name,
+    Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult, SYMBOL_BASE,
+    SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch, is_marker,
+    marker_name,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -331,8 +332,10 @@ pub struct GraphIndex {
     chains_map: HashMap<u64, Vec<u64>>,
     /// call name (lowercase, kèm alias type-qualified) → call sites.
     call_names: HashMap<String, Vec<CallSite>>,
-    /// `(caller, callee)` → edge meta (last-wins, rebuild từ chains + records).
-    edges: HashMap<(u64, u64), EdgeMeta>,
+    /// Số edge `(caller, callee)` — đếm từ chains lúc ingest/rebuild.
+    /// Metadata của edge (condition/effect/...) KHÔNG materialize thành map:
+    /// đã nằm trong call records persist, `flow()` đọc thẳng từ đó.
+    edge_count: u64,
     /// Files trong graph.
     files: Vec<FileInfo>,
     /// next_id của registry.
@@ -771,7 +774,7 @@ impl GraphIndex {
             scope_index: HashMap::new(),
             chains_map: HashMap::new(),
             call_names: HashMap::new(),
-            edges: HashMap::new(),
+            edge_count: 0,
             files: Vec::new(),
             next_id: SYMBOL_BASE,
             version: 0,
@@ -829,15 +832,6 @@ impl GraphIndex {
             .await
             .map_err(serr)?;
         cg_d!(__t_all_call_name_indexes, "all_call_name_indexes");
-        let __t_all_call_records = cg_t!("all_call_records");
-        let call_records_raw = self
-            .storage
-            .read()
-            .await
-            .all_call_records()
-            .await
-            .map_err(serr)?;
-        cg_d!(__t_all_call_records, "all_call_records");
         let __t_load_all_files = cg_t!("load_all_files");
         self.files = self
             .storage
@@ -876,17 +870,21 @@ impl GraphIndex {
             }
         }
 
-        // Edges — rebuild từ chains + call records (không persist riêng).
-        let mut recs: HashMap<u64, Vec<CallRecord>> = HashMap::new();
-        for (func, bytes) in call_records_raw {
-            if let Ok(r) = serde_json::from_slice::<Vec<CallRecord>>(&bytes) {
-                recs.insert(func, r);
-            }
-        }
+        // Edge count — đếm thẳng từ chains (không materialize EdgeMeta:
+        // metadata đã nằm trong call records persist, `flow()` đọc từ đó).
+        // Không cần `all_call_records` ở đây (đó là JSON deserialize ~80ms).
+        self.edge_count = self
+            .chains_map
+            .values()
+            .map(|chain| {
+                chain
+                    .iter()
+                    .skip(1)
+                    .filter(|&&e| e != 0 && !is_marker(e))
+                    .count() as u64
+            })
+            .sum();
         cg_d!(__t_c, "call_names_json");
-        let __t_d = cg_t!("rebuild_edges");
-        self.rebuild_edges(&recs);
-        cg_d!(__t_d, "rebuild_edges");
 
         // Engines.
         let __t_e = cg_t!("rebuild_chain_engine");
@@ -918,7 +916,7 @@ impl GraphIndex {
             st.set_stats(IndexCounts {
                 symbols: self.symbols.len() as u64,
                 chains: self.chains_map.len() as u64,
-                edges: self.edges.len() as u64,
+                edges: self.edge_count,
                 files: self.files.len() as u64,
                 next_id: self.next_id,
             })
@@ -955,43 +953,6 @@ impl GraphIndex {
         for (&id, sym) in &self.symbols {
             if sym.scope_id != 0 {
                 self.scope_index.entry(sym.scope_id).or_default().push(id);
-            }
-        }
-    }
-
-    /// Rebuild edges từ chains + call records (nhanh — chỉ dùng khi reopen).
-    #[cfg_attr(
-        not(any(feature = "sqlite", feature = "lmdb", feature = "redis")),
-        allow(dead_code)
-    )]
-    // chỉ rebuild() dùng — không backend thì không ai gọi.
-    fn rebuild_edges(&mut self, recs: &HashMap<u64, Vec<CallRecord>>) {
-        self.edges.clear();
-        for (&func_id, chain) in &self.chains_map {
-            let rec_by_pos: HashMap<usize, &CallRecord> = recs
-                .get(&func_id)
-                .map(|r| r.iter().map(|c| (c.position, c)).collect())
-                .unwrap_or_default();
-            for (i, &e) in chain.iter().enumerate() {
-                // Vị trí 0 = owner — skip như build_edges_from_calls (ingest).
-                if i == 0 || is_marker(e) || e == 0 {
-                    continue;
-                }
-                let rec = rec_by_pos.get(&i);
-                self.edges.insert(
-                    (func_id, e),
-                    EdgeMeta {
-                        caller_id: func_id,
-                        callee_id: e,
-                        position: i,
-                        condition: rec.and_then(|r| r.condition.clone()),
-                        effect: rec.map(|r| r.effect).unwrap_or_default(),
-                        effect_desc: rec.and_then(|r| r.effect_desc.clone()),
-                        arg_ids: Vec::new(),
-                        is_loop_body: rec.map(|r| r.is_loop_body).unwrap_or(false),
-                        is_recursive: e == func_id,
-                    },
-                );
             }
         }
     }
@@ -1202,9 +1163,8 @@ impl GraphIndex {
     // ── Ingest (full re-index — pipeline 2 phase như semgraph) ──
 
     /// Ingest toàn bộ parse results — **full re-index**: xoá dữ liệu cũ, register
-    /// symbol (id global) + remap, resolve placeholder 0, build edges + call-name
-    /// index, persist + bump version. Không báo tiến độ — dùng
-    /// [`ingest_with_progress`](Self::ingest_with_progress) nếu cần.
+    /// symbol (id global) + remap, resolve placeholder 0, build call-name index
+    /// + đếm edges, persist + bump version (bản có tiến độ: `ingest_with_progress`).
     pub async fn ingest(&mut self, results: &[ParseResult]) -> Result<()> {
         self.ingest_with_progress(results, None).await
     }
@@ -1233,7 +1193,7 @@ impl GraphIndex {
         self.scope_index.clear();
         self.chains_map.clear();
         self.call_names.clear();
-        self.edges.clear();
+        self.edge_count = 0;
         self.files.clear();
         self.name_records.clear();
         self.next_id = SYMBOL_BASE;
@@ -1284,8 +1244,8 @@ impl GraphIndex {
         // ── Phase 2: resolve placeholder 0 trong chains ──
         self.resolve_calls(&all_calls);
 
-        // ── Phase 3: build edges + call records + call-name index ──
-        self.build_edges_from_calls(&all_calls, p).await?;
+        // ── Phase 3: call records + call-name index + edge count ──
+        self.build_call_indexes(&all_calls, p).await?;
 
         // ── Phase 4: files ──
         if let Some(p) = p {
@@ -1329,7 +1289,7 @@ impl GraphIndex {
             st.set_stats(IndexCounts {
                 symbols: self.symbols.len() as u64,
                 chains: self.chains_map.len() as u64,
-                edges: self.edges.len() as u64,
+                edges: self.edge_count,
                 files: self.files.len() as u64,
                 next_id: self.next_id,
             })
@@ -1600,13 +1560,15 @@ impl GraphIndex {
         None
     }
 
-    /// Build edges từ chains (đã resolve) + call records; persist call records +
-    /// call-name index (kèm alias type-qualified `svc.validate` → `type.validate`).
+    /// Build call-name index từ chains (đã resolve) + call records; persist call
+    /// records + call-name index (kèm alias type-qualified `svc.validate` →
+    /// `type.validate`). Đồng thời đếm `edge_count` cho stats.
     ///
-    /// Edge model: mọi symbol element trong chain là một callee (thống nhất với
-    /// `rebuild_edges` khi reopen) — call record chỉ bổ sung metadata theo
-    /// position. Chain dựng thẳng (không qua placeholder) vẫn sinh edge đủ.
-    async fn build_edges_from_calls(
+    /// Edge model: mọi symbol element trong chain là một callee — call record
+    /// chỉ bổ sung metadata theo position. Chain dựng thẳng (không qua
+    /// placeholder) vẫn sinh edge đủ. Metadata KHÔNG materialize thành map
+    /// (xem `edge_count`): `flow()` đọc thẳng từ call records persist.
+    async fn build_call_indexes(
         &mut self,
         calls: &[CallRef<'_>],
         progress: Option<&dyn IngestProgress>,
@@ -1646,41 +1608,20 @@ impl GraphIndex {
             }
         }
 
-        // Edges từ mọi chain — rec lookup theo position cho metadata.
-        for (&caller, chain) in &self.chains_map {
-            let mut rec_by_pos: HashMap<usize, &CallRecord> = HashMap::new();
-            if let Some(idxs) = recs_by_caller.get(&caller) {
-                for &i in idxs {
-                    let rec = calls[i as usize].rec;
-                    rec_by_pos.insert(rec.position, rec);
-                }
-            }
-            for (i, &e) in chain.iter().enumerate() {
-                // Vị trí 0 = chính func id (owner) — không phải call. Recursion
-                // thật xuất hiện ở vị trí > 0 (vẫn giữ là edge is_recursive).
-                if i == 0 || is_marker(e) || e == 0 {
-                    continue;
-                }
-                let rec = rec_by_pos.get(&i);
-                let arg_ids = rec
-                    .map(|r| self.resolve_arg_ids(caller, &r.arg_exprs))
-                    .unwrap_or_default();
-                self.edges.insert(
-                    (caller, e),
-                    EdgeMeta {
-                        caller_id: caller,
-                        callee_id: e,
-                        position: i,
-                        condition: rec.and_then(|r| r.condition.clone()),
-                        effect: rec.map(|r| r.effect).unwrap_or_default(),
-                        effect_desc: rec.and_then(|r| r.effect_desc.clone()),
-                        arg_ids,
-                        is_loop_body: rec.map(|r| r.is_loop_body).unwrap_or(false),
-                        is_recursive: e == caller,
-                    },
-                );
-            }
-        }
+        // Đếm edges từ mọi chain — metadata không materialize (đã nằm trong
+        // call records persist; `flow()` đọc thẳng từ đó).
+        // Vị trí 0 = chính func id (owner) — không phải call.
+        self.edge_count = self
+            .chains_map
+            .values()
+            .map(|chain| {
+                chain
+                    .iter()
+                    .skip(1)
+                    .filter(|&&e| e != 0 && !is_marker(e))
+                    .count() as u64
+            })
+            .sum();
 
         // Persist call records (gom theo caller).
         if let Some(p) = progress
@@ -1691,9 +1632,9 @@ impl GraphIndex {
         for (caller, idxs) in recs_by_caller {
             let recs: Vec<&CallRecord> = idxs.iter().map(|&i| calls[i as usize].rec).collect();
             // `rec.caller_id` ghi ra đây là id **local** của file, không phải
-            // id global — vô hại: mọi reader (`flow`, `rebuild_edges`,
-            // `bingraph`) lấy caller id từ **key** của blob, không đọc field
-            // này. Nếu sau này cần id global thì đừng đọc field — dùng key.
+            // id global — vô hại: mọi reader (`flow`, `bingraph`) lấy caller id
+            // từ **key** của blob, không đọc field này. Nếu sau này cần id
+            // global thì đừng đọc field — dùng key.
             let bytes = serde_json::to_vec(&recs).map_err(|e| Error::Search(e.to_string()))?;
             self.storage
                 .write()
@@ -1751,32 +1692,6 @@ impl GraphIndex {
             }
         }
         None
-    }
-
-    /// Resolve arg expr (tên var/param) về symbol id trong scope của caller.
-    fn resolve_arg_ids(&self, caller_id: u64, arg_exprs: &[String]) -> Vec<u64> {
-        let mut scopes = vec![caller_id];
-        if let Some(s) = self.symbols.get(&caller_id)
-            && s.scope_id != 0
-        {
-            scopes.push(s.scope_id);
-        }
-        let mut out = Vec::with_capacity(arg_exprs.len());
-        for expr in arg_exprs {
-            let mut found = 0;
-            'outer: for sid in &scopes {
-                if let Some(ids) = self.scope_index.get(sid) {
-                    for id in ids {
-                        if self.symbols.get(id).is_some_and(|s| s.name == *expr) {
-                            found = *id;
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-            out.push(found);
-        }
-        out
     }
 
     // ── Queries (mọi search đều qua `search_symbol_paged_resumable` — resumable,
@@ -2078,30 +1993,17 @@ impl GraphIndex {
             let Some(callee) = self.symbols.get(&e) else {
                 continue;
             };
-            let meta = self.edges.get(&(id, e));
             let rec = rec_by_pos.get(&i);
-            let mut cond = meta.and_then(|m| m.condition.clone());
-            let mut effect = meta.map(|m| m.effect).unwrap_or_default();
-            let mut effect_desc = meta.and_then(|m| m.effect_desc.clone());
-            if let Some(r) = rec {
-                if cond.is_none() {
-                    cond = r.condition.clone();
-                }
-                if effect == EffectType::None {
-                    effect = r.effect;
-                }
-                if effect_desc.is_none() {
-                    effect_desc = r.effect_desc.clone();
-                }
-            }
+            // Metadata (condition/effect/...) đọc thẳng từ call record — cùng
+            // nguồn mà EdgeMeta cũ cũng dùng (không còn map trung gian).
             calls.push(FlowCall {
                 position: i,
                 to_name: callee.name.clone(),
                 to_id: Some(e),
                 line: rec.map(|r| r.line).unwrap_or(0),
-                condition: cond,
-                effect,
-                effect_desc,
+                condition: rec.and_then(|r| r.condition.clone()),
+                effect: rec.map(|r| r.effect).unwrap_or_default(),
+                effect_desc: rec.and_then(|r| r.effect_desc.clone()),
                 args: rec.map(|r| r.arg_exprs.clone()).unwrap_or_default(),
             });
         }
@@ -2933,7 +2835,6 @@ impl GraphIndex {
             symbols: mt::symbols_mem(&self.symbols),
             chains_map: mt::chains_map_mem(&self.chains_map),
             call_names: mt::call_names_mem(&self.call_names),
-            edges: mt::edges_mem(&self.edges),
             name_index: mt::name_index_mem(&self.name_index),
             scope_index: mt::scope_index_mem(&self.scope_index),
             name_keys: mt::name_keys_mem(&self.name_records),
@@ -2947,7 +2848,7 @@ impl GraphIndex {
         SemgraphStats {
             symbols: self.symbols.len() as u64,
             chains: self.chains_map.len() as u64,
-            edges: self.edges.len() as u64,
+            edges: self.edge_count,
             files: self.files.len() as u64,
             next_id: self.next_id,
         }
@@ -2965,7 +2866,8 @@ impl GraphIndex {
 mod tests {
     use super::*;
     use codegraph_core::{
-        Annotation, MARKER_BRANCH_END, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, ScopeLevel,
+        Annotation, EffectType, MARKER_BRANCH_END, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
+        ScopeLevel,
     };
 
     #[test]

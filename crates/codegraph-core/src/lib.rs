@@ -12,7 +12,7 @@ pub use error::{Error, Result};
 pub use route::StorageRoute;
 pub use semgraph::{
     is_marker, marker_id, marker_name, Annotation, BranchLabel, CallRecord, CallSite,
-    CallSiteResult, ClassInfo, DbStats as SemgraphStats, DependenciesReport, Dependency, EdgeMeta,
+    CallSiteResult, ClassInfo, DbStats as SemgraphStats, DependenciesReport, Dependency,
     EffectCallPattern, EffectRule, EffectType, FileInfo, FlowCall, FlowResult, FunctionScope,
     MemberInfo, ResolveResult, ScopeLevel, SearchFlowResult, Symbol, SymbolId, SymbolKind,
     SymbolMatch, MARKER_BRANCH_END, MARKER_BREAK, MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE,

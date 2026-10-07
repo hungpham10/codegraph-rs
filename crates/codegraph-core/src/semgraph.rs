@@ -316,26 +316,6 @@ pub struct Annotation {
     pub line: u32,
 }
 
-/// Metadata của 1 call edge — serialized thành edge data (edge stream).
-///
-/// `(caller_id, callee_id)` là chiều chuẩn; `position` = index của callee trong
-/// chain của caller (để nối với CallRecord khi render flow).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeMeta {
-    pub caller_id: SymbolId,
-    pub callee_id: SymbolId,
-    /// Index trong chain của caller mà callee xuất hiện.
-    pub position: usize,
-    /// Guard text của if bao quanh (nếu có).
-    pub condition: Option<String>,
-    pub effect: EffectType,
-    pub effect_desc: Option<String>,
-    #[serde(default)]
-    pub arg_ids: Vec<SymbolId>,
-    pub is_loop_body: bool,
-    pub is_recursive: bool,
-}
-
 /// Call record thô — persist để render flow khi call không resolve được.
 ///
 /// Vị trí `0` trong chain là placeholder, được thay bằng id thật khi resolve.

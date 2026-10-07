@@ -15,9 +15,7 @@
 use camino::Utf8Path;
 use clap::Parser;
 use codegraph_bench::{BenchOptions, Repo, extract, index_at, orchestrator, run_queries};
-use codegraph_core::{
-    Annotation, CallRecord, EdgeMeta, EffectType, ScopeLevel, Symbol, SymbolKind,
-};
+use codegraph_core::{Annotation, CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind};
 use codegraph_graph::meminfo::{MemTracker, fmt_bytes, rss_bytes};
 use codegraph_graph::memtrack::MemBreakdown;
 use std::sync::OnceLock;
@@ -127,7 +125,7 @@ struct Cli {
 
     /// Dựng index synthetic với N function thay vì đọc repo thật — deterministic,
     /// không phụ thuộc network. Mỗi function gọi `--fanout` function khác nên
-    /// `edges` + `call_names` (hai cấu trúc đang tối ưu) có quy mô đáng kể.
+    /// `call_names` (cấu trúc đang tối ưu) có quy mô đáng kể.
     #[arg(long, value_name = "N")]
     synthetic: Option<usize>,
 
@@ -141,7 +139,7 @@ struct Cli {
     ///
     /// - `symbols` — chỉ symbol → `symbols` + `name_index` + **name engine**
     /// - `chains`  — symbol + chain, không call record → thêm **chain engine**
-    /// - `full`    — kèm call record → thêm `call_names` + `edges`
+    /// - `full`    — kèm call record → thêm `call_names` (+ đếm `edge_count`)
     #[arg(long, value_enum, default_value_t = Shape::Full)]
     shape: Shape,
 
@@ -212,8 +210,6 @@ struct RepoMem {
     rss_index_delta: u64,
     /// `symbols.len() × size_of::<Symbol>()` — phần trong HashMap `symbols`.
     predicted_symbols: u64,
-    /// `edges.len() × size_of::<EdgeMeta>()` — phần trong HashMap `edges`.
-    predicted_edges: u64,
     /// Deep size từng cấu trúc, sort giảm dần.
     breakdown: Vec<BreakdownRow>,
     /// Tổng bytes đã quy được về cấu trúc (chưa gồm allocator + radix engine).
@@ -301,7 +297,6 @@ fn measure(repo: &Repo, opts: &BenchOptions) -> anyhow::Result<RepoMem> {
         rss_peak: tracker.peak(),
         rss_index_delta: after_index.saturating_sub(after_extract),
         predicted_symbols: st.symbols * size_of::<Symbol>() as u64,
-        predicted_edges: st.edges * size_of::<EdgeMeta>() as u64,
         accounted_total: breakdown.accounted_total(),
         caches: breakdown.caches.clone(),
         breakdown: breakdown_rows(&breakdown),
@@ -311,10 +306,10 @@ fn measure(repo: &Repo, opts: &BenchOptions) -> anyhow::Result<RepoMem> {
 /// Dựng `ParseResult` synthetic: `n` function, mỗi function gọi `fanout`
 /// function khác (id local tính từ `SYMBOL_BASE`).
 ///
-/// Mục tiêu là **làm đầy `edges` + `call_names`** — hai `HashMap` đang tốn
-/// nhiều RAM nhất trong `GraphIndex`. Call name cố tình trùng lặp (chỉ vài
-/// tên lib giả) để `call_names` có nhiều key chứa nhiều site, đúng hình dạng
-/// repo thật.
+/// Mục tiêu là **làm đầy `call_names`** — `HashMap` đang tốn nhiều RAM nhất
+/// trong `GraphIndex` (edge metadata không còn materialize thành map riêng).
+/// Call name cố tình trùng lặp (chỉ vài tên lib giả) để `call_names` có nhiều
+/// key chứa nhiều site, đúng hình dạng repo thật.
 fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_graph::ParseResult {
     // `n = 0` sẽ làm `% n` panic ở vòng sinh chain — chặn sớm, báo rõ.
     assert!(n > 0, "--synthetic cần N > 0");
@@ -423,7 +418,6 @@ fn measure_synthetic(n: usize, fanout: usize, shape: Shape) -> anyhow::Result<Re
         rss_peak: tracker.peak(),
         rss_index_delta: after_index.saturating_sub(after_extract),
         predicted_symbols: st.symbols * size_of::<Symbol>() as u64,
-        predicted_edges: st.edges * size_of::<EdgeMeta>() as u64,
         accounted_total: breakdown.accounted_total(),
         caches: breakdown.caches.clone(),
         breakdown: breakdown_rows(&breakdown),
@@ -488,7 +482,6 @@ fn measure_reopen(n: usize, fanout: usize, shape: Shape) -> anyhow::Result<RepoM
         rss_peak: tracker.peak(),
         rss_index_delta: after_open.saturating_sub(before_open),
         predicted_symbols: st.symbols * size_of::<Symbol>() as u64,
-        predicted_edges: st.edges * size_of::<EdgeMeta>() as u64,
         accounted_total: breakdown.accounted_total(),
         caches: breakdown.caches.clone(),
         breakdown: breakdown_rows(&breakdown),
@@ -534,19 +527,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<14} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>12}",
-        "repo",
-        "symbols",
-        "edges",
-        "rss extract",
-        "rss index",
-        "Δ index",
-        "pred symbols",
-        "pred edges"
+        "{:<14} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12}",
+        "repo", "symbols", "edges", "rss extract", "rss index", "Δ index", "pred symbols",
     );
     for r in &results {
         println!(
-            "{:<14} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>12}",
+            "{:<14} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12}",
             r.repo,
             r.symbols,
             r.edges,
@@ -554,7 +540,6 @@ fn main() -> anyhow::Result<()> {
             fmt_bytes(r.rss_after_index),
             fmt_bytes(r.rss_index_delta),
             fmt_bytes(r.predicted_symbols),
-            fmt_bytes(r.predicted_edges),
         );
     }
     for r in &results {
