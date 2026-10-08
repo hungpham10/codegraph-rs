@@ -6,9 +6,9 @@
 use crate::GraphApi;
 use codegraph_core::{
     is_marker, marker_name, EffectType, FlowCall, FlowResult, SymbolId, MARKER_BRANCH_END,
-    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_SWITCH_CASE,
-    MARKER_SWITCH_END, MARKER_SWITCH_CLOSE, MARKER_SWITCH_START,
-    MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_STMT_END,
+    MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP,
+    MARKER_LOOP_BACK, MARKER_STMT_END, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END,
+    MARKER_SWITCH_START,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -46,9 +46,16 @@ pub fn control_flow(flow: &FlowResult) -> String {
 
     let mut out = String::from("flowchart TD\n");
     for (new_i, orig_i, raw) in &filtered {
-        let desc = flow.chain_desc.get(*orig_i).map(String::as_str).unwrap_or("");
+        let desc = flow
+            .chain_desc
+            .get(*orig_i)
+            .map(String::as_str)
+            .unwrap_or("");
         let (open, close, label) = node_style(&flow.chain, *orig_i, *raw, desc, &calls, &labels);
-        out.push_str(&format!("  c{new_i}{open}\"{}\"{close}\n", sanitize(&label)));
+        out.push_str(&format!(
+            "  c{new_i}{open}\"{}\"{close}\n",
+            sanitize(&label)
+        ));
     }
 
     // Cạnh cấu trúc, sắp xếp để output ổn định (không phụ thuộc thứ tự build).
@@ -105,7 +112,9 @@ fn node_style(
             .get(&i)
             .map(|s| s.to_string())
             .or_else(|| match name {
-                "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "SWITCH_START" | "LOOP" => guard_for(chain, i, calls),
+                "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "SWITCH_START" | "LOOP" => {
+                    guard_for(chain, i, calls)
+                }
                 _ => None,
             });
         let label = match name {
@@ -203,10 +212,7 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
         // - non-marker -> marker: for linear entry (IF_TRUE, LOOP, SWITCH_START)
         //   AND for block end markers (BRANCH_END, SWITCH_END, SWITCH_CLOSE)
         // - marker -> marker: NO sequential edge
-        let is_linear_entry = matches!(
-            curr,
-            MARKER_IF_TRUE | MARKER_LOOP | MARKER_SWITCH_START
-        );
+        let is_linear_entry = matches!(curr, MARKER_IF_TRUE | MARKER_LOOP | MARKER_SWITCH_START);
         let is_block_end = matches!(
             curr,
             MARKER_BRANCH_END | MARKER_SWITCH_END | MARKER_SWITCH_CLOSE
@@ -281,10 +287,8 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
             }
             MARKER_SWITCH_END => {
                 edges.push((prev, i));
-                if i + 1 >= n || chain[i + 1] != MARKER_SWITCH_CASE {
-                    if !switch_stack.is_empty() {
-                        switch_stack.pop();
-                    }
+                if (i + 1 >= n || chain[i + 1] != MARKER_SWITCH_CASE) && !switch_stack.is_empty() {
+                    switch_stack.pop();
                 }
             }
             MARKER_SWITCH_CLOSE => {
@@ -630,13 +634,7 @@ mod tests {
     #[test]
     fn if_without_else_false_branch_skips_branch_end() {
         // if (cond) { then() } done()  — không có else
-        let chain = vec![
-            100,
-            MARKER_IF_TRUE,
-            0,
-            MARKER_BRANCH_END,
-            101,
-        ];
+        let chain = vec![100, MARKER_IF_TRUE, 0, MARKER_BRANCH_END, 101];
         let f = flow(
             chain,
             vec!["root", "IF_TRUE", "then", "BRANCH_END", "done"],
@@ -728,7 +726,14 @@ mod tests {
         ];
         let f = flow(
             chain,
-            vec!["root", "CALL_ENTER", "call_fn", "CALL_EXIT", "STMT_END", "done"],
+            vec![
+                "root",
+                "CALL_ENTER",
+                "call_fn",
+                "CALL_EXIT",
+                "STMT_END",
+                "done",
+            ],
             vec![call(2, "call_fn", None, 3)],
         );
         let m = control_flow(&f);
@@ -741,7 +746,10 @@ mod tests {
         // done has no line in the test (line 4 is from the chain desc)
         assert!(m.contains("c2[\"done\"]"), "missing done: {m}");
         // No MARKER nodes for CALL_ENTER/EXIT/STMT_END
-        assert!(!m.contains("MARKER"), "should not contain filtered markers: {m}");
+        assert!(
+            !m.contains("MARKER"),
+            "should not contain filtered markers: {m}"
+        );
         // Edges: root -> call_fn -> done
         assert!(m.contains("c0 --> c1"), "missing edge c0->c1: {m}");
         assert!(m.contains("c1 --> c2"), "missing edge c1->c2: {m}");

@@ -16,9 +16,10 @@
 use crate::languages::effects::classify_effect;
 use codegraph_core::{
     Annotation, CallRecord, Result, ScopeLevel, Symbol, SymbolKind, MARKER_BRANCH_END,
-    MARKER_BREAK, MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
-    MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_END, MARKER_SWITCH_CLOSE, MARKER_SWITCH_START, MARKER_THROW,
-    MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_STMT_END, SYMBOL_BASE,
+    MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE, MARKER_IF_FALSE,
+    MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_STMT_END,
+    MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
+    SYMBOL_BASE,
 };
 use codegraph_graph::ParseResult;
 use std::collections::HashMap;
@@ -823,9 +824,8 @@ fn walk_chain(
         return;
     }
 
-
     // 9. Let declaration (biến mới: `let x = expr`).
-if k == "let_declaration" {
+    if k == "let_declaration" {
         // Extract variable name from pattern.
         let var = node
             .child_by_field_name("pattern")

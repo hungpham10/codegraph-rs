@@ -43,7 +43,8 @@ fn walk(lang: &str, src: &str) -> Vec<String> {
                 return s.name.clone();
             }
         }
-        let call_name = res.calls
+        let call_name = res
+            .calls
             .iter()
             .find(|c| c.position == i)
             .map(|c| c.call_name.clone())
@@ -447,12 +448,7 @@ fn f() {
     );
     assert_eq!(
         c,
-        [
-            "[CALL_ENTER]",
-            "compute → x",
-            "[CALL_EXIT]",
-            "[RETURN]"
-        ]
+        ["[CALL_ENTER]", "compute → x", "[CALL_EXIT]", "[RETURN]"]
     );
 }
 
