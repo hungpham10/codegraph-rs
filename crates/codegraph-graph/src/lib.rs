@@ -3222,6 +3222,8 @@ mod tests {
                 effect_desc: None,
                 target_class: None,
                 target_method: None,
+                into_var: None,
+                is_new_var: false,
             },
             CallRecord {
                 caller_id: SYMBOL_BASE,
@@ -3235,6 +3237,8 @@ mod tests {
                 effect_desc: None,
                 target_class: None,
                 target_method: None,
+                into_var: None,
+                is_new_var: false,
             },
         ];
         let r = result(
@@ -3276,6 +3280,8 @@ mod tests {
             effect_desc: None,
             target_class: None,
             target_method: None,
+            into_var: None,
+            is_new_var: false,
         }];
         let r = result(
             "f.ts",
@@ -3360,6 +3366,8 @@ mod tests {
             effect_desc: None,
             target_class: None,
             target_method: None,
+            into_var: None,
+            is_new_var: false,
         }];
         let r = result(
             "f.ts",
@@ -3395,6 +3403,8 @@ mod tests {
             effect_desc: None,
             target_class: None,
             target_method: None,
+            into_var: None,
+            is_new_var: false,
         };
         let mut idx = GraphIndex::in_memory();
         let first = result(
@@ -4036,6 +4046,8 @@ mod tests {
                 effect_desc: None,
                 target_class: None,
                 target_method: None,
+                into_var: None,
+                is_new_var: false,
             },
             CallRecord {
                 caller_id: SYMBOL_BASE,
@@ -4049,6 +4061,8 @@ mod tests {
                 effect_desc: None,
                 target_class: None,
                 target_method: None,
+                into_var: None,
+                is_new_var: false,
             },
             // Internal call: class "OrderService" trong repo, method getOrders.
             CallRecord {
@@ -4063,6 +4077,8 @@ mod tests {
                 effect_desc: None,
                 target_class: None,
                 target_method: None,
+                into_var: None,
+                is_new_var: false,
             },
         ];
         let mut cls = sym("svc.rs", "OrderService", SYMBOL_BASE + 1);

@@ -93,6 +93,8 @@ async fn rdbms_ingest_reopen_roundtrip() {
         effect_desc: None,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     }];
     let r = result(
         "a.ts",

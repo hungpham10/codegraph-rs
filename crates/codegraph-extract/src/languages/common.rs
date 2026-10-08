@@ -842,11 +842,8 @@ if k == "let_declaration" {
                     if let Some(v) = var {
                         rec.into_var = Some(v);
                         rec.is_new_var = true;
-                    } else {
                     }
-                } else {
                 }
-            } else {
             }
         }
         return;

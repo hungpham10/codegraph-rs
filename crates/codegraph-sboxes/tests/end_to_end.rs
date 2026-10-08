@@ -42,6 +42,8 @@ fn rec(caller_id: u64, pos: usize, name: &str, args: usize) -> CallRecord {
         effect_desc: None,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     }
 }
 

@@ -56,7 +56,7 @@ pub fn control_flow(flow: &FlowResult) -> String {
     let mut all_edges: Vec<(usize, usize)> = Vec::new();
 
     // Pass 1: structural edges on original chain, remap to filtered indices.
-    let mut edges = structural_edges(&flow.chain);
+    let edges = structural_edges(&flow.chain);
     let mut orig_to_filtered: Vec<Option<usize>> = vec![None; flow.chain.len()];
     for (new_i, orig_i, _) in &filtered {
         orig_to_filtered[*orig_i] = Some(*new_i);
