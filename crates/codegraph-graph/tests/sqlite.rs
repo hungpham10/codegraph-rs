@@ -74,6 +74,8 @@ async fn index_ingest_reopen_roundtrip() {
         effect_desc: None,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     }];
     let r = result(
         "a.ts",
@@ -347,6 +349,8 @@ async fn external_qualified_call_not_linked_to_local_variable() {
         effect_desc: None,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     }];
     let r = result(
         "UserController.java",

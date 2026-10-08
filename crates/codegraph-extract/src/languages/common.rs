@@ -16,8 +16,10 @@
 use crate::languages::effects::classify_effect;
 use codegraph_core::{
     Annotation, CallRecord, Result, ScopeLevel, Symbol, SymbolKind, MARKER_BRANCH_END,
-    MARKER_BREAK, MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
-    MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_END, MARKER_THROW, SYMBOL_BASE,
+    MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE, MARKER_IF_FALSE,
+    MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_STMT_END,
+    MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
+    SYMBOL_BASE,
 };
 use codegraph_graph::ParseResult;
 use std::collections::HashMap;
@@ -622,10 +624,12 @@ fn walk_chain(
 
     // 1. Call sites.
     if let Some(rule) = ctx.spec.calls.iter().find(|r| r.kind == k) {
+        chain_push(ctx, MARKER_CALL_ENTER);
         emit_call(ctx, node, rule, in_loop, condition);
         for ch in named_children(node) {
             walk_chain(ctx, &ch, depth + 1, in_loop, None);
         }
+        chain_push(ctx, MARKER_CALL_EXIT);
         return;
     }
 
@@ -718,9 +722,23 @@ fn walk_chain(
 
     // 4. Switch.
     if ctx.spec.switch_kinds.contains(&k) {
-        // Discriminant (`switch (getType(x))`) — emit calls trước các case.
-        if let Some(cn) = node.child_by_field_name(ctx.spec.if_cond_field) {
+        // SWITCH_START: emit before discriminant, will hold discriminant text as label.
+        chain_push(ctx, MARKER_SWITCH_START);
+        // Discriminant: find the expression after "match" keyword, before match_block.
+        // match_expression structure: "match" <discriminant> "{" match_arm+ "}"
+        let discriminant_node = node
+            .children(&mut node.walk())
+            .find(|c| c.is_named() && c.kind() != "match_block");
+        if let Some(cn) = discriminant_node {
             walk_chain(ctx, &cn, depth + 1, in_loop, condition.clone());
+        }
+        // Emit discriminant text as branch label on SWITCH_START.
+        if let Some(cn) = discriminant_node {
+            if let Some(dt) = text(&cn, ctx.src) {
+                if !dt.is_empty() {
+                    emit_branch_label(ctx, &dt);
+                }
+            }
         }
         for case in switch_cases(node, ctx.spec) {
             chain_push(ctx, MARKER_SWITCH_CASE);
@@ -733,6 +751,7 @@ fn walk_chain(
             walk_block(ctx, &case, depth + 1, in_loop, condition.clone());
             chain_push(ctx, MARKER_SWITCH_END);
         }
+        chain_push(ctx, MARKER_SWITCH_CLOSE);
         return;
     }
 
@@ -805,9 +824,54 @@ fn walk_chain(
         return;
     }
 
+    // 9. Let declaration (biến mới: `let x = expr`).
+    if k == "let_declaration" {
+        // Extract variable name from pattern.
+        let var = node
+            .child_by_field_name("pattern")
+            .and_then(|p| first_identifier(&p))
+            .and_then(|n| text(&n, ctx.src));
+        // Walk the initializer (rhs) to emit calls.
+        // Record call count before walking to detect if new calls were emitted.
+        let calls_before = ctx.calls.len();
+        if let Some(value) = node.child_by_field_name("value") {
+            walk_chain(ctx, &value, depth + 1, in_loop, condition.clone());
+            // Only tag if new call records were emitted during the walk.
+            if ctx.calls.len() > calls_before {
+                if let Some(rec) = ctx.calls.last_mut() {
+                    if let Some(v) = var {
+                        rec.into_var = Some(v);
+                        rec.is_new_var = true;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // 10. Assignment expression (cập nhật biến: `x = expr`).
+    if k == "assignment_expression" {
+        let target = node.child_by_field_name("left");
+        let value = node.child_by_field_name("right");
+        let var = target.and_then(|t| text(&t, ctx.src));
+        if let Some(v) = value {
+            let calls_before = ctx.calls.len();
+            walk_chain(ctx, &v, depth + 1, in_loop, condition.clone());
+            if ctx.calls.len() > calls_before {
+                if let Some(rec) = ctx.calls.last_mut() {
+                    if let Some(var_name) = var {
+                        rec.into_var = Some(var_name);
+                        rec.is_new_var = false;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     // 8. Default: recurse.
     for ch in named_children(node) {
-        walk_chain(ctx, &ch, depth + 1, in_loop, condition.clone());
+        walk_chain(ctx, &ch, depth, in_loop, condition.clone());
     }
 }
 
@@ -855,8 +919,24 @@ fn walk_block(
     in_loop: u32,
     condition: Option<String>,
 ) {
-    for ch in named_children(node) {
-        walk_chain(ctx, &ch, depth, in_loop, condition.clone());
+    // Only emit STMT_END between statements in actual block-like nodes.
+    // Match arms, if branches, etc. have their own structural markers.
+    let is_stmt_block = matches!(
+        node.kind(),
+        "block"
+            | "block_expression"
+            | "statement_block"
+            | "function_body"
+            | "program"
+            | "module"
+            | "source_file"
+    );
+    let children: Vec<_> = named_children(node).into_iter().collect();
+    for (i, ch) in children.iter().enumerate() {
+        walk_chain(ctx, ch, depth, in_loop, condition.clone());
+        if is_stmt_block && i + 1 < children.len() {
+            chain_push(ctx, MARKER_STMT_END);
+        }
     }
 }
 
@@ -1002,6 +1082,8 @@ fn emit_case_label(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition: Opt
         effect_desc,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     });
 }
 
@@ -1053,6 +1135,8 @@ fn emit_branch_label(ctx: &mut ChainCtx, label: &str) {
         effect_desc: None,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     });
 }
 
@@ -1129,6 +1213,8 @@ fn emit_call(
         effect_desc,
         target_class,
         target_method,
+        into_var: None,
+        is_new_var: false,
     });
 }
 

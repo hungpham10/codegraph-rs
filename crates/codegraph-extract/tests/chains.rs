@@ -43,11 +43,21 @@ fn walk(lang: &str, src: &str) -> Vec<String> {
                 return s.name.clone();
             }
         }
-        res.calls
+        let call_name = res
+            .calls
             .iter()
             .find(|c| c.position == i)
             .map(|c| c.call_name.clone())
-            .unwrap_or_else(|| format!("?{id}"))
+            .unwrap_or_else(|| format!("?{id}"));
+        // Append variable assignment if present
+        if let Some(c) = res.calls.iter().find(|c| c.position == i) {
+            if let Some(var) = &c.into_var {
+                if !var.is_empty() {
+                    return format!("{call_name} → {var}");
+                }
+            }
+        }
+        call_name
     };
     chain
         .iter()
@@ -76,12 +86,16 @@ def process(x):
         [
             "[LOOP]",
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "save",
+            "[CALL_EXIT]",
             "[IF_FALSE]",
+            "[CALL_ENTER]",
             "skip",
+            "[CALL_EXIT]",
             "[BRANCH_END]",
             "[LOOP_BACK]",
-            "[RETURN]"
+            "[RETURN]",
         ]
     );
 }
@@ -105,12 +119,20 @@ def process(x):
     assert_eq!(
         c,
         [
+            "[CALL_ENTER]",
             "risky",
+            "[CALL_EXIT]",
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "handle",
+            "[CALL_EXIT]",
             "[BRANCH_END]",
+            "[CALL_ENTER]",
             "ok",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "cleanup",
+            "[CALL_EXIT]",
         ]
     );
 }
@@ -131,12 +153,18 @@ def process(x):
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "one",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "other",
-            "[SWITCH_END]"
+            "[CALL_EXIT]",
+            "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
         ]
     );
 }
@@ -161,12 +189,18 @@ class Foo {
     assert_eq!(
         c,
         [
+            "[CALL_ENTER]",
             "obj.run",
+            "[CALL_EXIT]",
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "this.helper",
+            "[CALL_EXIT]",
             "[IF_FALSE]",
+            "[CALL_ENTER]",
             "fallback",
-            "[BRANCH_END]"
+            "[CALL_EXIT]",
+            "[BRANCH_END]",
         ]
     );
 }
@@ -194,14 +228,22 @@ func process(u *User) {
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "fmt.Println",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "fmt.Println",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
             "[LOOP]",
+            "[CALL_ENTER]",
             "save",
+            "[CALL_EXIT]",
             "[LOOP_BACK]",
         ]
     );
@@ -227,12 +269,18 @@ end
         c,
         [
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "validate",
+            "[CALL_EXIT]",
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "warn",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "fail",
+            "[CALL_EXIT]",
             "[BRANCH_END]",
-            "[BRANCH_END]"
+            "[BRANCH_END]",
         ]
     );
 }
@@ -258,7 +306,9 @@ int add(int a, int b) {
             "[LOOP]",
             "[IF_TRUE]",
             "[RETURN]",
+            "[CALL_ENTER]",
             "compute",
+            "[CALL_EXIT]",
             "[BRANCH_END]",
             "[LOOP_BACK]",
             "[RETURN]",
@@ -289,14 +339,22 @@ func process(x: Int) -> Int {
         c,
         [
             "[LOOP]",
+            "[CALL_ENTER]",
             "save",
+            "[CALL_EXIT]",
             "[LOOP_BACK]",
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "run",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "stop",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
             "[RETURN]",
         ]
     );
@@ -323,15 +381,23 @@ function f(y) {
         c,
         [
             "[LOOP]",
+            "[CALL_ENTER]",
             "qux",
+            "[CALL_EXIT]",
             "[LOOP_BACK]",
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "one",
+            "[CALL_EXIT]",
             "[BREAK]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "two",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
             "[RETURN]",
         ]
     );
@@ -353,7 +419,65 @@ class Service {
 }
 "#,
     );
-    assert_eq!(c, ["this.repo.find", "[IF_TRUE]", "log", "[BRANCH_END]"]);
+    assert_eq!(
+        c,
+        [
+            "[CALL_ENTER]",
+            "this.repo.find",
+            "[CALL_EXIT]",
+            "[IF_TRUE]",
+            "[CALL_ENTER]",
+            "log",
+            "[CALL_EXIT]",
+            "[BRANCH_END]",
+        ]
+    );
+}
+
+#[test]
+fn rust_let_declaration() {
+    let c = walk(
+        "rust",
+        r#"
+fn f() {
+    let x = compute();
+    let y = x + 1;
+    return y;
+}
+"#,
+    );
+    assert_eq!(
+        c,
+        ["[CALL_ENTER]", "compute → x", "[CALL_EXIT]", "[RETURN]"]
+    );
+}
+
+#[test]
+fn rust_multiple_let_declarations() {
+    let c = walk(
+        "rust",
+        r#"
+fn f() {
+    let a = foo();
+    let b = bar();
+    let c = baz();
+}
+"#,
+    );
+    assert_eq!(
+        c,
+        [
+            "[CALL_ENTER]",
+            "foo → a",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "bar → b",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "baz → c",
+            "[CALL_EXIT]"
+        ]
+    );
 }
 
 #[test]
@@ -373,12 +497,18 @@ fn f(x: i32) -> i32 {
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "one",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "other",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
             "[RETURN]"
         ]
     );
@@ -402,13 +532,19 @@ class Foo {
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "a",
+            "[CALL_EXIT]",
             "[BREAK]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "b",
-            "[SWITCH_END]"
+            "[CALL_EXIT]",
+            "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
         ]
     );
 }
@@ -435,14 +571,20 @@ end
         c,
         [
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "validate",
+            "[CALL_EXIT]",
             "[IF_FALSE]",
+            "[CALL_ENTER]",
             "fail",
+            "[CALL_EXIT]",
             "[BRANCH_END]",
             "[LOOP]",
+            "[CALL_ENTER]",
             "save",
+            "[CALL_EXIT]",
             "[LOOP_BACK]",
-            "[RETURN]"
+            "[RETURN]",
         ]
     );
 }
@@ -467,10 +609,16 @@ function process($x) {
         c,
         [
             "[LOOP]",
+            "[CALL_ENTER]",
             "save",
+            "[CALL_EXIT]",
             "[LOOP_BACK]",
+            "[CALL_ENTER]",
             "obj.method",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "self.run",
+            "[CALL_EXIT]",
             "[RETURN]"
         ]
     );
@@ -493,13 +641,19 @@ def f(x: Int) = {
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "one",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "other",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
-            "[RETURN]"
+            "[SWITCH_CLOSE]",
+            "[RETURN]",
         ]
     );
 }
@@ -523,7 +677,9 @@ int add(int a, int b) {
         [
             "[IF_TRUE]",
             "[RETURN]",
+            "[CALL_ENTER]",
             "compute",
+            "[CALL_EXIT]",
             "[IF_FALSE]",
             "[RETURN]",
             "[BRANCH_END]"
@@ -551,14 +707,26 @@ int f(int x) {
         c,
         [
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "b",
+            "[CALL_ENTER]",
             "c",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "d",
+            "[CALL_EXIT]",
             "[BRANCH_END]",
             "[LOOP]",
+            "[CALL_ENTER]",
             "b",
+            "[CALL_ENTER]",
             "c",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "d",
+            "[CALL_EXIT]",
             "[LOOP_BACK]",
             "[RETURN]",
         ]
@@ -577,7 +745,26 @@ int f(int x) {
 }
 "#,
     );
-    assert_eq!(c, ["[LOOP]", "e", "a", "b", "c", "[LOOP_BACK]", "[RETURN]"]);
+    assert_eq!(
+        c,
+        [
+            "[LOOP]",
+            "[CALL_ENTER]",
+            "e",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "a",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "b",
+            "[CALL_ENTER]",
+            "c",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[LOOP_BACK]",
+            "[RETURN]",
+        ]
+    );
 }
 
 /// Text condition của `if` được giữ làm metadata (CallRecord.condition của call
@@ -634,16 +821,32 @@ def f(x):
         c,
         [
             "[IF_TRUE]",
+            "[CALL_ENTER]",
             "a",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "b",
+            "[CALL_ENTER]",
             "c",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "d",
+            "[CALL_EXIT]",
             "[BRANCH_END]",
             "[LOOP]",
+            "[CALL_ENTER]",
             "a",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "b",
+            "[CALL_ENTER]",
             "c",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
             "d",
+            "[CALL_EXIT]",
             "[LOOP_BACK]",
             "[RETURN]",
         ]
@@ -665,7 +868,26 @@ func f() {
 }
 "#,
     );
-    assert_eq!(c, ["[LOOP]", "a", "b", "c", "d", "[LOOP_BACK]", "[RETURN]"]);
+    assert_eq!(
+        c,
+        [
+            "[LOOP]",
+            "[CALL_ENTER]",
+            "a",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "b",
+            "[CALL_ENTER]",
+            "c",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "d",
+            "[CALL_EXIT]",
+            "[LOOP_BACK]",
+            "[RETURN]",
+        ]
+    );
 }
 
 /// Switch discriminant (`switch (getType(x))`) cũng vào chain trước các case.
@@ -687,14 +909,22 @@ class Foo {
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
+            "[CALL_ENTER]",
             "getType",
+            "[CALL_EXIT]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "one",
+            "[CALL_EXIT]",
             "[BREAK]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
+            "[CALL_ENTER]",
             "other",
+            "[CALL_EXIT]",
             "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
         ]
     );
 }
@@ -715,7 +945,18 @@ class Foo {
 }
 "#,
     );
-    assert_eq!(c, ["[RETURN]", "a.run(abc.class).exec", "a.run"]);
+    assert_eq!(
+        c,
+        [
+            "[RETURN]",
+            "[CALL_ENTER]",
+            "a.run(abc.class).exec",
+            "[CALL_ENTER]",
+            "a.run",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+        ]
+    );
 }
 
 /// Bug A: string-literal case labels (`case 'optimize_text':`) — dispatch key
@@ -739,6 +980,7 @@ function dispatch(name: string): number {
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
             "optimize_text",
             "[RETURN]",
@@ -750,6 +992,7 @@ function dispatch(name: string): number {
             "[SWITCH_CASE]",
             "[RETURN]",
             "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
         ]
     );
 }
@@ -901,19 +1144,25 @@ function runStorage(op: string, s: Store): void {
     assert_eq!(
         c,
         [
+            "[SWITCH_START]",
             "[SWITCH_CASE]",
             "store",
+            "[CALL_ENTER]",
             "s.save",
+            "[CALL_EXIT]",
             "[BREAK]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
             "retrieve",
+            "[CALL_ENTER]",
             "s.get",
+            "[CALL_EXIT]",
             "[BREAK]",
             "[SWITCH_END]",
             "[SWITCH_CASE]",
             "[BREAK]",
             "[SWITCH_END]",
+            "[SWITCH_CLOSE]",
         ]
     );
 }
@@ -966,13 +1215,13 @@ a();
 #[test]
 fn js_const_arrow_chain() {
     let c = walk("javascript", "const f = () => g();\n");
-    assert_eq!(c, ["g"]);
+    assert_eq!(c, ["[CALL_ENTER]", "g", "[CALL_EXIT]"]);
 }
 
 #[test]
 fn ts_const_arrow_chain() {
     let c = walk("typescript", "const f = (): void => g();\n");
-    assert_eq!(c, ["g"]);
+    assert_eq!(c, ["[CALL_ENTER]", "g", "[CALL_EXIT]"]);
 }
 
 #[test]
@@ -1123,4 +1372,100 @@ fn php_assigned_anonymous_and_arrow() {
         .calls
         .iter()
         .any(|c| c.caller_id == h.id && c.call_name == "h2"));
+}
+
+#[test]
+fn rust_let_declaration_method_chain() {
+    let c = walk(
+        "rust",
+        r#"
+fn f() {
+    let __t = cg_t!("rebuild TOTAL");
+    let __t_load = cg_t!("load_all_symbols");
+    let symbols = self.storage.read().await.load_all_symbols().await.map_err(serr)?;
+    cg_d!(__t_load, "load_all_symbols");
+    self.files = self.storage.read().await.load_all_files().await.map_err(serr)?;
+}
+"#,
+    );
+    assert_eq!(
+        c,
+        [
+            "[CALL_ENTER]",
+            "self.storage.read().await.load_all_symbols().await.map_err",
+            "[CALL_ENTER]",
+            "self.storage.read().await.load_all_symbols",
+            "[CALL_ENTER]",
+            "self.storage.read → symbols",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "self.storage.read().await.load_all_files().await.map_err",
+            "[CALL_ENTER]",
+            "self.storage.read().await.load_all_files",
+            "[CALL_ENTER]",
+            "self.storage.read → self.files",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_EXIT]",
+        ]
+    );
+}
+
+#[test]
+fn rust_assignment_expression_no_call_rhs() {
+    let c = walk(
+        "rust",
+        r#"
+fn f() {
+    let x = compute();
+    x = 5;
+    let y = foo();
+}
+"#,
+    );
+    // x = 5 has no call on RHS, so previous call (compute) should NOT get → x
+    // foo() should get → y (let declaration)
+    assert_eq!(
+        c,
+        [
+            "[CALL_ENTER]",
+            "compute → x",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "foo → y",
+            "[CALL_EXIT]",
+        ]
+    );
+}
+
+#[test]
+fn rust_assignment_expression_with_call_rhs() {
+    let c = walk(
+        "rust",
+        r#"
+fn f() {
+    let x = compute();
+    x = other();
+    let y = foo();
+}
+"#,
+    );
+    // x = other() has a call on RHS, so other() should get → x (is_new_var = false)
+    // foo() should get → y
+    assert_eq!(
+        c,
+        [
+            "[CALL_ENTER]",
+            "compute → x",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "other → x",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "foo → y",
+            "[CALL_EXIT]",
+        ]
+    );
 }

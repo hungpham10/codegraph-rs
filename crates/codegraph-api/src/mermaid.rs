@@ -6,8 +6,9 @@
 use crate::GraphApi;
 use codegraph_core::{
     is_marker, marker_name, EffectType, FlowCall, FlowResult, SymbolId, MARKER_BRANCH_END,
-    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_SWITCH_CASE,
-    MARKER_SWITCH_END,
+    MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP,
+    MARKER_LOOP_BACK, MARKER_STMT_END, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END,
+    MARKER_SWITCH_START,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -33,18 +34,55 @@ pub fn control_flow(flow: &FlowResult) -> String {
         .map(|b| (b.position, b.label.as_str()))
         .collect();
 
-    let mut out = String::from("flowchart TD\n");
+    // Skip CALL_ENTER/EXIT, STMT_END when rendering nodes — they're structural only.
+    // Build a filtered chain: (filtered_index, original_index, raw_value)
+    let mut filtered: Vec<(usize, usize, u64)> = Vec::new();
     for (i, &raw) in flow.chain.iter().enumerate() {
-        let desc = flow.chain_desc.get(i).map(String::as_str).unwrap_or("");
-        let (open, close, label) = node_style(&flow.chain, i, raw, desc, &calls, &labels);
-        out.push_str(&format!("  c{i}{open}\"{}\"{close}\n", sanitize(&label)));
+        if raw == MARKER_CALL_ENTER || raw == MARKER_CALL_EXIT || raw == MARKER_STMT_END {
+            continue;
+        }
+        filtered.push((filtered.len(), i, raw));
+    }
+
+    let mut out = String::from("flowchart TD\n");
+    for (new_i, orig_i, raw) in &filtered {
+        let desc = flow
+            .chain_desc
+            .get(*orig_i)
+            .map(String::as_str)
+            .unwrap_or("");
+        let (open, close, label) = node_style(&flow.chain, *orig_i, *raw, desc, &calls, &labels);
+        out.push_str(&format!(
+            "  c{new_i}{open}\"{}\"{close}\n",
+            sanitize(&label)
+        ));
     }
 
     // Cạnh cấu trúc, sắp xếp để output ổn định (không phụ thuộc thứ tự build).
-    let mut edges = structural_edges(&flow.chain);
-    edges.sort_unstable();
-    edges.dedup();
+    // Gom tất cả cạnh từ cả 2 pass rồi dedup một lần để tránh duplicate edges.
+    let mut all_edges: Vec<(usize, usize)> = Vec::new();
+
+    // Pass 1: structural edges on original chain, remap to filtered indices.
+    let edges = structural_edges(&flow.chain);
+    let mut orig_to_filtered: Vec<Option<usize>> = vec![None; flow.chain.len()];
+    for (new_i, orig_i, _) in &filtered {
+        orig_to_filtered[*orig_i] = Some(*new_i);
+    }
     for (a, b) in edges {
+        if let (Some(fa), Some(fb)) = (orig_to_filtered[a], orig_to_filtered[b]) {
+            all_edges.push((fa, fb));
+        }
+    }
+
+    // Pass 2: structural edges on filtered chain (preserves structural markers except CALL_ENTER/EXIT/STMT_END).
+    let filtered_chain: Vec<u64> = filtered.iter().map(|(_, _, raw)| *raw).collect();
+    let filtered_edges = structural_edges(&filtered_chain);
+    all_edges.extend(filtered_edges);
+
+    // Dedup toàn bộ cạnh.
+    all_edges.sort_unstable();
+    all_edges.dedup();
+    for (a, b) in all_edges {
         out.push_str(&format!("  c{a} --> c{b}\n"));
     }
     out
@@ -62,9 +100,10 @@ fn node_style(
     if is_marker(raw) {
         let name = marker_name(raw).unwrap_or("MARKER");
         let (open, close) = match name {
-            "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" => ("{", "}"),
+            "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "SWITCH_START" => ("{", "}"),
             "RETURN" | "THROW" | "BREAK" | "CONTINUE" | "LOOP" | "LOOP_BACK" | "BRANCH_END"
-            | "SWITCH_END" | "RECURSIVE_CALL" => ("([", "])"),
+            | "SWITCH_END" | "SWITCH_CLOSE" | "RECURSIVE_CALL" | "CALL_ENTER" | "CALL_EXIT"
+            | "STMT_END" => ("([", "])"),
             _ => ("[", "]"),
         };
         // Nhãn trigger: ưu tiên `branch_labels` (điều kiện/case persist), rồi
@@ -73,11 +112,13 @@ fn node_style(
             .get(&i)
             .map(|s| s.to_string())
             .or_else(|| match name {
-                "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "LOOP" => guard_for(chain, i, calls),
+                "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "SWITCH_START" | "LOOP" => {
+                    guard_for(chain, i, calls)
+                }
                 _ => None,
             });
         let label = match name {
-            "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "LOOP" => match branch {
+            "IF_TRUE" | "IF_FALSE" | "SWITCH_CASE" | "SWITCH_START" | "LOOP" => match branch {
                 Some(g) if !g.is_empty() => format!("{name}: {g}"),
                 _ => name.to_string(),
             },
@@ -104,6 +145,12 @@ fn node_style(
         if c.effect != EffectType::None {
             label.push_str(" · ");
             label.push_str(c.effect.as_str());
+        }
+        // Thêm biến gán nếu có.
+        if let Some(var) = &c.into_var {
+            if !var.is_empty() {
+                label.push_str(&format!(" → {var}"));
+            }
         }
         if c.to_id.is_none() {
             label.push_str(" · ext");
@@ -142,55 +189,132 @@ fn guard_for(chain: &[u64], marker_at: usize, calls: &HashMap<usize, &FlowCall>)
 fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
     let n = chain.len();
     let mut edges: Vec<(usize, usize)> = Vec::new();
-    // Ngăn xếp index của node điều kiện (if) đang mở.
-    let mut if_stack: Vec<usize> = Vec::new();
+    // Ngăn xếp (cond_index, then_end_index, has_else) của node điều kiện (if) đang mở.
+    let mut if_stack: Vec<(usize, Option<usize>, bool)> = Vec::new();
     // Ngăn xếp index của header loop đang mở.
     let mut loop_stack: Vec<usize> = Vec::new();
-    // Node trước switch đầu tiên của switch đang mở (các case toả từ đây).
-    let mut switch_entry: Option<usize> = None;
+    // Ngăn xếp entry point của các switch đang mở.
+    // Mỗi entry là index của node discriminant (điều kiện match) của switch đó.
+    let mut switch_stack: Vec<usize> = Vec::new();
+    // Ngăn xếp depth của call nesting (cho CALL_ENTER/CALL_EXIT).
+    let mut call_stack: Vec<usize> = Vec::new();
 
     let mut i = 1usize;
     while i < n {
         let prev = i - 1;
-        match chain[i] {
+        let curr = chain[i];
+        let curr_is_marker = is_marker(curr);
+        let prev_is_marker = is_marker(chain[prev]);
+
+        // Sequential edge rules:
+        // - non-marker -> non-marker: statement to statement
+        // - marker -> non-marker: marker to first statement in body (but NOT from STMT_END)
+        // - non-marker -> marker: for linear entry (IF_TRUE, LOOP, SWITCH_START)
+        //   AND for block end markers (BRANCH_END, SWITCH_END, SWITCH_CLOSE)
+        // - marker -> marker: NO sequential edge
+        let is_linear_entry = matches!(curr, MARKER_IF_TRUE | MARKER_LOOP | MARKER_SWITCH_START);
+        let is_block_end = matches!(
+            curr,
+            MARKER_BRANCH_END | MARKER_SWITCH_END | MARKER_SWITCH_CLOSE
+        );
+        let prev_is_stmt_end = chain[prev] == MARKER_STMT_END;
+
+        if !prev_is_marker && !curr_is_marker {
+            edges.push((prev, i));
+        } else if prev_is_marker && !curr_is_marker && !prev_is_stmt_end {
+            // marker -> non-marker, but NOT from STMT_END
+            edges.push((prev, i));
+        } else if !prev_is_marker && curr_is_marker && (is_linear_entry || is_block_end) {
+            edges.push((prev, i));
+        }
+        // marker -> marker: no sequential edge
+        // non-marker -> branch marker (IF_FALSE, SWITCH_CASE): no sequential edge
+        // STMT_END -> next statement: NO edge (separator)
+
+        match curr {
             MARKER_IF_TRUE => {
-                edges.push((prev, i));
-                if_stack.push(prev);
+                // IF_TRUE already connected from prev (cond) via sequential
+                if_stack.push((prev, None, false));
             }
             MARKER_IF_FALSE => {
-                // else rẽ từ chính điều kiện `if`.
-                let src = if_stack.last().copied().unwrap_or(prev);
+                // IF_FALSE connects from cond (structural)
+                let src = if_stack.last().map(|(s, _, _)| *s).unwrap_or(prev);
                 edges.push((src, i));
+                if let Some(top) = if_stack.last_mut() {
+                    top.1 = Some(prev);
+                    top.2 = true;
+                }
             }
             MARKER_BRANCH_END => {
-                let cond = if_stack.pop().unwrap_or(prev);
-                edges.push((cond, i)); // đường điều kiện sai (không có else)
-                edges.push((prev, i)); // cuối nhánh
+                let (cond, then_end, has_else) = if_stack.pop().unwrap_or((prev, None, false));
+                // BRANCH_END connected from prev (last body stmt) via sequential
+                if has_else {
+                    if let Some(then_end_idx) = then_end {
+                        edges.push((then_end_idx, i));
+                    }
+                } else {
+                    let mut j = i + 1;
+                    while j < n && is_marker(chain[j]) {
+                        j += 1;
+                    }
+                    if j < n {
+                        edges.push((cond, j));
+                    } else {
+                        edges.push((cond, i));
+                    }
+                }
             }
             MARKER_LOOP => {
-                edges.push((prev, i));
                 loop_stack.push(i);
             }
             MARKER_LOOP_BACK => {
                 edges.push((prev, i));
                 if let Some(header) = loop_stack.last().copied() {
-                    edges.push((i, header)); // back edge
+                    edges.push((i, header));
                 }
             }
-            MARKER_SWITCH_CASE => match switch_entry {
-                Some(entry) if entry != prev => edges.push((entry, i)),
-                _ => {
-                    switch_entry = Some(prev);
+            MARKER_SWITCH_START => {
+                // Switch start: prev is the discriminant (or previous statement)
+                // Sequential edge from prev handled above
+                switch_stack.push(i); // SWITCH_START is the entry
+            }
+            MARKER_SWITCH_CASE => {
+                if let Some(&entry) = switch_stack.last() {
+                    edges.push((entry, i));
+                } else {
                     edges.push((prev, i));
                 }
-            },
+            }
             MARKER_SWITCH_END => {
                 edges.push((prev, i));
-                if chain.get(i + 1) != Some(&MARKER_SWITCH_CASE) {
-                    switch_entry = None;
+                if (i + 1 >= n || chain[i + 1] != MARKER_SWITCH_CASE) && !switch_stack.is_empty() {
+                    switch_stack.pop();
                 }
             }
-            _ => edges.push((prev, i)),
+            MARKER_SWITCH_CLOSE => {
+                edges.push((prev, i));
+                if !switch_stack.is_empty() {
+                    switch_stack.pop();
+                }
+            }
+            MARKER_CALL_ENTER => {
+                call_stack.push(i);
+            }
+            MARKER_CALL_EXIT => {
+                if !call_stack.is_empty() {
+                    call_stack.pop();
+                }
+            }
+            MARKER_STMT_END => {
+                // Statement end: acts as a barrier between statements.
+                // No structural edges. Sequential edge logic already handles
+                // the edge from previous statement to STMT_END (if non-marker -> marker).
+                // We DON'T want edge from STMT_END to next statement.
+                // The sequential rule `prev_is_marker && !curr_is_marker` would add
+                // edge from STMT_END to next statement, which we DON'T want.
+                // Fix: treat STMT_END as a marker that should NOT connect to next.
+            }
+            _ => {}
         }
         i += 1;
     }
@@ -404,7 +528,7 @@ fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_core::{BranchLabel, ScopeLevel, Symbol, SymbolKind};
+    use codegraph_core::{BranchLabel, ScopeLevel, Symbol, SymbolKind, MARKER_SWITCH_CLOSE};
 
     fn flow(chain: Vec<u64>, desc: Vec<&str>, calls: Vec<FlowCall>) -> FlowResult {
         FlowResult {
@@ -459,6 +583,8 @@ mod tests {
             effect: EffectType::None,
             effect_desc: None,
             args: Vec::new(),
+            into_var: None,
+            is_new_var: false,
         }
     }
 
@@ -496,11 +622,35 @@ mod tests {
         assert!(m.contains("c1 --> c2"), "{m}");
         assert!(m.contains("c0 --> c3"), "{m}");
         assert!(!m.contains("c2 --> c3"), "{m}");
-        // cuối nhánh else nhập về BRANCH_END, và BRANCH_END nối tiếp done.
-        assert!(m.contains("c4 --> c5"), "{m}");
-        assert!(m.contains("c0 --> c5"), "{m}");
+        // Cả hai nhánh then/else đều hội tụ tại BRANCH_END, rồi tiếp done.
+        assert!(m.contains("c2 --> c5"), "{m}"); // then → BRANCH_END
+        assert!(m.contains("c4 --> c5"), "{m}"); // else → BRANCH_END
         assert!(m.contains("c5 --> c6"), "{m}");
+        // Không có cạnh trực tiếp cond → BRANCH_END khi có else (false path đi qua IF_FALSE).
+        assert!(!m.contains("c0 --> c5"), "{m}");
         assert!(m.contains("c1{\"IF_TRUE\"}"), "{m}");
+    }
+
+    #[test]
+    fn if_without_else_false_branch_skips_branch_end() {
+        // if (cond) { then() } done()  — không có else
+        let chain = vec![100, MARKER_IF_TRUE, 0, MARKER_BRANCH_END, 101];
+        let f = flow(
+            chain,
+            vec!["root", "IF_TRUE", "then", "BRANCH_END", "done"],
+            vec![call(2, "then", None, 3), call(4, "done", Some(102), 5)],
+        );
+        let m = control_flow(&f);
+        // cond -> IF_TRUE -> then -> BRANCH_END
+        assert!(m.contains("c0 --> c1"), "{m}");
+        assert!(m.contains("c1 --> c2"), "{m}");
+        assert!(m.contains("c2 --> c3"), "{m}");
+        // False path: cond -> done (SKIP BRANCH_END)
+        assert!(m.contains("c0 --> c4"), "{m}");
+        // BRANCH_END -> done (then branch continues)
+        assert!(m.contains("c3 --> c4"), "{m}");
+        // Không có cond -> BRANCH_END
+        assert!(!m.contains("c0 --> c3"), "{m}");
     }
 
     #[test]
@@ -523,40 +673,86 @@ mod tests {
         // switch { case a(); case b(); } done()
         let chain = vec![
             100,
+            MARKER_SWITCH_START,
             MARKER_SWITCH_CASE,
             0,
             MARKER_SWITCH_END,
             MARKER_SWITCH_CASE,
             0,
             MARKER_SWITCH_END,
+            MARKER_SWITCH_CLOSE,
             101,
         ];
         let f = flow(
             chain,
             vec![
                 "root",
+                "SWITCH_START",
                 "SWITCH_CASE",
                 "a",
                 "SWITCH_END",
                 "SWITCH_CASE",
                 "b",
                 "SWITCH_END",
+                "SWITCH_CLOSE",
                 "done",
             ],
             vec![
                 call(2, "a", None, 2),
                 call(5, "b", None, 3),
-                call(7, "done", Some(102), 4),
+                call(9, "done", Some(102), 4),
             ],
         );
         let m = control_flow(&f);
-        // cả hai case toả từ node entry (c0).
-        assert!(m.contains("c0 --> c1"), "{m}");
+        // cả hai case toả từ node entry (c0 - discriminant).
+        assert!(m.contains("c1 --> c2"), "{m}"); // SWITCH_START -> first case
         assert!(
-            m.contains("c0 --> c4"),
+            m.contains("c1 --> c5"),
             "second case should fan out from entry: {m}"
         );
-        assert!(!m.contains("c3 --> c4"), "{m}");
+        assert!(!m.contains("c4 --> c5"), "{m}"); // first case end NOT -> second case
+    }
+
+    #[test]
+    fn filter_call_enter_exit_stmt_end_markers() {
+        // Chain with CALL_ENTER/EXIT and STMT_END markers that should be filtered out
+        let chain = vec![
+            100,
+            MARKER_CALL_ENTER,
+            0,
+            MARKER_CALL_EXIT,
+            MARKER_STMT_END,
+            101,
+        ];
+        let f = flow(
+            chain,
+            vec![
+                "root",
+                "CALL_ENTER",
+                "call_fn",
+                "CALL_EXIT",
+                "STMT_END",
+                "done",
+            ],
+            vec![call(2, "call_fn", None, 3)],
+        );
+        let m = control_flow(&f);
+        eprintln!("Test mermaid output:\n{}", m);
+        // CALL_ENTER, CALL_EXIT, STMT_END should be filtered out
+        // Result should have: root(0) -> call_fn(1) -> done(2)
+        assert!(m.contains("c0[\"root\"]"), "missing root: {m}");
+        // call_fn is external (to_id=None) so gets " · ext" suffix
+        assert!(m.contains("call_fn · L3 · ext"), "missing call_fn: {m}");
+        // done has no line in the test (line 4 is from the chain desc)
+        assert!(m.contains("c2[\"done\"]"), "missing done: {m}");
+        // No MARKER nodes for CALL_ENTER/EXIT/STMT_END
+        assert!(
+            !m.contains("MARKER"),
+            "should not contain filtered markers: {m}"
+        );
+        // Edges: root -> call_fn -> done
+        assert!(m.contains("c0 --> c1"), "missing edge c0->c1: {m}");
+        assert!(m.contains("c1 --> c2"), "missing edge c1->c2: {m}");
     }
 
     #[test]

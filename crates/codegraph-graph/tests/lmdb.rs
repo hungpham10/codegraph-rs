@@ -67,6 +67,8 @@ async fn index_ingest_reopen_roundtrip() {
         effect_desc: None,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     }];
     let r = result(
         "a.ts",
@@ -267,6 +269,8 @@ async fn long_path_and_call_name_survive_roundtrip() {
         effect_desc: None,
         target_class: None,
         target_method: None,
+        into_var: None,
+        is_new_var: false,
     }];
     let r = result(
         &long_path,

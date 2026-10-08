@@ -364,6 +364,8 @@ fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_gr
                     effect_desc: None,
                     target_class: None,
                     target_method: None,
+                    into_var: None,
+                    is_new_var: false,
                 });
             }
         }

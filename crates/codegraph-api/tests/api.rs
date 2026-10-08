@@ -58,6 +58,8 @@ async fn seed_index(path: &str) -> (u64, u64, u64) {
             effect_desc: None,
             target_class: None,
             target_method: None,
+            into_var: None,
+            is_new_var: false,
         }],
     };
     idx.ingest(&[r]).await.unwrap();
@@ -353,6 +355,8 @@ async fn seed_references(db: &str, count: usize) {
                 effect_desc: None,
                 target_class: None,
                 target_method: None,
+                into_var: None,
+                is_new_var: false,
             }],
         });
     }

@@ -8,7 +8,7 @@ fn ts_language() -> tree_sitter::Language {
 
 /// `new List<int>(...)` — tên class gốc (strip generic args để resolve được).
 fn new_call_name(node: &Node, src: &[u8]) -> Option<String> {
-    let tn = node
+    let tn: String = node
         .child_by_field_name("type")
         .and_then(|t| text(&t, src))?;
     let base = tn.split('<').next().unwrap_or(&tn);
