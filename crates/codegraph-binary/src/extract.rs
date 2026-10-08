@@ -550,6 +550,8 @@ fn build_chains_with_cfg(
                             effect_desc: None,
                             target_class: None,
                             target_method: None,
+                            into_var: None,
+                            is_new_var: false,
                         });
                     }
                     "cjmp" => {
@@ -631,6 +633,8 @@ fn build_chains_from_graph(
                 effect_desc: None,
                 target_class: None,
                 target_method: None,
+                into_var: None,
+                is_new_var: false,
             });
         }
         chains.insert(caller_id, chain);

@@ -27,8 +27,9 @@ body {
 	background: transparent;
 }
 
-/* Mermaid render ra SVG — cho nền tối, canh giữa. */
+/* Mermaid render ra SVG — không co lại; zoom do transform của stage đảm nhiệm. */
 .mermaid-host svg {
-	max-width: 100%;
+	display: block;
+	max-width: none;
 	height: auto;
 }

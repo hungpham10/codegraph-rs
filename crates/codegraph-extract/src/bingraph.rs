@@ -857,6 +857,8 @@ impl BinaryGraph {
                     .unwrap_or(codegraph_core::EffectType::None),
                 effect_desc: rec.and_then(|r| r.effect_desc.clone()),
                 args: rec.map(|r| r.arg_exprs.clone()).unwrap_or_default(),
+                into_var: rec.and_then(|r| r.into_var.clone()),
+                is_new_var: rec.map(|r| r.is_new_var).unwrap_or(false),
             });
         }
         Ok(FlowResult {
@@ -981,6 +983,8 @@ mod tests {
                     effect_desc: None,
                     target_class: None,
                     target_method: None,
+                    into_var: None,
+                    is_new_var: false,
                 },
                 CallRecord {
                     caller_id: sid(1),
@@ -994,6 +998,8 @@ mod tests {
                     effect_desc: None,
                     target_class: None,
                     target_method: None,
+                    into_var: None,
+                    is_new_var: false,
                 },
             ],
         }

@@ -53,6 +53,21 @@ pub const MARKER_CONTINUE: u64 = 11;
 /// Marker: throw/raise exception.
 pub const MARKER_THROW: u64 = 12;
 
+/// Marker: bắt đầu call expression (dùng cho nested call depth).
+pub const MARKER_CALL_ENTER: u64 = 17;
+
+/// Marker: kết thúc call expression.
+pub const MARKER_CALL_EXIT: u64 = 18;
+
+/// Marker: đóng switch expression (tách các switch riêng biệt).
+pub const MARKER_SWITCH_CLOSE: u64 = 19;
+
+/// Marker: bắt đầu switch expression (dùng cho discriminant text).
+pub const MARKER_SWITCH_START: u64 = 20;
+
+/// Marker: kết thúc statement (tách các statements trong block).
+pub const MARKER_STMT_END: u64 = 21;
+
 /// `true` nếu `id` là một fixed marker (nằm trong vùng reserved).
 #[inline]
 pub fn is_marker(id: u64) -> bool {
@@ -74,6 +89,11 @@ pub fn marker_name(id: u64) -> Option<&'static str> {
         MARKER_BREAK => "BREAK",
         MARKER_CONTINUE => "CONTINUE",
         MARKER_THROW => "THROW",
+        MARKER_CALL_ENTER => "CALL_ENTER",
+        MARKER_CALL_EXIT => "CALL_EXIT",
+        MARKER_SWITCH_CLOSE => "SWITCH_CLOSE",
+        MARKER_SWITCH_START => "SWITCH_START",
+        MARKER_STMT_END => "STMT_END",
         _ => return None,
     })
 }
@@ -94,6 +114,11 @@ pub fn marker_id(name: &str) -> Option<u64> {
         "BREAK" => MARKER_BREAK,
         "CONTINUE" => MARKER_CONTINUE,
         "THROW" => MARKER_THROW,
+        "CALL_ENTER" => MARKER_CALL_ENTER,
+        "CALL_EXIT" => MARKER_CALL_EXIT,
+        "SWITCH_CLOSE" => MARKER_SWITCH_CLOSE,
+        "SWITCH_START" => MARKER_SWITCH_START,
+        "STMT_END" => MARKER_STMT_END,
         _ => return None,
     })
 }
@@ -336,6 +361,12 @@ pub struct CallRecord {
     /// Gợi ý structural khi resolve (VD Java class literal).
     pub target_class: Option<String>,
     pub target_method: Option<String>,
+    /// Biến gán kết quả call này (VD: `let cli = Cli::parse()` → `into_var = Some("cli")`).
+    #[serde(default)]
+    pub into_var: Option<String>,
+    /// `true` nếu assignment tạo biến mới, `false` nếu update biến đã có.
+    #[serde(default)]
+    pub is_new_var: bool,
 }
 
 /// Giá trị của inverted index `call name → call sites` (dùng cho query
@@ -407,6 +438,12 @@ pub struct FlowCall {
     pub effect_desc: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Biến gán kết quả call này (VD: `let cli = Cli::parse()` → `into_var = Some("cli")`).
+    #[serde(default)]
+    pub into_var: Option<String>,
+    /// `true` nếu assignment tạo biến mới, `false` nếu update biến đã có.
+    #[serde(default)]
+    pub is_new_var: bool,
 }
 
 /// Kết quả resolve symbol theo id/name — `ambiguous=true` khi name trùng nhiều

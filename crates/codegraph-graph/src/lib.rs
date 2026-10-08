@@ -1986,6 +1986,8 @@ impl GraphIndex {
                         effect: rec.effect,
                         effect_desc: rec.effect_desc.clone(),
                         args: rec.arg_exprs.clone(),
+                        into_var: rec.into_var.clone(),
+                        is_new_var: rec.is_new_var,
                     });
                 }
                 continue;
@@ -2005,6 +2007,8 @@ impl GraphIndex {
                 effect: rec.map(|r| r.effect).unwrap_or_default(),
                 effect_desc: rec.and_then(|r| r.effect_desc.clone()),
                 args: rec.map(|r| r.arg_exprs.clone()).unwrap_or_default(),
+                into_var: rec.and_then(|r| r.into_var.clone()),
+                is_new_var: rec.map(|r| r.is_new_var).unwrap_or(false),
             });
         }
 
