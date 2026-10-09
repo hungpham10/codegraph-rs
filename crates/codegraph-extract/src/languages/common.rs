@@ -829,11 +829,15 @@ fn walk_chain(
     /// chính là giá trị của cả chain. Bỏ qua record nhãn nhánh (`call_name` rỗng)
     /// do `emit_branch_label` tạo ra.
     fn tag_into_var(ctx: &mut ChainCtx, since: usize, var: Option<String>, is_new: bool) {
-        let Some(v) = var.filter(|v| !v.is_empty()) else { return };
+        let Some(v) = var.filter(|v| !v.is_empty()) else {
+            return;
+        };
         let Some(rec) = ctx.calls[since..]
             .iter_mut()
             .find(|r| !r.call_name.is_empty())
-        else { return };
+        else {
+            return;
+        };
         rec.into_var = Some(v);
         rec.is_new_var = is_new;
     }

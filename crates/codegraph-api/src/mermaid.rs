@@ -8,8 +8,7 @@ use codegraph_core::{
     is_marker, marker_name, EffectType, FlowCall, FlowResult, SymbolId, MARKER_BRANCH_END,
     MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE, MARKER_IF_FALSE,
     MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_STMT_END,
-    MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START,
-    MARKER_THROW,
+    MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -97,10 +96,7 @@ pub fn control_flow(flow: &FlowResult) -> String {
 /// Lập bản đồ scope của từng node trong `filtered` (chỉ số đã lọc):
 /// - `parent[i]`: chỉ số node call gần nhất bao lấy node `i` (MAX nếu top-level).
 /// - `open[i]`: chỉ số gốc của `CALL_ENTER` mở ra vùng chứa node `i`.
-fn call_scope(
-    chain: &[u64],
-    filtered: &[(usize, usize, u64)],
-) -> (Vec<usize>, Vec<usize>) {
+fn call_scope(chain: &[u64], filtered: &[(usize, usize, u64)]) -> (Vec<usize>, Vec<usize>) {
     const NONE: usize = usize::MAX;
     let n = filtered.len();
     let mut parent = vec![NONE; n];
@@ -374,8 +370,13 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
         // Prev marker đóng block (có thể nối đến linear-entry marker kế tiếp)
         let prev_closes_block = matches!(
             chain[prev],
-            MARKER_BRANCH_END | MARKER_SWITCH_END | MARKER_SWITCH_CLOSE
-                | MARKER_LOOP_BACK | MARKER_LOOP | MARKER_IF_TRUE | MARKER_SWITCH_START
+            MARKER_BRANCH_END
+                | MARKER_SWITCH_END
+                | MARKER_SWITCH_CLOSE
+                | MARKER_LOOP_BACK
+                | MARKER_LOOP
+                | MARKER_IF_TRUE
+                | MARKER_SWITCH_START
         );
 
         if !prev_is_marker && !curr_is_marker {
@@ -384,7 +385,10 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
         } else if prev_is_marker && !curr_is_marker && !prev_is_stmt_end {
             // marker -> stmt (not from STMT_END)
             edges.push((prev, i));
-        } else if !prev_is_marker && curr_is_marker && (is_linear_entry || is_block_end || is_terminator) {
+        } else if !prev_is_marker
+            && curr_is_marker
+            && (is_linear_entry || is_block_end || is_terminator)
+        {
             // stmt -> linear-entry / block-end / terminator
             edges.push((prev, i));
         } else if prev_is_marker && curr_is_marker && is_linear_entry && prev_closes_block {
