@@ -228,7 +228,7 @@ fn node_style(
 
     // Call / statement thường.
     let call = calls.get(&i).copied();
-    let mut label = call
+    let label = call
         .map(|c| c.to_name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| desc.to_string());
