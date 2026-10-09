@@ -264,17 +264,16 @@ fn node_style(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| desc.to_string());
 
-    // Rút gọn label dài của external call (desc chứa toàn bộ chain có xuống dòng/thụt lề).
-    // Lấy segment cuối cùng có ký tự chữ cái/số — ví dụ "map_err" từ "self.storage.read().await.load_next_id().await.map_err".
-    let label = if call.map(|c| c.to_id.is_none()).unwrap_or(false) && label.len() > 40 {
-        label
-            .split(['.', '(', ')', '[', ']', '{', '}', ' ', '\t', '\n', '\r'])
-            .rev()
-            .find(|s| !s.is_empty() && s.chars().any(|c| c.is_alphanumeric()))
-            .unwrap_or(&label)
-            .to_string()
-    } else {
-        label
+    // Rút gọn label dài của external call: desc/to_name chứa toàn bộ chain với
+    // newline + thụt lề (`self\n  .storage\n  .read()...`). Gộp whitespace thành
+    // 1 space để đọc được — vẫn giữ NGUYÊN chuỗi method chain, không cắt bớt
+    // segment (người đọc cần thấy `open_from_config(root).await.ok()` là gì).
+    let label = {
+        let collapsed: String = label
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        collapsed
     };
     let mut label = label;
     if let Some(c) = call {
