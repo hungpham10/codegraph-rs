@@ -269,10 +269,7 @@ fn node_style(
     // 1 space để đọc được — vẫn giữ NGUYÊN chuỗi method chain, không cắt bớt
     // segment (người đọc cần thấy `open_from_config(root).await.ok()` là gì).
     let label = {
-        let collapsed: String = label
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let collapsed: String = label.split_whitespace().collect::<Vec<_>>().join(" ");
         collapsed
     };
     let mut label = label;
