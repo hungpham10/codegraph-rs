@@ -246,8 +246,26 @@ fn node_style(
         if c.line > 0 {
             label.push_str(&format!(" · L{}", c.line));
         }
+        // Chỉ hiện `· if <cond>` trên node ĐẦU TIÊN của nhánh (đứng ngay sau marker
+        // IF_TRUE/IF_FALSE/LOOP/SWITCH_CASE). Các node sau trong cùng nhánh bỏ qua —
+        // marker đã mang text điều kiện rồi, lặp lại chỉ tạo nhiễu (một `if` dài
+        // 83 ký tự bị nhắc lại 15+ lần trong train.py::run).
+        //
+        // Nếu chain KHÔNG có marker nhánh nào (test case đơn giản), hiển thị condition
+        // trên mọi call có condition.
+        let has_branch_marker_before = (0..i).any(|j| {
+            matches!(
+                chain[j],
+                MARKER_IF_TRUE | MARKER_IF_FALSE | MARKER_LOOP | MARKER_SWITCH_CASE
+            )
+        });
+        let cond_is_immediate = i > 0
+            && matches!(
+                chain[i - 1],
+                MARKER_IF_TRUE | MARKER_IF_FALSE | MARKER_LOOP | MARKER_SWITCH_CASE
+            );
         if let Some(cond) = &c.condition {
-            if !cond.is_empty() {
+            if !cond.is_empty() && (cond_is_immediate || !has_branch_marker_before) {
                 label.push_str(&format!(" · if {cond}"));
             }
         }
@@ -691,10 +709,10 @@ async fn bfs(
     }
 }
 
-/// Làm sạch label Mermaid: bỏ dấu ngoặc kép / xuống dòng, giới hạn 80 ký tự.
+/// Làm sạch label Mermaid: bỏ dấu ngoặc kép / xuống dòng, giới hạn 100 ký tự.
 fn sanitize(s: &str) -> String {
     let cleaned = s.replace('"', "'").replace(['\n', '\r'], " ");
-    let mut out: String = cleaned.chars().take(80).collect();
+    let mut out: String = cleaned.chars().take(100).collect();
     if out.chars().count() < cleaned.chars().count() {
         out.push('…');
     }

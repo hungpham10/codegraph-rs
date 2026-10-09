@@ -693,7 +693,10 @@ fn walk_chain(
         let loop_cond_text = cond_node
             .and_then(|c| text(&c, ctx.src))
             .filter(|t| !t.is_empty());
-        let loop_cond = loop_cond_text.clone().or_else(|| condition.clone());
+        // KHÔNG fallback về condition của `if` bao ngoài: `for i in range(n)` lồng trong
+        // `if c:` sẽ gán nhãn điều kiện CỦA IF cho mọi call trong loop → flood + sai.
+        // Loop không có condition riêng thì body calls mang condition = None.
+        let loop_cond = loop_cond_text.clone();
         // Nhãn trigger của loop ngay tại marker LOOP.
         if let Some(l) = &loop_cond_text {
             emit_branch_label(ctx, l);
@@ -807,6 +810,10 @@ fn walk_chain(
         for ch in named_children(node) {
             if ctx.spec.except_kinds.contains(&ch.kind()) {
                 chain_push(ctx, MARKER_IF_TRUE);
+                // Nhãn handler của except: `except ValueError:` → `ValueError`.
+                if let Some(l) = except_label(&ch, ctx.src) {
+                    emit_branch_label(ctx, &format!("except {l}"));
+                }
                 walk_clause(ctx, &ch, depth + 1, in_loop, condition.clone());
                 chain_push(ctx, MARKER_BRANCH_END);
             }
@@ -1111,6 +1118,17 @@ fn is_case_body_kind(kind: &str) -> bool {
         || kind.contains("statement")
         || kind == "declaration_list"
         || kind == "compound_statement"
+}
+
+/// Nhãn handler của `except`/`catch` — `except ValueError:` → `ValueError`.
+/// Tìm node đầu tiên không phải body trong except_clause.
+fn except_label<'a>(node: &Node<'a>, src: &[u8]) -> Option<String> {
+    named_children(node)
+        .into_iter()
+        .find(|c| !is_case_body_kind(c.kind()))
+        .and_then(|c| text(&c, src))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 /// Gắn **nhãn nhánh** vào đúng vị trí marker trong chain (không thêm node):
