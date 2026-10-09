@@ -1388,24 +1388,26 @@ fn f() {
 }
 "#,
     );
+    // with the fix: into_var is now on the OUTERMOST call (map_err), not innermost (read)
+    // this is correct because map_err produces the final value that gets assigned
     assert_eq!(
         c,
         [
             "[CALL_ENTER]",
-            "self.storage.read().await.load_all_symbols().await.map_err",
+            "self.storage.read().await.load_all_symbols().await.map_err → symbols",
             "[CALL_ENTER]",
             "self.storage.read().await.load_all_symbols",
             "[CALL_ENTER]",
-            "self.storage.read → symbols",
+            "self.storage.read",
             "[CALL_EXIT]",
             "[CALL_EXIT]",
             "[CALL_EXIT]",
             "[CALL_ENTER]",
-            "self.storage.read().await.load_all_files().await.map_err",
+            "self.storage.read().await.load_all_files().await.map_err → self.files",
             "[CALL_ENTER]",
             "self.storage.read().await.load_all_files",
             "[CALL_ENTER]",
-            "self.storage.read → self.files",
+            "self.storage.read",
             "[CALL_EXIT]",
             "[CALL_EXIT]",
             "[CALL_EXIT]",
