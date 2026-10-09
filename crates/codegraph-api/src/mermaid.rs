@@ -6,9 +6,10 @@
 use crate::GraphApi;
 use codegraph_core::{
     is_marker, marker_name, EffectType, FlowCall, FlowResult, SymbolId, MARKER_BRANCH_END,
-    MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP,
-    MARKER_LOOP_BACK, MARKER_STMT_END, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END,
-    MARKER_SWITCH_START,
+    MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE, MARKER_IF_FALSE,
+    MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_STMT_END,
+    MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START,
+    MARKER_THROW,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -79,6 +80,11 @@ pub fn control_flow(flow: &FlowResult) -> String {
     let filtered_edges = structural_edges(&filtered_chain);
     all_edges.extend(filtered_edges);
 
+    // Method chain / closure body: chain lưu theo thứ tự emit (outer trước, inner
+    // sau) nhưng runtime chạy inner trước rồi mới outer. Điều chỉnh cạnh cho đúng
+    // thứ tự thực thi — xem `fix_call_edge_order`.
+    fix_call_edge_order(&flow.chain, &filtered, &mut all_edges);
+
     // Dedup toàn bộ cạnh.
     all_edges.sort_unstable();
     all_edges.dedup();
@@ -86,6 +92,134 @@ pub fn control_flow(flow: &FlowResult) -> String {
         out.push_str(&format!("  c{a} --> c{b}\n"));
     }
     out
+}
+
+/// Lập bản đồ scope của từng node trong `filtered` (chỉ số đã lọc):
+/// - `parent[i]`: chỉ số node call gần nhất bao lấy node `i` (MAX nếu top-level).
+/// - `open[i]`: chỉ số gốc của `CALL_ENTER` mở ra vùng chứa node `i`.
+fn call_scope(
+    chain: &[u64],
+    filtered: &[(usize, usize, u64)],
+) -> (Vec<usize>, Vec<usize>) {
+    const NONE: usize = usize::MAX;
+    let n = filtered.len();
+    let mut parent = vec![NONE; n];
+    let mut open = vec![NONE; n];
+    // Stack call đang mở; phần tử = chỉ số filtered của call sở hữu vùng đó,
+    // NONE = vùng vừa mở chưa gán owner (chờ node call đầu tiên).
+    let mut stack: Vec<usize> = Vec::new();
+    let mut cur_open = NONE;
+    let mut fi = 0usize;
+
+    for (i, &raw) in chain.iter().enumerate() {
+        match raw {
+            MARKER_CALL_ENTER => {
+                cur_open = i;
+                stack.push(NONE);
+            }
+            MARKER_CALL_EXIT => {
+                stack.pop();
+                if stack.is_empty() {
+                    cur_open = NONE;
+                }
+            }
+            MARKER_STMT_END => {}
+            _ => {
+                if fi >= n {
+                    break;
+                }
+                parent[fi] = stack
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&x| x != NONE)
+                    .unwrap_or(NONE);
+                open[fi] = cur_open;
+                if !is_marker(raw) {
+                    if let Some(last) = stack.last() {
+                        if *last == NONE {
+                            let top = stack.len() - 1;
+                            stack[top] = fi;
+                        }
+                    }
+                }
+                fi += 1;
+            }
+        }
+    }
+    (parent, open)
+}
+
+/// Call cha ngoài cùng của node `x` (theo filtered index), `NONE` nếu top-level.
+fn outermost_call(x: usize, parent: &[usize]) -> usize {
+    const NONE: usize = usize::MAX;
+    let mut cur = parent[x];
+    let mut last = NONE;
+    while cur != NONE {
+        last = cur;
+        cur = parent[cur];
+    }
+    last
+}
+
+/// Sửa thứ tự cạnh giữa các call node cho đúng runtime.
+///
+/// Chain emit theo pre-order nên node cha (call ngoài cùng) đứng TRƯỚC node con,
+/// nhưng `a.b().c()` chạy `a.b()` rồi mới `.c()`. Ba trường hợp:
+///
+/// 1. **Nested call** (`parent[b] == a`): đảo cạnh → `b → a` (con chạy trước).
+/// 2. **Cross-region** (`a`, `b` thuộc 2 vùng con khác nhau của cùng call cha):
+///    neo cạnh vào call sở hữu vùng thay vì nối tuần tự vô nghĩa. VD closure
+///    `x.clone().unwrap_or_else(|| { ... })` — thân closure phải gắn với
+///    `unwrap_or_else`, không phải nối tiếp sau `x.clone()`.
+/// 3. **Rời vùng call sang control-flow marker**: neo vào call cha ngoài cùng.
+fn fix_call_edge_order(
+    chain: &[u64],
+    filtered: &[(usize, usize, u64)],
+    edges: &mut [(usize, usize)],
+) {
+    const NONE: usize = usize::MAX;
+    let n = filtered.len();
+    if n < 2 {
+        return;
+    }
+    let (parent, open) = call_scope(chain, filtered);
+    let is_call = |i: usize| i < n && !is_marker(filtered[i].2);
+    let is_entry = |i: usize| {
+        i < n
+            && matches!(
+                filtered[i].2,
+                MARKER_IF_TRUE | MARKER_LOOP | MARKER_SWITCH_START
+            )
+    };
+
+    for edge in edges.iter_mut() {
+        let (a, b) = (edge.0, edge.1);
+        if a >= n || b >= n {
+            continue;
+        }
+        // 1. Call lồng nhau — con chạy trước cha.
+        if is_call(a) && is_call(b) && parent[b] == a {
+            edge.0 = b;
+            edge.1 = a;
+            continue;
+        }
+        // 2. Sang vùng con khác của cùng call cha — neo vào owner của vùng `b`.
+        if is_call(a) && is_call(b) && open[a] != open[b] && parent[b] != a {
+            let owner = outermost_call(b, &parent);
+            if owner != NONE {
+                edge.0 = owner;
+            }
+            continue;
+        }
+        // 3. Từ trong vùng call ra marker điều khiển — neo vào call cha ngoài cùng.
+        if is_call(a) && is_entry(b) && open[a] != NONE && parent[a] != NONE {
+            let outer = outermost_call(a, &parent);
+            if outer != NONE && outer != a {
+                edge.0 = outer;
+            }
+        }
+    }
 }
 
 /// Phân loại một node → `(open, close, label)`.
@@ -133,6 +267,20 @@ fn node_style(
         .map(|c| c.to_name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| desc.to_string());
+
+    // Rút gọn label dài của external call (desc chứa toàn bộ chain có xuống dòng/thụt lề).
+    // Lấy segment cuối cùng có ký tự chữ cái/số — ví dụ "map_err" từ "self.storage.read().await.load_next_id().await.map_err".
+    let label = if call.map(|c| c.to_id.is_none()).unwrap_or(false) && label.len() > 40 {
+        label
+            .split(['.', '(', ')', '[', ']', '{', '}', ' ', '\t', '\n', '\r'])
+            .rev()
+            .find(|s| !s.is_empty() && s.chars().any(|c| c.is_alphanumeric()))
+            .unwrap_or(&label)
+            .to_string()
+    } else {
+        label
+    };
+    let mut label = label;
     if let Some(c) = call {
         if c.line > 0 {
             label.push_str(&format!(" · L{}", c.line));
@@ -194,8 +342,9 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
     // Ngăn xếp index của header loop đang mở.
     let mut loop_stack: Vec<usize> = Vec::new();
     // Ngăn xếp entry point của các switch đang mở.
-    // Mỗi entry là index của node discriminant (điều kiện match) của switch đó.
-    let mut switch_stack: Vec<usize> = Vec::new();
+    // Mỗi entry lưu (entry_index, vec<SWITCH_END_indices>) để ở SWITCH_CLOSE
+    // nối TẤT CẢ case end về node CLOSE, không chỉ case cuối.
+    let mut switch_stack: Vec<(usize, Vec<usize>)> = Vec::new();
     // Ngăn xếp depth của call nesting (cho CALL_ENTER/CALL_EXIT).
     let mut call_stack: Vec<usize> = Vec::new();
 
@@ -211,23 +360,47 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
         // - marker -> non-marker: marker to first statement in body (but NOT from STMT_END)
         // - non-marker -> marker: for linear entry (IF_TRUE, LOOP, SWITCH_START)
         //   AND for block end markers (BRANCH_END, SWITCH_END, SWITCH_CLOSE)
-        // - marker -> marker: NO sequential edge
+        // - marker -> marker: NO sequential edge (default)
         let is_linear_entry = matches!(curr, MARKER_IF_TRUE | MARKER_LOOP | MARKER_SWITCH_START);
         let is_block_end = matches!(
             curr,
             MARKER_BRANCH_END | MARKER_SWITCH_END | MARKER_SWITCH_CLOSE
         );
+        let is_terminator = matches!(
+            curr,
+            MARKER_RETURN | MARKER_THROW | MARKER_BREAK | MARKER_CONTINUE
+        );
         let prev_is_stmt_end = chain[prev] == MARKER_STMT_END;
+        // Prev marker đóng block (có thể nối đến linear-entry marker kế tiếp)
+        let prev_closes_block = matches!(
+            chain[prev],
+            MARKER_BRANCH_END | MARKER_SWITCH_END | MARKER_SWITCH_CLOSE
+                | MARKER_LOOP_BACK | MARKER_LOOP | MARKER_IF_TRUE | MARKER_SWITCH_START
+        );
 
         if !prev_is_marker && !curr_is_marker {
+            // stmt -> stmt
             edges.push((prev, i));
         } else if prev_is_marker && !curr_is_marker && !prev_is_stmt_end {
-            // marker -> non-marker, but NOT from STMT_END
+            // marker -> stmt (not from STMT_END)
             edges.push((prev, i));
-        } else if !prev_is_marker && curr_is_marker && (is_linear_entry || is_block_end) {
+        } else if !prev_is_marker && curr_is_marker && (is_linear_entry || is_block_end || is_terminator) {
+            // stmt -> linear-entry / block-end / terminator
+            edges.push((prev, i));
+        } else if prev_is_marker && curr_is_marker && is_linear_entry && prev_closes_block {
+            // Bug A: marker-closes-block -> linear-entry marker
+            // VD: SWITCH_CLOSE -> SWITCH_START, LOOP -> IF_TRUE, BRANCH_END -> IF_TRUE
+            edges.push((prev, i));
+        } else if prev_is_marker && curr_is_marker && (is_terminator || is_block_end) {
+            // marker -> terminator/block-end marker: nhánh if/loop/switch-case mà
+            // thân (hoặc phần cuối thân) lại là MARKER, không phải call/statement.
+            // VD: `if c { return None; }` → IF_TRUE -> RETURN -> BRANCH_END;
+            //     `match { A => return, .. }` → SWITCH_CASE -> RETURN -> SWITCH_END.
+            // Thiếu rule này thì RETURN/BRANCH_END/SWITCH_END bị ORPHAN (nổi
+            // rời ngoài graph).
             edges.push((prev, i));
         }
-        // marker -> marker: no sequential edge
+        // marker -> marker: no sequential edge (except above)
         // non-marker -> branch marker (IF_FALSE, SWITCH_CASE): no sequential edge
         // STMT_END -> next statement: NO edge (separator)
 
@@ -276,25 +449,30 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
             MARKER_SWITCH_START => {
                 // Switch start: prev is the discriminant (or previous statement)
                 // Sequential edge from prev handled above
-                switch_stack.push(i); // SWITCH_START is the entry
+                switch_stack.push((i, Vec::new())); // (entry, case_ends)
             }
             MARKER_SWITCH_CASE => {
-                if let Some(&entry) = switch_stack.last() {
-                    edges.push((entry, i));
+                if let Some((entry, _)) = switch_stack.last() {
+                    edges.push((*entry, i));
                 } else {
                     edges.push((prev, i));
                 }
             }
             MARKER_SWITCH_END => {
                 edges.push((prev, i));
-                if (i + 1 >= n || chain[i + 1] != MARKER_SWITCH_CASE) && !switch_stack.is_empty() {
-                    switch_stack.pop();
+                // Gom SWITCH_END của case này, sẽ nối TẤT CẢ về SWITCH_CLOSE
+                if let Some((_entry, ends)) = switch_stack.last_mut() {
+                    ends.push(i);
                 }
+                // Không pop ở đây; đợi SWITCH_CLOSE để pop (chỉ có 1 SWITCH_CLOSE cuối cùng)
             }
             MARKER_SWITCH_CLOSE => {
                 edges.push((prev, i));
-                if !switch_stack.is_empty() {
-                    switch_stack.pop();
+                // Bug C: Nối TẤT CẢ case ends (SWITCH_END) đến SWITCH_CLOSE
+                if let Some((_entry, ends)) = switch_stack.pop() {
+                    for end in ends {
+                        edges.push((end, i));
+                    }
                 }
             }
             MARKER_CALL_ENTER => {
@@ -314,7 +492,10 @@ fn structural_edges(chain: &[u64]) -> Vec<(usize, usize)> {
                 // edge from STMT_END to next statement, which we DON'T want.
                 // Fix: treat STMT_END as a marker that should NOT connect to next.
             }
-            _ => {}
+            _ => {
+                // Bug B: Terminator (RETURN/THROW/BREAK/CONTINUE) đã nhận cạnh từ prev
+                // ở rule trên. Không cần xử lý thêm.
+            }
         }
         i += 1;
     }
@@ -518,11 +699,12 @@ async fn bfs(
 
 /// Làm sạch label Mermaid: bỏ dấu ngoặc kép / xuống dòng, giới hạn 80 ký tự.
 fn sanitize(s: &str) -> String {
-    s.replace('"', "'")
-        .replace(['\n', '\r'], " ")
-        .chars()
-        .take(80)
-        .collect()
+    let cleaned = s.replace('"', "'").replace(['\n', '\r'], " ");
+    let mut out: String = cleaned.chars().take(80).collect();
+    if out.chars().count() < cleaned.chars().count() {
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]

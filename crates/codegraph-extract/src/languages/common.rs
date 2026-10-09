@@ -824,6 +824,20 @@ fn walk_chain(
         return;
     }
 
+    // Tag `into_var` vào call record ĐẦU TIÊN được emit sau `since` — đó là call
+    /// NGOÀI CÙNG của expression (walk_chain emit pre-order), tức call có kết quả
+    /// chính là giá trị của cả chain. Bỏ qua record nhãn nhánh (`call_name` rỗng)
+    /// do `emit_branch_label` tạo ra.
+    fn tag_into_var(ctx: &mut ChainCtx, since: usize, var: Option<String>, is_new: bool) {
+        let Some(v) = var.filter(|v| !v.is_empty()) else { return };
+        let Some(rec) = ctx.calls[since..]
+            .iter_mut()
+            .find(|r| !r.call_name.is_empty())
+        else { return };
+        rec.into_var = Some(v);
+        rec.is_new_var = is_new;
+    }
+
     // 9. Let declaration (biến mới: `let x = expr`).
     if k == "let_declaration" {
         // Extract variable name from pattern.
@@ -832,19 +846,10 @@ fn walk_chain(
             .and_then(|p| first_identifier(&p))
             .and_then(|n| text(&n, ctx.src));
         // Walk the initializer (rhs) to emit calls.
-        // Record call count before walking to detect if new calls were emitted.
         let calls_before = ctx.calls.len();
         if let Some(value) = node.child_by_field_name("value") {
             walk_chain(ctx, &value, depth + 1, in_loop, condition.clone());
-            // Only tag if new call records were emitted during the walk.
-            if ctx.calls.len() > calls_before {
-                if let Some(rec) = ctx.calls.last_mut() {
-                    if let Some(v) = var {
-                        rec.into_var = Some(v);
-                        rec.is_new_var = true;
-                    }
-                }
-            }
+            tag_into_var(ctx, calls_before, var, true);
         }
         return;
     }
@@ -857,14 +862,7 @@ fn walk_chain(
         if let Some(v) = value {
             let calls_before = ctx.calls.len();
             walk_chain(ctx, &v, depth + 1, in_loop, condition.clone());
-            if ctx.calls.len() > calls_before {
-                if let Some(rec) = ctx.calls.last_mut() {
-                    if let Some(var_name) = var {
-                        rec.into_var = Some(var_name);
-                        rec.is_new_var = false;
-                    }
-                }
-            }
+            tag_into_var(ctx, calls_before, var, false);
         }
         return;
     }
