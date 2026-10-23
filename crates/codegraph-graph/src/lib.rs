@@ -1165,8 +1165,12 @@ impl GraphIndex {
     /// Ingest toàn bộ parse results — **full re-index**: xoá dữ liệu cũ, register
     /// symbol (id global) + remap, resolve placeholder 0, build call-name index
     /// + đếm edges, persist + bump version (bản có tiến độ: `ingest_with_progress`).
-    pub async fn ingest(&mut self, results: &[ParseResult]) -> Result<()> {
-        self.ingest_with_progress(results, None).await
+    pub async fn ingest(
+        &mut self,
+        results: &[ParseResult],
+        progress: Option<Arc<dyn IngestProgress>>,
+    ) -> Result<()> {
+        self.ingest_with_progress(results, progress).await
     }
 
     /// Như [`ingest`](Self::ingest), nhưng báo tiến độ qua `IngestProgress`
@@ -2929,21 +2933,24 @@ mod tests {
         let b = a + 1;
         let c = a + 2;
         let isolated = a + 3;
-        idx.ingest(&[result(
-            "callers.rs",
-            vec![
-                sym("callers.rs", "a", a),
-                sym("callers.rs", "b", b),
-                sym("callers.rs", "c", c),
-                sym("callers.rs", "isolated", isolated),
-            ],
-            HashMap::from([
-                (a, vec![a, b, b, MARKER_IF_TRUE, c, MARKER_BRANCH_END]),
-                (b, vec![b, c]),
-                (c, vec![c, a]),
-            ]),
-            vec![],
-        )])
+        idx.ingest(
+            &[result(
+                "callers.rs",
+                vec![
+                    sym("callers.rs", "a", a),
+                    sym("callers.rs", "b", b),
+                    sym("callers.rs", "c", c),
+                    sym("callers.rs", "isolated", isolated),
+                ],
+                HashMap::from([
+                    (a, vec![a, b, b, MARKER_IF_TRUE, c, MARKER_BRANCH_END]),
+                    (b, vec![b, c]),
+                    (c, vec![c, a]),
+                ]),
+                vec![],
+            )],
+            None,
+        )
         .await
         .unwrap();
 
@@ -3108,7 +3115,7 @@ mod tests {
             chains,
             vec![],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         // search_symbol (substring, case-insensitive) — qua resumable.
         let hits = idx
@@ -3251,7 +3258,7 @@ mod tests {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, 0, 0])]),
             calls,
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         // Placeholder 0 đã được resolve về id thật (exact name match).
         let flow = idx.flow(SYMBOL_BASE).await.unwrap();
@@ -3289,7 +3296,7 @@ mod tests {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, 0])]),
             calls,
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         let flow = idx.flow(SYMBOL_BASE).await.unwrap();
         assert_eq!(flow.chain, vec![SYMBOL_BASE, 0]);
@@ -3319,7 +3326,7 @@ mod tests {
             HashMap::new(),
             vec![],
         );
-        idx.ingest(&[r1, r2]).await.unwrap();
+        idx.ingest(&[r1, r2], None).await.unwrap();
 
         // Cùng tên 2 file → ambiguous với đủ matches.
         let res = idx.resolve_by_name_or_id("process", 0).unwrap();
@@ -3375,7 +3382,7 @@ mod tests {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, 0])]),
             calls,
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         let hits = idx.callers_by_call_name("println", 10).await.unwrap();
         assert_eq!(hits.len(), 1);
@@ -3419,7 +3426,7 @@ mod tests {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, 0])]),
             vec![call("beta.only_b")],
         );
-        idx.ingest(&[first, second]).await.unwrap();
+        idx.ingest(&[first, second], None).await.unwrap();
 
         let a = SYMBOL_BASE;
         let b = SYMBOL_BASE + 1;
@@ -3456,7 +3463,7 @@ mod tests {
             chains,
             vec![],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         let flow = idx.flow(SYMBOL_BASE).await.unwrap();
         assert_eq!(
@@ -3502,7 +3509,7 @@ mod tests {
         {
             let mut idx = GraphIndex::open(&path).await.unwrap();
             assert_eq!(idx.version(), 0);
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
             assert_eq!(idx.version(), 1);
             assert_eq!(idx.callees(SYMBOL_BASE).await.unwrap().len(), 1);
         }
@@ -3541,7 +3548,7 @@ mod tests {
         );
         {
             let mut idx = GraphIndex::open(&path).await.unwrap();
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
             // Semantic chạy được (embedding enabled).
             let sem = idx
                 .search_symbol_paged_resumable(
@@ -3590,7 +3597,7 @@ mod tests {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE])]),
             vec![],
         );
-        idx.ingest(&[r1]).await.unwrap();
+        idx.ingest(&[r1], None).await.unwrap();
         assert_eq!(idx.stats().symbols, 1);
 
         let r2 = result(
@@ -3602,7 +3609,7 @@ mod tests {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, SYMBOL_BASE + 1])]),
             vec![],
         );
-        idx.ingest(&[r2]).await.unwrap();
+        idx.ingest(&[r2], None).await.unwrap();
         assert_eq!(idx.stats().symbols, 2);
         assert!(idx.symbol_by_id(SYMBOL_BASE + 2).is_none());
         let res = idx.resolve_by_name_or_id("a", 0);
@@ -3648,7 +3655,7 @@ mod tests {
             HashMap::new(),
             vec![],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         // list_methods_of_class — chỉ Function/Method, sort theo tên.
         let methods = idx.list_methods_of_class(SYMBOL_BASE);
@@ -3847,7 +3854,7 @@ mod tests {
             ));
             id += 1;
         }
-        idx.ingest(&results).await.unwrap();
+        idx.ingest(&results, None).await.unwrap();
 
         // Driver: call đầu deadline hết hạn → timed_out (sinh checkpoint); call
         // sau resume không deadline → hoàn tất. So với direct (không deadline).
@@ -3960,7 +3967,7 @@ mod tests {
                 vec![],
             ));
         }
-        idx.ingest(&results).await.unwrap();
+        idx.ingest(&results, None).await.unwrap();
 
         let direct = idx
             .search_symbol_paged_resumable(
@@ -4089,7 +4096,7 @@ mod tests {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE, 0, 0, 0])]),
             calls,
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         let report = idx.dependencies_report();
         assert_eq!(report.total, 3);
@@ -4121,7 +4128,7 @@ mod tests {
             sym("db.rs", "parse_config", SYMBOL_BASE + 3),
         ];
         let r = result("f.rs", syms, HashMap::new(), vec![]);
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         // Semantic: query lệch chính tả "authenticte" vẫn phải rank
         // authenticate_user lên đầu (KNN cosine trên embedding).
@@ -4270,22 +4277,25 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
         };
-        idx.ingest(&[ParseResult {
-            path: "dummy.java".into(),
-            language: "java".into(),
-            bytes: 0,
-            lines: 0,
-            symbols: vec![
-                legacy_adapter,
-                legacy_field,
-                legacy_do_work,
-                service,
-                service_do_work,
-                router_method,
-            ],
-            chains: HashMap::new(),
-            calls: vec![],
-        }])
+        idx.ingest(
+            &[ParseResult {
+                path: "dummy.java".into(),
+                language: "java".into(),
+                bytes: 0,
+                lines: 0,
+                symbols: vec![
+                    legacy_adapter,
+                    legacy_field,
+                    legacy_do_work,
+                    service,
+                    service_do_work,
+                    router_method,
+                ],
+                chains: HashMap::new(),
+                calls: vec![],
+            }],
+            None,
+        )
         .await
         .unwrap();
 

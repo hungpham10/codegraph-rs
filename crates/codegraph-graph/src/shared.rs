@@ -386,7 +386,7 @@ mod tests {
                 vec![sym("alpha", SYMBOL_BASE), sym("beta", SYMBOL_BASE + 1)],
                 vec![SYMBOL_BASE, SYMBOL_BASE + 1],
             );
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
             assert!(idx.name_engine_is_current().await, "stamp sau ingest");
         }
 
@@ -409,7 +409,7 @@ mod tests {
             vec![sym("gamma", SYMBOL_BASE + 9)],
             vec![SYMBOL_BASE + 9],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
         assert!(idx.name_engine_is_current().await, "stamp mới sau ingest");
     }
 
@@ -430,7 +430,7 @@ mod tests {
                 vec![sym("a", SYMBOL_BASE), sym("b", SYMBOL_BASE + 1)],
                 vec![SYMBOL_BASE, SYMBOL_BASE + 1],
             );
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
             assert!(idx.chain_engine_is_current().await, "stamp sau ingest");
         }
 
@@ -456,7 +456,7 @@ mod tests {
             vec![sym("gamma", SYMBOL_BASE + 9)],
             vec![SYMBOL_BASE + 9],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
         assert!(idx.chain_engine_is_current().await, "stamp mới sau ingest");
     }
 
@@ -474,7 +474,7 @@ mod tests {
                 vec![sym("a", SYMBOL_BASE), sym("b", SYMBOL_BASE + 1)],
                 vec![SYMBOL_BASE, SYMBOL_BASE + 1],
             );
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
         }
 
         // "Server process": shared index trên cùng file.
@@ -488,7 +488,7 @@ mod tests {
         {
             let mut idx = GraphIndex::open(&db_str).await.unwrap();
             let r = mk_result("b.ts", vec![sym("x", SYMBOL_BASE)], vec![SYMBOL_BASE]);
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
         }
         let idx2 = sgi.ensure_fresh().await;
         assert_eq!(idx2.version(), 2);
@@ -513,7 +513,7 @@ mod tests {
                 vec![sym("a", SYMBOL_BASE), sym("b", SYMBOL_BASE + 1)],
                 vec![SYMBOL_BASE, SYMBOL_BASE + 1],
             );
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
         }
 
         let sgi = SharedGraphIndex::open(Some(db_str.clone())).await.unwrap();

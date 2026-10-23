@@ -641,7 +641,7 @@ index 0000000..2222222
             chains,
             calls,
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         let diff = "\
 --- a/a.ts
@@ -690,7 +690,7 @@ index 0000000..2222222
             chains,
             vec![],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         let diff = "\
 --- a/old.rs
@@ -719,7 +719,7 @@ index 0000000..2222222
             chains,
             vec![],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
 
         // Diff git-relative, root = /work/repo → khớp.
         let diff = "\

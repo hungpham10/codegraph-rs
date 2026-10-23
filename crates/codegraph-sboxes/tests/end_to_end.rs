@@ -126,7 +126,7 @@ async fn prepare_order_golden_trace() {
         calls,
     );
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     let mut module = compile(&idx, &[PREPARE, CHECK], &test_config())
         .await
@@ -188,7 +188,7 @@ async fn prepare_order_if_false_skips_email() {
         calls,
     );
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     let cfg = SboxConfig {
         branch_policy: BranchPolicy::IfFalse,
@@ -221,7 +221,7 @@ async fn link_fails_on_unmocked_callees() {
     let calls = vec![rec(RUN, 1, "submit", 1), rec(RUN, 2, "compute_sku", 2)];
     let r = result("order.ts", vec![sym(RUN, "run_order")], chains, calls);
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     // `compute_sku` is covered inline; `submit` is not → link error listing it.
     let mocks = vec![("compute_sku".to_string(), "77".to_string())];
@@ -251,7 +251,7 @@ async fn inline_mocks_satisfy_link_and_run() {
     let calls = vec![rec(RUN, 1, "submit", 1), rec(RUN, 2, "compute_sku", 2)];
     let r = result("order.ts", vec![sym(RUN, "run_order")], chains, calls);
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     // Neither callee is in tests/mocks/order.rhai — only the inline mocks cover
     // them, so link-time validation is satisfied by the inline set alone.

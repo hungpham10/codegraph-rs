@@ -125,7 +125,7 @@ async fn if_and_capped_loop() {
         calls,
     );
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     let mut module = compile(&idx, &[COMPUTE, HELPER], &test_config())
         .await
@@ -184,7 +184,7 @@ async fn if_false_policy_skips_then_branch() {
     ];
     let r = result("test.ts", vec![sym(COMPUTE, "compute")], chains, calls);
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     let cfg = SboxConfig {
         branch_policy: BranchPolicy::IfFalse,
@@ -230,7 +230,7 @@ async fn switch_first_case_taken() {
     ];
     let r = result("test.ts", vec![sym(COMPUTE, "compute")], chains, calls);
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     let mut module = compile(&idx, &[COMPUTE], &test_config()).await.unwrap();
     let (_, trace) = module.run(&[]);
@@ -271,7 +271,7 @@ async fn if_else_takes_else_branch() {
     ];
     let r = result("test.ts", vec![sym(COMPUTE, "compute")], chains, calls);
     let mut idx = GraphIndex::in_memory();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     // IfFalse → else branch taken.
     let cfg = SboxConfig {

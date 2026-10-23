@@ -328,7 +328,7 @@ mod tests {
                 chains: std::collections::HashMap::new(),
                 calls: vec![],
             };
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
         }
         let sgi: Arc<SharedGraphIndex> =
             Arc::new(SharedGraphIndex::open(Some(db_str)).await.unwrap());
@@ -366,7 +366,7 @@ mod tests {
                 chains: std::collections::HashMap::new(),
                 calls: vec![],
             };
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
         }
         let sgi: Arc<SharedGraphIndex> =
             Arc::new(SharedGraphIndex::open(Some(db_str)).await.unwrap());
@@ -398,7 +398,7 @@ mod tests {
                 chains: std::collections::HashMap::new(),
                 calls: vec![],
             };
-            idx.ingest(&[r]).await.unwrap();
+            idx.ingest(&[r], None).await.unwrap();
         }
 
         let sgi = SharedGraphIndex::open(Some(db_str.clone())).await.unwrap();

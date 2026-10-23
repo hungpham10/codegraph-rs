@@ -1269,7 +1269,7 @@ a();
     );
     let a_id = find(&res, "a").id;
     let mut idx = codegraph_graph::GraphIndex::in_memory();
-    idx.ingest(&[res]).await.unwrap();
+    idx.ingest(&[res], None).await.unwrap();
     let callees = idx.callees(a_id).await.unwrap();
     assert!(
         callees.iter().any(|s| s.name == "b"),
