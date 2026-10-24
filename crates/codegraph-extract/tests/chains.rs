@@ -119,10 +119,12 @@ def process(x):
     assert_eq!(
         c,
         [
+            "[TRY_START]",
             "[CALL_ENTER]",
             "risky",
             "[CALL_EXIT]",
-            "[IF_TRUE]",
+            "[TRY_END]",
+            "[CATCH_START]",
             "[CALL_ENTER]",
             "handle",
             "[CALL_EXIT]",
@@ -422,10 +424,12 @@ class Service {
     assert_eq!(
         c,
         [
+            "[TRY_START]",
             "[CALL_ENTER]",
             "this.repo.find",
             "[CALL_EXIT]",
-            "[IF_TRUE]",
+            "[TRY_END]",
+            "[CATCH_START]",
             "[CALL_ENTER]",
             "log",
             "[CALL_EXIT]",

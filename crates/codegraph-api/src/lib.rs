@@ -6,8 +6,9 @@
 
 use codegraph_context::ContextRequest;
 use codegraph_core::{
-    CallSiteResult, ClassInfo, DependenciesReport, Error, FileInfo, FlowResult, FunctionScope,
-    MemberInfo, ResolveResult, Result, SearchFlowResult, Symbol, SymbolKind, SymbolMatch,
+    CallSiteResult, ClassInfo, DependenciesReport, Error, FileInfo, FlowResult, FullFlowPath,
+    FunctionScope, MemberInfo, ResolveResult, Result, SearchFlowResult, Symbol, SymbolKind,
+    SymbolMatch,
 };
 use codegraph_graph::{GraphIndex, SearchCursor, SharedGraphIndex};
 use std::collections::HashMap;
@@ -457,6 +458,19 @@ impl GraphApi {
     /// Flow của symbol — chain render (marker + callee) + call edges.
     pub async fn flow(&self, id: u64) -> Result<FlowResult> {
         self.index().await.flow(id).await
+    }
+
+    /// Trace full flow đến target với stacktrace từ các caller.
+    pub async fn trace_full_flow(
+        &self,
+        target_id: u64,
+        max_depth: usize,
+        max_paths: usize,
+    ) -> Result<Vec<FullFlowPath>> {
+        self.index()
+            .await
+            .trace_full_flow(target_id, max_depth, max_paths)
+            .await
     }
 
     /// Tìm function có chain chứa pattern. Pattern là chuỗi token cách nhau bởi

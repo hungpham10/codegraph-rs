@@ -19,7 +19,7 @@ use codegraph_core::{
     MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE, MARKER_IF_FALSE,
     MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_STMT_END,
     MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
-    SYMBOL_BASE,
+    MARKER_CATCH_START, MARKER_TRY_END, MARKER_TRY_START, SYMBOL_BASE,
 };
 use codegraph_graph::ParseResult;
 use std::collections::HashMap;
@@ -796,24 +796,40 @@ fn walk_chain(
     }
     if ctx.spec.throw_kinds.contains(&k) {
         chain_push(ctx, MARKER_THROW);
+        // Nhãn exception type ngay tại THROW (`throw ValueError(...)` →
+        // `throw ValueError`) — interpreter dùng để match catch handler.
+        if let Some(t) = exception_type_of(node, ctx.src) {
+            emit_branch_label(ctx, &format!("throw {t}"));
+        } else {
+            emit_branch_label(ctx, "throw");
+        }
         for ch in named_children(node) {
             walk_chain(ctx, &ch, depth + 1, in_loop, condition.clone());
         }
         return;
     }
 
-    // 7. Try.
+    // 7. Try — layout: [TRY_START, ...try body..., TRY_END, CATCH_START, <handler1>,
+    //    CATCH_START, <handler2>, ...]. Interpreter giữ runtime catch_stack (push tại
+    //    TRY_START, pop tại TRY_END) và khi bắt THROW nhảy tới CATCH_START khớp type
+    //    (nhãn `except <Type>`/`catch <Type>` gắn tại CATCH_START; handler không type
+    //    khớp mọi exception).
     if ctx.spec.try_kinds.contains(&k) {
+        chain_push(ctx, MARKER_TRY_START);
         if let Some(body) = node.child_by_field_name(ctx.spec.body_field) {
             walk_chain(ctx, &body, depth + 1, in_loop, condition.clone());
+        } else {
+            walk_block(ctx, node, depth + 1, in_loop, condition.clone());
         }
+        chain_push(ctx, MARKER_TRY_END);
         for ch in named_children(node) {
             if ctx.spec.except_kinds.contains(&ch.kind()) {
-                chain_push(ctx, MARKER_IF_TRUE);
-                // Nhãn handler của except: `except ValueError:` → `ValueError`.
-                if let Some(l) = except_label(&ch, ctx.src) {
-                    emit_branch_label(ctx, &format!("except {l}"));
-                }
+                chain_push(ctx, MARKER_CATCH_START);
+                // Nhãn handler: `except ValueError:` / `catch (IOException e)` → type.
+                let label = except_label(&ch, ctx.src)
+                    .map(|l| format!("catch {l}"))
+                    .unwrap_or_else(|| "catch".to_string());
+                emit_branch_label(ctx, &label);
                 walk_clause(ctx, &ch, depth + 1, in_loop, condition.clone());
                 chain_push(ctx, MARKER_BRANCH_END);
             }
@@ -1129,6 +1145,32 @@ fn except_label<'a>(node: &Node<'a>, src: &[u8]) -> Option<String> {
         .and_then(|c| text(&c, src))
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+        .map(|t| {
+            // Java `catch (IOException e)` → `IOException e` → `IOException`.
+            let t = t.trim_start_matches('(').trim();
+            t.split_whitespace().next().unwrap_or(t).to_string()
+        })
+}
+
+/// Exception type của một `throw`/`raise` — `raise ValueError("x")` → `ValueError`,
+/// `throw new FooException()` → `FooException`. Lấy text của expression con, cắt
+/// bỏ `new`/constructor call/attribute truy cập.
+fn exception_type_of(node: &Node, src: &[u8]) -> Option<String> {
+    let raw = named_children(node)
+        .into_iter()
+        .next()
+        .and_then(|c| text(&c, src))?;
+    let mut t = raw.trim();
+    if let Some(rest) = t.strip_prefix("new ") {
+        t = rest.trim();
+    }
+    let t = t
+        .split(['(', ' ', ':', ';', '\n'])
+        .next()
+        .unwrap_or(t)
+        .trim();
+    let t = t.rsplit(['.', ':']).next().unwrap_or(t); // module.Exception → Exception
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 /// Gắn **nhãn nhánh** vào đúng vị trí marker trong chain (không thêm node):

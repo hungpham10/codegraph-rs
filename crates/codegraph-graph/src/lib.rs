@@ -65,9 +65,13 @@ pub use crate::storage::{
 use crate::vector_index::VectorIndex;
 use codegraph_core::{
     BranchLabel, CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency,
-    Error, FileInfo, FlowCall, FlowResult, FunctionScope, MemberInfo, ResolveResult, SYMBOL_BASE,
-    SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch, is_marker,
-    marker_name,
+    Error, FileInfo, FlowCall, FlowResult, FlowStep, FullFlowPath, FunctionScope, MemberInfo,
+    MARKER_BRANCH_END, MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE,
+    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
+    MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END,
+    MARKER_SWITCH_START, MARKER_THROW, MARKER_CATCH_START, MARKER_TRY_END, MARKER_TRY_START,
+    PathEnding, ResolveResult, SearchFlowResult, SemgraphStats,
+    StorageRoute, Symbol, SymbolKind, SymbolMatch, TraceAction, is_marker, marker_name, SYMBOL_BASE,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -487,6 +491,227 @@ fn rrf_fuse(lists: &[Vec<u64>]) -> Vec<u64> {
     let mut out: Vec<(u64, f32)> = scores.into_iter().collect();
     out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     out.into_iter().map(|(id, _)| id).collect()
+}
+
+// ==================== Full-flow interpreter ====================
+//
+// Máy ảo call/return trên flow chain: mỗi path-state giữ một frame stack
+// thật (descend vào chain của callee có chain), return pop frame về caller,
+// throw unwind theo catch_stack tới handler khớp exception type. Khám phá
+// path bằng worklist (không đệ quy clone) — code sau if/else luôn được trace.
+
+/// Số frame tối đa khi descend vào callee (root frame + callee frames).
+    /// Chỉ descend 1 mức: root (1) + callee internals (2); sâu hơn = leaf.
+    const FLOW_DESCEND_MAX_FRAMES: usize = 2;
+    /// Chỉ descend vào callee có chain <= ngưỡng phần tử này (gọn, đọc nổi).
+    const MAX_DESCEND_CHAIN: usize = 50;
+
+/// Tổng step budget cho mọi path-state của một trace (chống nổ tổ hợp).
+const FLOW_TOTAL_STEPS: usize = 12000;
+    /// Số step tối đa của MỘT path — vượt thì kết thúc path bằng DepthLimit
+    /// (vẫn được trả về, nhưng rank sau path hoàn chỉnh) để output luôn đọc nổi.
+    const MAX_PATH_STEPS: usize = 800;
+
+/// Vị trí matching BRANCH_END của một khối mở bằng IF_TRUE/CATCH_START
+/// (đếm cân bằng cả hai loại open — try/catch lồng trong if và ngược lại).
+fn matching_branch_end(chain: &[u64], open: usize) -> Option<usize> {
+    let mut bal = 1i32;
+    for (i, &e) in chain.iter().enumerate().skip(open + 1) {
+        if e == MARKER_IF_TRUE || e == MARKER_CATCH_START {
+            bal += 1;
+        } else if e == MARKER_BRANCH_END {
+            bal -= 1;
+            if bal == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// IF_FALSE cùng cấp trong vùng [if_pos, end_pos) (nếu có else/elif).
+fn find_if_false(chain: &[u64], if_pos: usize, end_pos: usize) -> Option<usize> {
+    let mut bal = 0i32;
+    for (i, &e) in chain
+        .iter()
+        .enumerate()
+        .take(end_pos.min(chain.len()))
+        .skip(if_pos + 1)
+    {
+        if e == MARKER_IF_TRUE {
+            bal += 1;
+        } else if e == MARKER_BRANCH_END {
+            bal -= 1;
+        } else if e == MARKER_IF_FALSE && bal == 0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// LOOP_BACK khớp với LOOP tại loop_pos (đếm LOOP lồng).
+fn matching_loop_back(chain: &[u64], loop_pos: usize) -> Option<usize> {
+    let mut bal = 1i32;
+    for (i, &e) in chain.iter().enumerate().skip(loop_pos + 1) {
+        if e == MARKER_LOOP {
+            bal += 1;
+        } else if e == MARKER_LOOP_BACK {
+            bal -= 1;
+            if bal == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// TRY_END khớp TRY_START (đếm TRY lồng).
+fn matching_try_end(chain: &[u64], try_start: usize) -> Option<usize> {
+    let mut bal = 1i32;
+    for (i, &e) in chain.iter().enumerate().skip(try_start + 1) {
+        if e == MARKER_TRY_START {
+            bal += 1;
+        } else if e == MARKER_TRY_END {
+            bal -= 1;
+            if bal == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Các vị trí CATCH_START của handler ngay sau TRY_END (các khối
+/// CATCH_START ... BRANCH_END liền nhau).
+fn handler_positions(chain: &[u64], try_end: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut p = try_end + 1;
+    while p < chain.len() && chain[p] == MARKER_CATCH_START {
+        out.push(p);
+        p = matching_branch_end(chain, p).map(|e| e + 1).unwrap_or(p + 1);
+    }
+    out
+}
+
+/// Bỏ qua các handler còn lại kể từ vị trí p (đứng ngay trước CATCH_START).
+fn skip_handlers(chain: &[u64], mut p: usize) -> usize {
+    while p < chain.len() && chain[p] == MARKER_CATCH_START {
+        p = matching_branch_end(chain, p).map(|e| e + 1).unwrap_or(p + 1);
+    }
+    p
+}
+
+/// Layout switch: (các vị trí SWITCH_CASE cùng cấp, vị trí SWITCH_CLOSE).
+fn switch_layout(chain: &[u64], start: usize) -> (Vec<usize>, Option<usize>) {
+    let mut cases = Vec::new();
+    let mut depth = 0usize;
+    for (i, &e) in chain.iter().enumerate().skip(start + 1) {
+        match e {
+            MARKER_SWITCH_START => depth += 1,
+            MARKER_SWITCH_CLOSE => {
+                if depth == 0 {
+                    return (cases, Some(i));
+                }
+                depth -= 1;
+            }
+            MARKER_SWITCH_CASE if depth == 0 => cases.push(i),
+            _ => {}
+        }
+    }
+    (cases, None)
+}
+
+/// Exception type từ nhãn THROW (`throw ValueError`) và handler
+/// (`catch ValueError` / `catch` không type). Không type ở một bên = khớp.
+fn catch_matches(thrown: Option<&str>, handler: Option<&str>) -> bool {
+    let h = handler
+        .and_then(|l| l.strip_prefix("catch"))
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty());
+    let t = thrown
+        .and_then(|l| l.strip_prefix("throw"))
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty());
+    match (t, h) {
+        (_, None) | (None, _) => true,
+        (Some(t), Some(h)) => t.eq_ignore_ascii_case(h) || t.starts_with(h),
+    }
+}
+
+// ── State model ──
+
+#[derive(Clone)]
+struct SimFrame {
+    func_id: u64,
+    chain: Vec<u64>,
+    /// position → (tên call, line, condition) — loại record nhãn nhánh.
+    calls: HashMap<usize, (String, u32, Option<String>)>,
+    /// position → nhãn marker (điều kiện if, case, exception type...).
+    labels: HashMap<usize, String>,
+    pos: usize,
+    /// Stack TRY_START đang mở (vị trí marker).
+    catch_stack: Vec<usize>,
+    /// Stack (loop_pos, loop_back_pos) của loop đang chạy.
+    loops: Vec<(usize, usize)>,
+    /// Stack SWITCH_CLOSE của switch đang mở.
+    switches: Vec<usize>,
+    /// Vị trí BRANCH_END kết thúc handler đang thực thi (throw nhảy vào).
+    handlers: Vec<usize>,
+    /// Call vừa xử lý là leaf (không descend) — CALL_EXIT không ghi Return
+    /// step cho leaf call (call thư viện kết thúc ngay, Return là nhiễu).
+    leaf_pending: bool,
+}
+
+impl SimFrame {
+    fn from_flow(func_id: u64, fr: &FlowResult) -> Self {
+        SimFrame {
+            func_id,
+            chain: fr.chain.clone(),
+            calls: fr
+                .calls
+                .iter()
+                .filter(|c| !c.to_name.is_empty())
+                .map(|c| (c.position, (c.to_name.clone(), c.line, c.condition.clone())))
+                .collect(),
+            labels: fr
+                .branch_labels
+                .iter()
+                .map(|b| (b.position, b.label.clone()))
+                .collect(),
+            // chain[0] là func id của chính frame — bắt đầu từ phần tử kế.
+            pos: 1,
+            catch_stack: Vec::new(),
+            loops: Vec::new(),
+            switches: Vec::new(),
+            handlers: Vec::new(),
+            leaf_pending: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SimState {
+    frames: Vec<SimFrame>,
+    steps: Vec<FlowStep>,
+    /// (func_id, loop_pos) → số lần quay lại loop.
+    loop_iters: HashMap<(u64, usize), usize>,
+    /// Số frame của caller path trước root (target) — offset stack_depth.
+    base_depth: usize,
+    /// Caller path còn lại (outermost..innermost, không gồm target) — throw
+    /// unwind qua đây khi frames cạn.
+    pending_callers: Vec<u64>,
+}
+
+/// Key dedup state: vị trí (func_id, pos) của mọi frame + số step.
+fn state_key(st: &SimState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for f in &st.frames {
+        f.func_id.hash(&mut h);
+        f.pos.hash(&mut h);
+    }
+    st.steps.len().hash(&mut h);
+    h.finish()
 }
 
 impl GraphIndex {
@@ -2023,6 +2248,971 @@ impl GraphIndex {
             calls,
             branch_labels,
         })
+    }
+
+    // ── Full-flow trace (debug-style call/return path) ──
+
+    /// Trace toàn bộ luồng từ các hàm caller đến `target_id`, rồi dò hết
+    /// các tuyến đường khả dĩ bên trong `target_id` (theo chain markers:
+    /// IF_TRUE/IF_FALSE/BRANCH_END/RETURN/THROW/LOOP/...). Mỗi path kèm
+    /// stacktrace để biết lúc nào gọi xuống / lần về.
+    ///
+    /// - `max_depth`: giới hạn độ sâu tìm caller ngược lên.
+    /// - `max_paths`: số path tối đa trả về (tránh explosion do nhánh).
+    /// - `max_steps`: tổng số bước (call+return+branch) tối đa mỗi path.
+    pub async fn trace_full_flow(
+        &self,
+        target_id: u64,
+        max_depth: usize,
+        max_paths: usize,
+    ) -> Result<Vec<FullFlowPath>> {
+        // Loop body chỉ trace 1 lần rồi exit (max_iter): unroll thêm chỉ nhân
+        // bản y hệt body — nhiễu thuần, không thêm thông tin flow nào.
+        let max_loop_iter = 1;
+
+        // ── Kiểm tra target tồn tại ──
+        if !self.symbols.contains_key(&target_id) {
+            return Err(Error::Invalid(format!(
+                "symbol id {target_id} not found"
+            )));
+        }
+
+        // ── Dùng flow chain của target để trace nội bộ ──
+        let flow = self.flow(target_id).await?;
+
+        let mut all_paths = Vec::new();
+
+        // ── Tìm caller đến target qua edges — transitive tới max_depth để
+        // throw unwind được qua nhiều tầng caller ──
+        let direct_callers = self.callers(target_id, max_depth).await?;
+
+        if direct_callers.is_empty() {
+            // Không có caller - trace chỉ nội bộ target bắt đầu từ target
+            let mut base_steps: Vec<FlowStep> = Vec::new();
+            let target_sym = self.symbols.get(&target_id);
+            base_steps.push(FlowStep {
+                symbol_id: target_id,
+                symbol_name: target_sym.map(|s| s.name.clone()).unwrap_or_default(),
+                file: target_sym.map(|s| s.file.clone()).unwrap_or_default(),
+                line: target_sym.map(|s| s.line).unwrap_or(0),
+                action: TraceAction::Call,
+                stack_depth: 1,
+                condition: None,
+            });
+
+            self.run_flow_sim(
+                target_id,
+                &flow,
+                base_steps,
+                Vec::new(),
+                &mut all_paths,
+                max_paths,
+                max_loop_iter,
+            )
+            .await;
+        } else {
+            // Với mỗi caller, tìm đường caller → ... → target
+            for caller in &direct_callers {
+                if all_paths.len() >= max_paths {
+                    break;
+                }
+                let caller_id = caller.id;
+                // Tìm path từ caller đến target
+                let mut current: Vec<u64> = vec![caller_id];
+                let mut visited: HashSet<u64> = HashSet::from([caller_id]);
+                let mut paths_to_target: Vec<Vec<u64>> = Vec::new();
+
+                Box::pin(self.dfs_call_paths_to_target(
+                    caller_id,
+                    target_id,
+                    &mut current,
+                    &mut visited,
+                    max_depth,
+                    max_paths,
+                    &mut paths_to_target,
+                ))
+                .await;
+
+                for call_path in paths_to_target.into_iter().take(max_paths - all_paths.len()) {
+                    // Steps từ call path
+                    let mut base_steps: Vec<FlowStep> = Vec::new();
+                    for (i, &sid) in call_path.iter().enumerate() {
+                        let sym = self.symbols.get(&sid);
+                        base_steps.push(FlowStep {
+                            symbol_id: sid,
+                            symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                            file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                            line: sym.map(|s| s.line).unwrap_or(0),
+                            action: TraceAction::Call,
+                            stack_depth: i + 1,
+                            condition: None,
+                        });
+                    }
+
+                    // Trace nội bộ target (descend vào callee, throw→catch...)
+                    let base_callers = call_path[..call_path.len() - 1].to_vec();
+                    self.run_flow_sim(
+                        target_id,
+                        &flow,
+                        base_steps,
+                        base_callers,
+                        &mut all_paths,
+                        max_paths,
+                        max_loop_iter,
+                    )
+                    .await;
+                    if all_paths.len() >= max_paths {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Rank paths theo độ giàu thông tin trước khi cắt max_paths: path có
+        // nhiều Call steps (đi sâu vào callee) đứng trước — early-return paths
+        // hoàn tất sớm trong DFS không được phép chiếm hết max_paths.
+        let completed =
+            |p: &FullFlowPath| matches!(p.ended_with, PathEnding::Returned | PathEnding::Threw);
+        all_paths.sort_by(|a, b| {
+            let calls = |p: &FullFlowPath| {
+                p.steps
+                    .iter()
+                    .filter(|s| s.action == TraceAction::Call && s.symbol_id != 0)
+                    .count()
+            };
+            let depth = |p: &FullFlowPath| p.steps.iter().map(|s| s.stack_depth).max().unwrap_or(0);
+            completed(b).cmp(&completed(a)).then(calls(b).cmp(&calls(a))).then(depth(b).cmp(&depth(a)))
+        });
+        if all_paths.len() > max_paths {
+            all_paths.truncate(max_paths);
+        }
+
+        Ok(all_paths)
+    }
+
+    /// DFS tìm đường từ start đến target (dùng call graph - callees)
+    #[allow(clippy::too_many_arguments)]
+    async fn dfs_call_paths_to_target(
+        &self,
+        _start_id: u64,
+        target_id: u64,
+        current: &mut Vec<u64>,
+        visited: &mut HashSet<u64>,
+        max_depth: usize,
+        max_paths: usize,
+        paths: &mut Vec<Vec<u64>>,
+    ) {
+        if paths.len() >= max_paths {
+            return;
+        }
+        // max_depth = số caller hops; path caller→target dài hops+1.
+        if current.len() > max_depth + 1 {
+            return;
+        }
+        let last = *current.last().unwrap();
+        if last == target_id && current.len() > 1 {
+            paths.push(current.clone());
+            return;
+        }
+        if last == target_id && current.len() == 1 {
+            paths.push(current.clone());
+            return;
+        }
+        // Lấy callees của last
+        if let Ok(callees_list) = self.callees(last).await {
+            for c in callees_list {
+                if paths.len() >= max_paths {
+                    break;
+                }
+                if visited.contains(&c.id) {
+                    continue;
+                }
+                current.push(c.id);
+                visited.insert(c.id);
+                Box::pin(self.dfs_call_paths_to_target(
+                    c.id,
+                    target_id,
+                    current,
+                    visited,
+                    max_depth,
+                    max_paths,
+                    paths,
+                ))
+                .await;
+                visited.remove(&c.id);
+                current.pop();
+                if current.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// DFS tìm tất cả call path từ `start_id` đến `target_id` trên call graph
+    /// (dùng `callees`). `visited` tránh cycle. Giới hạn `max_depth` hop.
+    #[allow(dead_code)]
+    async fn find_call_paths(
+        &self,
+        start_id: u64,
+        target_id: u64,
+        max_depth: usize,
+        max_paths: usize,
+    ) -> Result<Vec<Vec<u64>>> {
+        let mut paths: Vec<Vec<u64>> = Vec::new();
+        let mut current: Vec<u64> = vec![start_id];
+        let mut visited: HashSet<u64> = HashSet::from([start_id]);
+
+        self.dfs_call_paths(
+            start_id,
+            target_id,
+            0,
+            max_depth,
+            max_paths,
+            &mut current,
+            &mut visited,
+            &mut paths,
+        )
+        .await?;
+
+        Ok(paths)
+    }
+
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    async fn dfs_call_paths(
+        &self,
+        current_id: u64,
+        target_id: u64,
+        depth: usize,
+        max_depth: usize,
+        max_paths: usize,
+        current: &mut Vec<u64>,
+        visited: &mut HashSet<u64>,
+        paths: &mut Vec<Vec<u64>>,
+    ) -> Result<()> {
+        if paths.len() >= max_paths {
+            return Ok(());
+        }
+        if depth > max_depth {
+            return Ok(());
+        }
+        if current_id == target_id && current.len() > 1 {
+            paths.push(current.clone());
+            return Ok(());
+        }
+
+        let callees = self.callees(current_id).await?;
+        for callee in &callees {
+            let cid = callee.id;
+            if visited.contains(&cid) {
+                continue;
+            }
+            visited.insert(cid);
+            current.push(cid);
+            Box::pin(self.dfs_call_paths(
+                cid,
+                target_id,
+                depth + 1,
+                max_depth,
+                max_paths,
+                current,
+                visited,
+                paths,
+            ))
+            .await?;
+            current.pop();
+            visited.remove(&cid);
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    async fn run_flow_sim(
+        &self,
+        root_func_id: u64,
+        root_flow: &FlowResult,
+        base_steps: Vec<FlowStep>,
+        base_callers: Vec<u64>,
+        paths: &mut Vec<FullFlowPath>,
+        max_paths: usize,
+        max_loop_iter: usize,
+    ) {
+        let base_depth = base_callers.len();
+        let mut work: Vec<SimState> = vec![SimState {
+            frames: vec![SimFrame::from_flow(root_func_id, root_flow)],
+            steps: base_steps,
+            loop_iters: HashMap::new(),
+            base_depth,
+            pending_callers: base_callers,
+        }];
+        let mut seen: HashSet<u64> = HashSet::new();
+        seen.insert(state_key(&work[0]));
+        let mut total_steps = 0usize;
+        let mut flow_cache: HashMap<u64, Option<FlowResult>> = HashMap::new();
+
+        while let Some(st) = work.pop() {
+            if paths.len() >= max_paths || total_steps >= FLOW_TOTAL_STEPS {
+                break;
+            }
+            if let Some(rest) = self
+                .sim_run_state(
+                    st,
+                    &mut work,
+                    &mut seen,
+                    &mut flow_cache,
+                    paths,
+                    max_paths,
+                    max_loop_iter,
+                    &mut total_steps,
+                )
+                .await
+            {
+                // State dở dang (hết ngân sách state): đẩy về ĐẦU worklist để
+                // resume theo kiểu round-robin — path sâu không bị bỏ chết.
+                work.insert(0, rest);
+            }
+        }
+    }
+
+    /// Chạy một path-state đến khi path kết thúc (push vào `paths`), state hết
+    /// ngân sách, hoặc fork — các fork được push vào `work` để xử lý tiếp.
+    #[allow(clippy::too_many_arguments)]
+    async fn sim_run_state(
+        &self,
+        mut st: SimState,
+        work: &mut Vec<SimState>,
+        seen: &mut HashSet<u64>,
+        flow_cache: &mut HashMap<u64, Option<FlowResult>>,
+        paths: &mut Vec<FullFlowPath>,
+        max_paths: usize,
+        max_loop_iter: usize,
+        total_steps: &mut usize,
+    ) -> Option<SimState> {
+        // Ngân sách mỗi lượt chạy state — hết预算 thì trả state về để resume
+        // (round-robin), path sâu không bị bỏ giữa đường.
+        let state_budget = 2000usize;
+        let mut used = 0usize;
+
+        while !st.frames.is_empty() {
+            if *total_steps >= FLOW_TOTAL_STEPS
+                || paths.len() >= max_paths
+                || work.len() > 4096
+            {
+                return None;
+            }
+            if used >= state_budget {
+                return Some(st);
+            }
+            used += 1;
+            *total_steps += 1;
+            if st.steps.len() >= MAX_PATH_STEPS {
+                paths.push(FullFlowPath {
+                    steps: st.steps.clone(),
+                    ended_with: PathEnding::DepthLimit,
+                });
+                return None;
+            }
+
+            // Vị trí hiện tại của frame top.
+            let (pos, elem) = {
+                let f = st.frames.last().unwrap();
+                let Some(&e) = f.chain.get(f.pos) else {
+                    // Chain hết tự nhiên → implicit return: pop frame.
+                    let f = st.frames.pop().unwrap();
+                    let d = st.base_depth + st.frames.len() + 1;
+                    let sym = self.symbols.get(&f.func_id);
+                    st.steps.push(FlowStep {
+                        symbol_id: f.func_id,
+                        symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                        file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                        line: sym.map(|s| s.line).unwrap_or(0),
+                        action: TraceAction::Return,
+                        stack_depth: d,
+                        condition: None,
+                    });
+                    if st.frames.is_empty() {
+                        paths.push(FullFlowPath {
+                            steps: st.steps.clone(),
+                            ended_with: PathEnding::Returned,
+                        });
+                        return None;
+                    }
+                    continue;
+                };
+                (f.pos, e)
+            };
+
+            if is_marker(elem) {
+                match elem {
+                    MARKER_RETURN => {
+                        let f = st.frames.pop().unwrap();
+                        let d = st.base_depth + st.frames.len() + 1;
+                        let sym = self.symbols.get(&f.func_id);
+                        st.steps.push(FlowStep {
+                            symbol_id: f.func_id,
+                            symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                            file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                            line: sym.map(|s| s.line).unwrap_or(0),
+                            action: TraceAction::Return,
+                            stack_depth: d,
+                            condition: None,
+                        });
+                        if st.frames.is_empty() {
+                            paths.push(FullFlowPath {
+                                steps: st.steps.clone(),
+                                ended_with: PathEnding::Returned,
+                            });
+                            return None;
+                        }
+                        continue;
+                    }
+                    MARKER_THROW => {
+                        let thrown_label = st.frames.last().unwrap().labels.get(&pos).cloned();
+                        let thrown_type = thrown_label.as_deref();
+                        {
+                            let f = st.frames.last().unwrap();
+                            let d = st.base_depth + st.frames.len();
+                            let sym = self.symbols.get(&f.func_id);
+                            st.steps.push(FlowStep {
+                                symbol_id: f.func_id,
+                                symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                                file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                                line: sym.map(|s| s.line).unwrap_or(0),
+                                action: TraceAction::Throw,
+                                stack_depth: d,
+                                condition: thrown_label.clone(),
+                            });
+                        }
+                        // Unwind: tìm frame có handler khớp exception type; hết
+                        // frame thì thử qua caller path (pending_callers).
+                        let mut caught = false;
+                        loop {
+                            let f = st.frames.last_mut().unwrap();
+                            if let Some(&try_start) = f.catch_stack.last() {
+                                let try_end =
+                                    matching_try_end(&f.chain, try_start).unwrap_or(f.chain.len());
+                                let handlers = handler_positions(&f.chain, try_end);
+                                if let Some(&cp) = handlers.iter().find(|&&p| {
+                                    catch_matches(thrown_type, f.labels.get(&p).map(|s| s.as_str()))
+                                }) {
+                                    f.catch_stack.pop();
+                                    let hend = matching_branch_end(&f.chain, cp)
+                                        .map(|e| e + 1)
+                                        .unwrap_or(f.chain.len());
+                                    f.handlers.push(hend);
+                                    f.pos = cp + 1;
+                                    caught = true;
+                                    break;
+                                }
+                                f.catch_stack.pop();
+                            }
+                            // Frame này không catch → pop, ghi step unwind.
+                            let f = st.frames.pop().unwrap();
+                            let mut unwound_from = f.func_id;
+                            if st.frames.is_empty() {
+                                // Unwind qua caller path (base path của trace).
+                                while let Some(cid) = st.pending_callers.pop() {
+                                    let d = st.pending_callers.len() + 1;
+                                    st.steps.push(FlowStep {
+                                        symbol_id: cid,
+                                        symbol_name: self
+                                            .symbols
+                                            .get(&cid)
+                                            .map(|s| s.name.clone())
+                                            .unwrap_or_default(),
+                                        file: self
+                                            .symbols
+                                            .get(&cid)
+                                            .map(|s| s.file.clone())
+                                            .unwrap_or_default(),
+                                        line: self.symbols.get(&cid).map(|s| s.line).unwrap_or(0),
+                                        action: TraceAction::Throw,
+                                        stack_depth: d,
+                                        condition: Some("unwound".into()),
+                                    });
+                                    // Caller có try bọc call site khớp type?
+                                    let fr = match flow_cache.get(&cid) {
+                                        Some(r) => r.clone(),
+                                        None => {
+                                            let r = self.flow(cid).await.ok();
+                                            flow_cache.insert(cid, r.clone());
+                                            r
+                                        }
+                                    };
+                                    let Some(fr) = fr else {
+                                        unwound_from = cid;
+                                        continue;
+                                    };
+                                    let call_pos = fr
+                                        .chain
+                                        .iter()
+                                        .position(|&e| e == unwound_from)
+                                        .filter(|&p| p > 0);
+                                    let Some(cp_pos) = call_pos else {
+                                        unwound_from = cid;
+                                        continue;
+                                    };
+                                    // Các TRY_START còn mở tại call site.
+                                    let mut open_tries: Vec<usize> = Vec::new();
+                                    for (i, &e) in fr.chain.iter().enumerate().take(cp_pos) {
+                                        if e == MARKER_TRY_START {
+                                            open_tries.push(i);
+                                        } else if e == MARKER_TRY_END {
+                                            open_tries.pop();
+                                        }
+                                    }
+                                    let mut handler_hit = None;
+                                    eprintln!("DBG3 cid={cid} cp={cp_pos} tries={open_tries:?} labels={:?} thrown={thrown_type:?}", fr.branch_labels);
+                                    for &ts in open_tries.iter().rev() {
+                                        let te =
+                                            matching_try_end(&fr.chain, ts).unwrap_or(fr.chain.len());
+                                        let handlers = handler_positions(&fr.chain, te);
+                                        if let Some(&cp) = handlers.iter().find(|&&hpos| {
+                                            catch_matches(
+                                                thrown_type,
+                                                fr.branch_labels.iter().find(|b| b.position == hpos).map(|b| b.label.as_str()),
+                                            )
+                                        }) {
+                                            handler_hit = Some((cp, open_tries.clone(), ts));
+                                            break;
+                                        }
+                                    }
+                                    if let Some((cp, open_tries, ts)) = handler_hit {
+                                        let mut nf = SimFrame::from_flow(cid, &fr);
+                                        nf.pos = cp + 1;
+                                        let hend = matching_branch_end(&fr.chain, cp)
+                                            .map(|e| e + 1)
+                                            .unwrap_or(fr.chain.len());
+                                        nf.handlers.push(hend);
+                                        // Try còn mở BÊN NGOÀI try vừa catch (rethrow).
+                                        let idx = open_tries.iter().position(|&t| t == ts).unwrap_or(0);
+                                        nf.catch_stack = open_tries[..idx].to_vec();
+                                        // Caller frame thật thay thế phần base đã unwind.
+                                        st.base_depth = st.pending_callers.len();
+                                        st.frames.push(nf);
+                                        caught = true;
+                                        break;
+                                    }
+                                    unwound_from = cid;
+                                }
+                                if caught {
+                                    break;
+                                }
+                                paths.push(FullFlowPath {
+                                    steps: st.steps.clone(),
+                                    ended_with: PathEnding::Threw,
+                                });
+                                return None;
+                            }
+                            let d = st.base_depth + st.frames.len() + 1;
+                            let sym = self.symbols.get(&f.func_id);
+                            st.steps.push(FlowStep {
+                                symbol_id: f.func_id,
+                                symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                                file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                                line: sym.map(|s| s.line).unwrap_or(0),
+                                action: TraceAction::Throw,
+                                stack_depth: d,
+                                condition: Some("unwound".into()),
+                            });
+                        }
+                        if caught {
+                            continue;
+                        }
+                        // (unreachable — mọi nhánh của loop đã break/return)
+                        continue;
+                    }
+                    MARKER_IF_TRUE => {
+                        let (cond, end, iff, d, top_id) = {
+                            let f = st.frames.last().unwrap();
+                            let end = matching_branch_end(&f.chain, pos);
+                            let iff = end.and_then(|e| find_if_false(&f.chain, pos, e));
+                            (
+                                f.labels.get(&pos).cloned(),
+                                end,
+                                iff,
+                                st.base_depth + st.frames.len(),
+                                f.func_id,
+                            )
+                        };
+                        let branch_step = |condition: Option<String>| {
+                            let sym = self.symbols.get(&top_id);
+                            FlowStep {
+                                symbol_id: top_id,
+                                symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                                file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                                line: sym.map(|s| s.line).unwrap_or(0),
+                                action: TraceAction::Branch,
+                                stack_depth: d,
+                                condition,
+                            }
+                        };
+                        // Fork nhánh false: vào thẳng else body (sau IF_FALSE,
+                        // nhãn !cond gắn tại fork) hoặc past matching
+                        // BRANCH_END (if không else).
+                        if let Some(end) = end {
+                            let mut fst = st.clone();
+                            {
+                                let ff = fst.frames.last_mut().unwrap();
+                                ff.pos = match iff {
+                                    Some(p) => p + 1,
+                                    None => end + 1,
+                                };
+                            }
+                            fst.steps
+                                .push(branch_step(cond.as_deref().map(|c| format!("!{c}"))));
+                            let k = state_key(&fst);
+                            if seen.insert(k) {
+                                work.push(fst);
+                            }
+                        }
+                        st.steps.push(branch_step(cond));
+                        let f = st.frames.last_mut().unwrap();
+                        f.pos += 1;
+                        continue;
+                    }
+                    MARKER_IF_FALSE => {
+                        // Chỉ true path tới đây (false path đã fork tại IF_TRUE
+                        // và vào thẳng else body): nhảy qua if/else — code sau
+                        // if/else luôn được trace.
+                        let f = st.frames.last_mut().unwrap();
+                        let end = matching_branch_end(&f.chain, pos);
+                        f.pos = end.map(|e| e + 1).unwrap_or(pos + 1);
+                        continue;
+                    }
+                    MARKER_BRANCH_END => {
+                        let f = st.frames.last_mut().unwrap();
+                        if f.handlers.last() == Some(&pos) {
+                            // Kết thúc handler mà throw nhảy vào: bỏ qua các
+                            // handler còn lại, tiếp tục flow sau try/catch.
+                            f.handlers.pop();
+                            f.pos = skip_handlers(&f.chain, pos + 1);
+                        } else {
+                            f.pos += 1;
+                        }
+                        continue;
+                    }
+                    MARKER_CALL_ENTER => {
+                        let callee = st.frames.last().unwrap().chain.get(pos + 1).copied().unwrap_or(0);
+                        self.sim_handle_call(&mut st, work, seen, flow_cache, pos, callee, paths, max_paths)
+                            .await;
+                        continue;
+                    }
+                    MARKER_CALL_EXIT => {
+                        // Điều khiển đã về frame này sau khi call (leaf hoặc
+                        // callee vừa return): ghi step Return của caller — trừ
+                        // khi phần tử kế là RETURN của chính frame (tránh double
+                        // return: return-from-call rồi return-of-function).
+                        let f0 = st.frames.last().unwrap();
+                        let next_is_return = f0
+                            .chain
+                            .get(pos + 1)
+                            .is_none_or(|&e| e == MARKER_RETURN);
+                        let leaf = f0.leaf_pending;
+                        let f0 = st.frames.last_mut().unwrap();
+                        f0.leaf_pending = false;
+                        if !next_is_return && !leaf {
+                            let (d, top_id) = {
+                                let f = st.frames.last().unwrap();
+                                (st.base_depth + st.frames.len(), f.func_id)
+                            };
+                            let sym = self.symbols.get(&top_id);
+                            st.steps.push(FlowStep {
+                                symbol_id: top_id,
+                                symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                                file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                                line: sym.map(|s| s.line).unwrap_or(0),
+                                action: TraceAction::Return,
+                                stack_depth: d,
+                                condition: None,
+                            });
+                        }
+                        let f = st.frames.last_mut().unwrap();
+                        f.pos += 1;
+                        continue;
+                    }
+                    MARKER_LOOP => {
+                        let (back, label, d, top_id) = {
+                            let f = st.frames.last().unwrap();
+                            (
+                                matching_loop_back(&f.chain, pos).unwrap_or(pos),
+                                f.labels.get(&pos).cloned(),
+                                st.base_depth + st.frames.len(),
+                                f.func_id,
+                            )
+                        };
+                        let sym = self.symbols.get(&top_id);
+                        st.steps.push(FlowStep {
+                            symbol_id: top_id,
+                            symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                            file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                            line: sym.map(|s| s.line).unwrap_or(0),
+                            action: TraceAction::Loop,
+                            stack_depth: d,
+                            condition: label,
+                        });
+                        let f = st.frames.last_mut().unwrap();
+                        f.loops.push((pos, back));
+                        f.pos += 1;
+                        continue;
+                    }
+                    MARKER_LOOP_BACK => {
+                        let (top_loop, d, top_id) = {
+                            let f = st.frames.last().unwrap();
+                            (f.loops.last().copied(), st.base_depth + st.frames.len(), f.func_id)
+                        };
+                        if let Some((lp, back)) = top_loop {
+                            let cnt = st
+                                .loop_iters
+                                .entry((top_id, lp))
+                                .and_modify(|c| *c += 1)
+                                .or_insert(1);
+                            if *cnt >= max_loop_iter {
+                                // Hết iter: thoát loop, chạy code sau loop.
+                                let sym = self.symbols.get(&top_id);
+                                st.steps.push(FlowStep {
+                                    symbol_id: top_id,
+                                    symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                                    file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                                    line: sym.map(|s| s.line).unwrap_or(0),
+                                    action: TraceAction::Loop,
+                                    stack_depth: d,
+                                    condition: Some("max_iter".into()),
+                                });
+                                let f = st.frames.last_mut().unwrap();
+                                f.loops.pop();
+                                f.pos = back + 1;
+                            } else {
+                                let f = st.frames.last_mut().unwrap();
+                                f.pos = lp + 1;
+                            }
+                        } else {
+                            let f = st.frames.last_mut().unwrap();
+                            f.pos += 1;
+                        }
+                        continue;
+                    }
+                    MARKER_BREAK => {
+                        let f = st.frames.last_mut().unwrap();
+                        if let Some((_, back)) = f.loops.pop() {
+                            f.pos = back + 1;
+                        } else {
+                            f.pos += 1;
+                        }
+                        continue;
+                    }
+                    MARKER_CONTINUE => {
+                        let f = st.frames.last_mut().unwrap();
+                        if let Some(&(lp, _)) = f.loops.last() {
+                            *st.loop_iters.entry((f.func_id, lp)).or_insert(0) += 1;
+                            f.pos = lp + 1;
+                        } else {
+                            f.pos += 1;
+                        }
+                        continue;
+                    }
+                    MARKER_SWITCH_START => {
+                        let (cases, close, d, top_id, case_labels) = {
+                            let f = st.frames.last().unwrap();
+                            let (cases, close) = switch_layout(&f.chain, pos);
+                            let labels: Vec<(usize, Option<String>)> = cases
+                                .iter()
+                                .map(|&cp| (cp, f.labels.get(&cp).cloned()))
+                                .collect();
+                            (cases, close, st.base_depth + st.frames.len(), f.func_id, labels)
+                        };
+                        // Fork path-per-case (mỗi case một path, gặp SWITCH_END
+                        // thì thoát switch); path chính = no-match, nhảy past close.
+                        for (&cp, label) in cases.iter().zip(case_labels.into_iter().map(|(_, l)| l)) {
+                            let mut cst = st.clone();
+                            {
+                                let cf = cst.frames.last_mut().unwrap();
+                                cf.pos = cp + 1;
+                            }
+                            let sym = self.symbols.get(&top_id);
+                            cst.steps.push(FlowStep {
+                                symbol_id: top_id,
+                                symbol_name: sym.map(|s| s.name.clone()).unwrap_or_default(),
+                                file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+                                line: sym.map(|s| s.line).unwrap_or(0),
+                                action: TraceAction::Branch,
+                                stack_depth: d,
+                                condition: label,
+                            });
+                            let k = state_key(&cst);
+                            if seen.insert(k) {
+                                work.push(cst);
+                            }
+                        }
+                        let f = st.frames.last_mut().unwrap();
+                        if let Some(c) = close {
+                            f.switches.push(c);
+                        }
+                        f.pos = close.map(|c| c + 1).unwrap_or(pos + 1);
+                        continue;
+                    }
+                    MARKER_SWITCH_END => {
+                        // Hết body case của switch hiện tại: thoát switch.
+                        let f = st.frames.last_mut().unwrap();
+                        if let Some(close) = f.switches.pop() {
+                            f.pos = close + 1;
+                        } else {
+                            f.pos += 1;
+                        }
+                        continue;
+                    }
+                    MARKER_TRY_START => {
+                        let f = st.frames.last_mut().unwrap();
+                        f.catch_stack.push(pos);
+                        f.pos += 1;
+                        continue;
+                    }
+                    MARKER_TRY_END => {
+                        // Try body xong không exception: bỏ qua handler, chạy tiếp.
+                        let f = st.frames.last_mut().unwrap();
+                        f.catch_stack.pop();
+                        f.pos = skip_handlers(&f.chain, pos + 1);
+                        continue;
+                    }
+                    MARKER_CATCH_START | MARKER_SWITCH_CASE | MARKER_SWITCH_CLOSE => {
+                        let f = st.frames.last_mut().unwrap();
+                        f.pos += 1;
+                        continue;
+                    }
+                    _ => {
+                        let f = st.frames.last_mut().unwrap();
+                        f.pos += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Non-marker: symbol id (bare) hoặc placeholder 0.
+            let callee = elem;
+            let (is_leaf, call_info) = {
+                let f = st.frames.last().unwrap();
+                (
+                    callee == 0 || callee == f.func_id || is_marker(callee),
+                    f.calls.get(&pos).cloned().unwrap_or_else(|| (String::new(), 0, None)),
+                )
+            };
+            if is_leaf {
+                // Leaf: unresolved / self — record từ call records.
+                let (name, line, cond) = call_info;
+                let d = st.base_depth + st.frames.len() + 1;
+                st.steps.push(FlowStep {
+                    symbol_id: 0,
+                    symbol_name: name,
+                    file: String::new(),
+                    line,
+                    action: TraceAction::Call,
+                    stack_depth: d,
+                    condition: cond,
+                });
+                let f = st.frames.last_mut().unwrap();
+                f.leaf_pending = true; // CALL_EXIT sẽ không ghi Return (leaf)
+                f.pos += 1;
+                continue;
+            }
+            self.sim_handle_call(&mut st, work, seen, flow_cache, pos, callee, paths, max_paths)
+                .await;
+        }
+        None
+    }
+
+    /// Xử lý một call: descend vào chain của callee (nếu được) hoặc leaf.
+    #[allow(clippy::too_many_arguments)]
+    async fn sim_handle_call(
+        &self,
+        st: &mut SimState,
+        _work: &mut Vec<SimState>,
+        _seen: &mut HashSet<u64>,
+        flow_cache: &mut HashMap<u64, Option<FlowResult>>,
+        pos: usize,
+        callee: u64,
+        paths: &mut Vec<FullFlowPath>,
+        _max_paths: usize,
+    ) {
+        let _ = paths;
+        let f = st.frames.last().unwrap();
+        let d = st.base_depth + st.frames.len() + 1;
+        // Call nằm trong vòng lặp đã re-iterate (>1 lần): chỉ leaf — cấu trúc
+        // bên trong callee đã được trace ở iteration đầu, re-descend mỗi
+        // iteration chỉ nhân bản state (nguồn chính của nổ budget/độ trễ).
+        let in_reiterated_loop = f
+            .loops
+            .last()
+            .is_some_and(|&(lp, _)| {
+                st.loop_iters
+                    .get(&(f.func_id, lp))
+                    .is_some_and(|c| *c > 0)
+            });
+        // Cycle guard: không descend vào hàm đã nằm trên stack (đệ quy trực
+        // tiếp/gián tiếp) — chain của nó đã được trace ở frame đó.
+        // Chỉ descend khi chain của callee gọn (<= MAX_DESCEND_CHAIN phần tử)
+        // và depth không quá sâu — chain lớn (ingest, dispatch...) sẽ làm path
+        // phình hàng nghìn step nhiễu; chúng hiện như leaf call.
+        let descend = callee != 0
+            && callee != f.func_id
+            && !in_reiterated_loop
+            && !st.frames.iter().any(|fr| fr.func_id == callee)
+            && st.frames.len() <= FLOW_DESCEND_MAX_FRAMES
+            && self
+                .symbols
+                .get(&callee)
+                .is_some_and(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method));
+        let fr = if descend {
+            match flow_cache.get(&callee) {
+                Some(r) => r.clone(),
+                None => {
+                    let r = self.flow(callee).await.ok();
+                    flow_cache.insert(callee, r.clone());
+                    r
+                }
+            }
+        } else {
+            None
+        };
+        let fr = fr.filter(|fr| fr.chain.len() <= MAX_DESCEND_CHAIN);
+        let sym = self.symbols.get(&callee);
+        st.steps.push(FlowStep {
+            symbol_id: callee,
+            symbol_name: sym
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| {
+                    f.calls
+                        .get(&(pos + 1))
+                        .map(|(n, _, _)| n.clone())
+                        .unwrap_or_default()
+                }),
+            file: sym.map(|s| s.file.clone()).unwrap_or_default(),
+            line: sym.map(|s| s.line).unwrap_or(0),
+            action: TraceAction::Call,
+            stack_depth: d,
+            condition: None,
+        });
+        let f = st.frames.last_mut().unwrap();
+        match fr.filter(|fr| fr.chain.len() > 1) {
+            Some(fr) => {
+                // Descend: caller dừng tại phần tử callee id, resume ở CALL_EXIT.
+                f.pos = pos + 1;
+                st.frames.push(SimFrame::from_flow(callee, &fr));
+            }
+            None => {
+                // Leaf: skip tới CALL_EXIT — CALL_EXIT không ghi Return (nhiễu).
+                f.leaf_pending = true;
+                f.pos = pos + 2;
+            }
+        }
+    }
+
+    /// Tìm tất cả caller gọi trực tiếp đến `target_id` (depth=1).
+    #[allow(dead_code)]
+    async fn find_direct_callers(&self, target_id: u64) -> Result<Vec<Symbol>> {
+        // Dùng callers với depth=1 để lấy direct callers
+        self.callers(target_id, 1).await
     }
 
     /// Tìm hàm có chain chứa pattern (KMP substring qua chain engine).
