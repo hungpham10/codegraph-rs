@@ -4,10 +4,10 @@
 
 use codegraph_core::{
     CallRecord, EffectType, MARKER_BRANCH_END, MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT,
-    MARKER_CATCH_START, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
-    MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START,
-    MARKER_THROW, MARKER_TRY_END, MARKER_TRY_START, PathEnding, SYMBOL_BASE, ScopeLevel, Symbol,
-    SymbolKind,
+    MARKER_CATCH_START, MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP,
+    MARKER_LOOP_BACK, MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END,
+    MARKER_SWITCH_START, MARKER_THROW, MARKER_TRY_END, MARKER_TRY_START, PathEnding, SYMBOL_BASE,
+    ScopeLevel, Symbol, SymbolKind,
 };
 use codegraph_graph::{GraphIndex, ParseResult};
 use std::collections::HashMap;
@@ -123,7 +123,7 @@ async fn if_else_paths_continue_after_block() {
         (C, vec![C, MARKER_RETURN]),
     ]);
     let idx = build_idx(chains, vec![]).await;
-    let paths = idx.trace_full_flow(A, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(A, 5, 50, 1).await.unwrap();
     assert!(paths.len() >= 2, "cần ≥2 path (true/false), got {paths:?}");
     eprintln!("DBG-TEST {paths:?}");
     for p in &paths {
@@ -165,7 +165,7 @@ async fn switch_paths_per_case() {
         (C, vec![C, MARKER_RETURN]),
     ]);
     let idx = build_idx(chains, vec![]).await;
-    let paths = idx.trace_full_flow(A, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(A, 5, 50, 1).await.unwrap();
     assert!(paths.len() >= 2, "mỗi case một path, got {paths:?}");
     assert!(paths.iter().any(|p| names(p).contains(&"b".to_string())));
     assert!(paths.iter().any(|p| names(p).contains(&"c".to_string())));
@@ -194,7 +194,7 @@ async fn loop_break_exits_then_continues() {
         (B, vec![B, MARKER_RETURN]),
     ]);
     let idx = build_idx(chains, vec![]).await;
-    let paths = idx.trace_full_flow(A, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(A, 5, 50, 1).await.unwrap();
     assert!(
         paths.iter().any(|p| names(p).contains(&"b".to_string())
             && names(p).last() == Some(&"a".to_string())
@@ -214,7 +214,7 @@ async fn loop_max_iter_exits_and_continues() {
         (B, vec![B, MARKER_RETURN]),
     ]);
     let idx = build_idx(chains, vec![]).await;
-    let paths = idx.trace_full_flow(A, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(A, 5, 50, 1).await.unwrap();
     assert!(
         paths
             .iter()
@@ -239,7 +239,7 @@ async fn call_descends_and_returns_with_stack_depths() {
         (C, vec![C, MARKER_RETURN]),
     ]);
     let idx = build_idx(chains, vec![]).await;
-    let paths = idx.trace_full_flow(B, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(B, 5, 50, 1).await.unwrap();
     assert!(
         paths.iter().any(|p| names(p).contains(&"c".to_string())),
         "phải descend vào c: {paths:?}"
@@ -300,7 +300,7 @@ async fn throw_unwinds_to_matching_catch() {
         label(A, 6, "catch ValueError"),
     ];
     let idx = build_idx(chains, calls).await;
-    let paths = idx.trace_full_flow(B, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(B, 5, 50, 1).await.unwrap();
     assert!(
         paths.iter().any(|p| {
             p.ended_with == PathEnding::Returned
@@ -345,7 +345,7 @@ async fn throw_wrong_type_unwinds_through() {
         label(A, 6, "catch ValueError"),
     ];
     let idx = build_idx(chains, calls).await;
-    let paths = idx.trace_full_flow(B, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(B, 5, 50, 1).await.unwrap();
     assert!(
         paths.iter().any(|p| p.ended_with == PathEnding::Threw),
         "type không khớp phải unwind hết: {paths:?}"
@@ -392,7 +392,7 @@ async fn throw_crosses_two_frames_to_catch() {
         label(A, 6, "catch ValueError"),
     ];
     let idx = build_idx(chains, calls).await;
-    let paths = idx.trace_full_flow(C, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(C, 5, 50, 1).await.unwrap();
     assert!(
         paths.iter().any(|p| {
             p.ended_with == PathEnding::Returned && names(p).contains(&"handler".to_string())
@@ -414,7 +414,7 @@ async fn no_double_return_after_leaf_call() {
     ]);
     let calls = vec![call(A, "c", 2)];
     let idx = build_idx(chains, calls).await;
-    let paths = idx.trace_full_flow(A, 5, 50).await.unwrap();
+    let paths = idx.trace_full_flow(A, 5, 50, 1).await.unwrap();
     assert!(!paths.is_empty());
     for p in &paths {
         let a_returns = p
@@ -437,9 +437,49 @@ async fn max_depth_one_still_returns_direct_caller_path() {
         (B, vec![B, MARKER_RETURN]),
     ]);
     let idx = build_idx(chains, vec![]).await;
-    let paths = idx.trace_full_flow(B, 1, 50).await.unwrap();
+    let paths = idx.trace_full_flow(B, 1, 50, 1).await.unwrap();
     assert!(
         paths.iter().any(|p| names(p).contains(&"a".to_string())),
         "max_depth=1 phải trả path qua direct caller: {paths:?}"
     );
+}
+
+#[tokio::test]
+async fn continue_heavy_loop_bounded_by_loop_cap() {
+    // while { if (skip) { i++; continue; } i++; } — continue không được phép
+    // mở rộng loop vô hạn: cap (mặc định 1) phải kết thúc loop.
+    let chains = HashMap::from([(
+        A,
+        vec![
+            A,
+            MARKER_LOOP,
+            MARKER_IF_TRUE,
+            MARKER_CONTINUE,
+            MARKER_BRANCH_END,
+            A,
+            MARKER_LOOP_BACK,
+            A,
+            MARKER_RETURN,
+        ],
+    )]);
+    let idx = build_idx(chains, vec![]).await;
+    let paths = idx.trace_full_flow(A, 5, 50, 1).await.unwrap();
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.ended_with == PathEnding::Returned
+                && names(p).last() == Some(&"a".to_string())),
+        "continue phải thoát loop theo cap rồi return: {paths:?}"
+    );
+    for p in &paths {
+        let loop_steps = p
+            .steps
+            .iter()
+            .filter(|s| s.action == codegraph_core::TraceAction::Loop)
+            .count();
+        assert!(
+            loop_steps <= 4,
+            "loop không được mở rộng quá cap: {loop_steps}"
+        );
+    }
 }

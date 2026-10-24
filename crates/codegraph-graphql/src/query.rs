@@ -336,12 +336,14 @@ impl Query {
         target_id: ID,
         max_depth: Option<i32>,
         max_paths: Option<i32>,
+        max_loop_iter: Option<i32>,
     ) -> GqlResult<Vec<FullFlowPath>> {
         let target_id: u64 = parse_id(&target_id)?;
         let max_depth = max_depth.unwrap_or(5).max(1) as usize;
         let max_paths = max_paths.unwrap_or(50).max(1) as usize;
+        let max_loop_iter = max_loop_iter.unwrap_or(1).max(1) as usize;
         let api = api_for(ctx).await?;
-        api.trace_full_flow(target_id, max_depth, max_paths)
+        api.trace_full_flow(target_id, max_depth, max_paths, max_loop_iter)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))
     }
