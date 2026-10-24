@@ -126,7 +126,8 @@ fn tool_defs() -> Vec<ToolDef> {
             "Trace full execution flow to target function with stacktrace from callers. Returns all possible paths from callers through to target with call/return/throw/branch information.",
             json!({ "type": "object", "properties": {
                 "target_id": { "type": "integer", "description": "Symbol ID of the target function" },
-                "max_depth": { "type": "integer", "default": 5, "description": "Maximum depth to search up callers" },
+                "max_depth": { "type": "integer", "default": 5, "description": "Số caller hops tối đa khi dò ngược caller→target (path dài hops+1). KHÔNG giới hạn loop nội bộ — dùng max_loop_iter cho loop." },
+            "max_loop_iter": { "type": "integer", "default": 1, "description": "Số lần tối đa trace loop body (mặc định 1: body chạy 1 lần rồi exit — chống phình output; tăng nếu cần trace nhiều iteration)." },
                 "max_paths": { "type": "integer", "default": 50, "description": "Maximum number of paths to return" }
             }, "required": ["target_id"] }),
         ),
@@ -622,7 +623,14 @@ pub async fn dispatch_with_api(
                 .unwrap_or(5)
                 .max(1) as usize; // caller hops — path caller→target dài hops+1
             let max_paths = args.get("max_paths").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-            let paths = api.trace_full_flow(target_id, max_depth, max_paths).await?;
+            let max_loop_iter = args
+                .get("max_loop_iter")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as usize;
+            let paths = api
+                .trace_full_flow(target_id, max_depth, max_paths, max_loop_iter)
+                .await?;
             emit_value(
                 root.as_str(),
                 serde_json::to_value(&paths).unwrap_or(Value::Null),

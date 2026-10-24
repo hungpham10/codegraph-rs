@@ -2269,10 +2269,11 @@ impl GraphIndex {
         target_id: u64,
         max_depth: usize,
         max_paths: usize,
+        max_loop_iter: usize,
     ) -> Result<Vec<FullFlowPath>> {
-        // Loop body chỉ trace 1 lần rồi exit (max_iter): unroll thêm chỉ nhân
-        // bản y hệt body — nhiễu thuần, không thêm thông tin flow nào.
-        let max_loop_iter = 1;
+        // max_loop_iter: số lần tối đa trace loop body (mặc định 1 — body chạy
+        // 1 lần rồi exit qua max_iter; unroll thêm chỉ nhân bản y hệt body).
+        let max_loop_iter = max_loop_iter.max(1);
 
         // ── Kiểm tra target tồn tại ──
         if !self.symbols.contains_key(&target_id) {
@@ -3022,9 +3023,16 @@ impl GraphIndex {
                     }
                     MARKER_CONTINUE => {
                         let f = st.frames.last_mut().unwrap();
-                        if let Some(&(lp, _)) = f.loops.last() {
-                            *st.loop_iters.entry((f.func_id, lp)).or_insert(0) += 1;
-                            f.pos = lp + 1;
+                        if let Some(&(lp, back)) = f.loops.last() {
+                            let cnt = st.loop_iters.entry((f.func_id, lp)).or_insert(0);
+                            if *cnt >= max_loop_iter {
+                                // Vượt cap: thoát loop luôn (chống continue-chain).
+                                f.loops.pop();
+                                f.pos = back + 1;
+                            } else {
+                                *cnt += 1;
+                                f.pos = lp + 1;
+                            }
                         } else {
                             f.pos += 1;
                         }

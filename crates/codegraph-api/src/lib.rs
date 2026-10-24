@@ -466,10 +466,11 @@ impl GraphApi {
         target_id: u64,
         max_depth: usize,
         max_paths: usize,
+        max_loop_iter: usize,
     ) -> Result<Vec<FullFlowPath>> {
         self.index()
             .await
-            .trace_full_flow(target_id, max_depth, max_paths)
+            .trace_full_flow(target_id, max_depth, max_paths, max_loop_iter)
             .await
     }
 
