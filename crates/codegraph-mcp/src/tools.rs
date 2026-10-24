@@ -122,6 +122,15 @@ fn tool_defs() -> Vec<ToolDef> {
             }, "required": ["node"] }),
         ),
         tool(
+            "codegraph_trace_full_flow",
+            "Trace full execution flow to target function with stacktrace from callers. Returns all possible paths from callers through to target with call/return/throw/branch information.",
+            json!({ "type": "object", "properties": {
+                "target_id": { "type": "integer", "description": "Symbol ID of the target function" },
+                "max_depth": { "type": "integer", "default": 5, "description": "Maximum depth to search up callers" },
+                "max_paths": { "type": "integer", "default": 50, "description": "Maximum number of paths to return" }
+            }, "required": ["target_id"] }),
+        ),
+        tool(
             "codegraph_mermaid",
             "Render a Mermaid diagram (flowchart / graph) for a symbol — the visual variant of the diagram queries. `kind`: 'flow' (what the function does: control-flow with if/else branches, loops, switch, returns and each call annotated with callee, line, guard condition and effect), 'callers' (upstream, transitive), 'callees' (downstream, where it calls), or 'impact' (transitive callers). `depth` limits BFS hops for callers/callees/impact (default 1; ignored for flow). Requires the server to start with --mermaid; otherwise the tool returns an error.",
             json!({ "type": "object", "properties": {
@@ -603,6 +612,20 @@ pub async fn dispatch_with_api(
                     "chain_desc": flow.chain_desc,
                     "calls": flow.calls,
                 }),
+            )
+        }
+        "codegraph_trace_full_flow" => {
+            let target_id = arg_u64(&args, "target_id")?;
+            let max_depth = args
+                .get("max_depth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5)
+                .max(1) as usize; // caller hops — path caller→target dài hops+1
+            let max_paths = args.get("max_paths").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            let paths = api.trace_full_flow(target_id, max_depth, max_paths).await?;
+            emit_value(
+                root.as_str(),
+                serde_json::to_value(&paths).unwrap_or(Value::Null),
             )
         }
         "codegraph_search_flow" => {

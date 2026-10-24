@@ -62,7 +62,7 @@ async fn seed_index(path: &str) -> (u64, u64, u64) {
             is_new_var: false,
         }],
     };
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
     (caller, callee, helper)
 }
 
@@ -295,7 +295,7 @@ async fn seed_many(db: &str, count: usize) {
             calls: vec![],
         });
     }
-    idx.ingest(&results).await.unwrap();
+    idx.ingest(&results, None).await.unwrap();
 }
 
 /// Seed N symbol, mỗi symbol gắn annotation `@RestController` (chẵn) / `@Service`
@@ -325,7 +325,7 @@ async fn seed_annotations(db: &str, count: usize) {
             calls: vec![],
         });
     }
-    idx.ingest(&results).await.unwrap();
+    idx.ingest(&results, None).await.unwrap();
 }
 
 /// Seed N caller, mỗi caller gọi một library call lowercase `log.println` — dùng
@@ -360,7 +360,7 @@ async fn seed_references(db: &str, count: usize) {
             }],
         });
     }
-    idx.ingest(&results).await.unwrap();
+    idx.ingest(&results, None).await.unwrap();
 }
 
 /// Resume roundtrip: timeout → lấy resume id → retry cùng args + resume → kết

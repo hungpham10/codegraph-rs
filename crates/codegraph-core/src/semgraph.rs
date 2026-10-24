@@ -12,115 +12,205 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ==================== Marker Enum ====================
+
+/// Marker luồng điều khiển trong graph (thay thế MARKER_* constants cũ).
+/// Same semantics as MARKER_* but type-safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[cfg_attr(feature = "graphql", graphql(rename_items = "SCREAMING_SNAKE_CASE"))]
+#[allow(dead_code)]
+pub enum Marker {
+    Loop = 1,
+    RecCall = 2,
+    IfTrue = 3,
+    IfFalse = 4,
+    BranchEnd = 5,
+    Return = 6,
+    LoopBack = 7,
+    SwitchCase = 8,
+    SwitchEnd = 9,
+    Break = 10,
+    Continue = 11,
+    Throw = 12,
+    CallEnter = 17,
+    CallExit = 18,
+    SwitchClose = 19,
+    SwitchStart = 20,
+    StmtEnd = 21,
+    TryStart = 22,
+    TryEnd = 23,
+    CatchStart = 24,
+}
+
+impl Marker {
+    /// All variant values (các hằng MARKER_*).
+    pub const ALL: [Marker; 20] = [
+        Marker::Loop,
+        Marker::RecCall,
+        Marker::IfTrue,
+        Marker::IfFalse,
+        Marker::BranchEnd,
+        Marker::Return,
+        Marker::LoopBack,
+        Marker::SwitchCase,
+        Marker::SwitchEnd,
+        Marker::Break,
+        Marker::Continue,
+        Marker::Throw,
+        Marker::CallEnter,
+        Marker::CallExit,
+        Marker::SwitchClose,
+        Marker::SwitchStart,
+        Marker::StmtEnd,
+        Marker::TryStart,
+        Marker::TryEnd,
+        Marker::CatchStart,
+    ];
+
+    /// Giá trị u64 tương ứng (cho tương thích với chain cũ).
+    #[inline]
+    pub fn id(self) -> u64 {
+        self as u64
+    }
+
+    /// Chuyển từ u64 raw sang Marker — `None` nếu id không phải marker.
+    #[inline]
+    pub fn from_id(id: u64) -> Option<Self> {
+        match id {
+            1 => Some(Marker::Loop),
+            2 => Some(Marker::RecCall),
+            3 => Some(Marker::IfTrue),
+            4 => Some(Marker::IfFalse),
+            5 => Some(Marker::BranchEnd),
+            6 => Some(Marker::Return),
+            7 => Some(Marker::LoopBack),
+            8 => Some(Marker::SwitchCase),
+            9 => Some(Marker::SwitchEnd),
+            10 => Some(Marker::Break),
+            11 => Some(Marker::Continue),
+            12 => Some(Marker::Throw),
+            17 => Some(Marker::CallEnter),
+            18 => Some(Marker::CallExit),
+            19 => Some(Marker::SwitchClose),
+            20 => Some(Marker::SwitchStart),
+            21 => Some(Marker::StmtEnd),
+            22 => Some(Marker::TryStart),
+            23 => Some(Marker::TryEnd),
+            24 => Some(Marker::CatchStart),
+            _ => None,
+        }
+    }
+
+    /// Tên đọc được cho UI / logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Marker::Loop => "LOOP",
+            Marker::RecCall => "RECURSIVE_CALL",
+            Marker::IfTrue => "IF_TRUE",
+            Marker::IfFalse => "IF_FALSE",
+            Marker::BranchEnd => "BRANCH_END",
+            Marker::Return => "RETURN",
+            Marker::LoopBack => "LOOP_BACK",
+            Marker::SwitchCase => "SWITCH_CASE",
+            Marker::SwitchEnd => "SWITCH_END",
+            Marker::Break => "BREAK",
+            Marker::Continue => "CONTINUE",
+            Marker::Throw => "THROW",
+            Marker::CallEnter => "CALL_ENTER",
+            Marker::CallExit => "CALL_EXIT",
+            Marker::SwitchClose => "SWITCH_CLOSE",
+            Marker::SwitchStart => "SWITCH_START",
+            Marker::StmtEnd => "STMT_END",
+            Marker::TryStart => "TRY_START",
+            Marker::TryEnd => "TRY_END",
+            Marker::CatchStart => "CATCH_START",
+        }
+    }
+
+    /// Parse từ tên (case‑insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        let lower = s.to_lowercase();
+        match lower.as_str() {
+            "loop" => Some(Marker::Loop),
+            "recursice_call" | "recursive_call" => Some(Marker::RecCall),
+            "if_true" => Some(Marker::IfTrue),
+            "if_false" => Some(Marker::IfFalse),
+            "branch_end" => Some(Marker::BranchEnd),
+            "return" => Some(Marker::Return),
+            "loop_back" => Some(Marker::LoopBack),
+            "switch_case" => Some(Marker::SwitchCase),
+            "switch_end" => Some(Marker::SwitchEnd),
+            "break" => Some(Marker::Break),
+            "continue" => Some(Marker::Continue),
+            "throw" => Some(Marker::Throw),
+            "call_enter" => Some(Marker::CallEnter),
+            "call_exit" => Some(Marker::CallExit),
+            "switch_close" => Some(Marker::SwitchClose),
+            "switch_start" => Some(Marker::SwitchStart),
+            "stmt_end" => Some(Marker::StmtEnd),
+            "try_start" => Some(Marker::TryStart),
+            "try_end" => Some(Marker::TryEnd),
+            "catch_start" => Some(Marker::CatchStart),
+            _ => None,
+        }
+    }
+}
+
 // ==================== Id-space ====================
 
 /// Id bắt đầu cho symbol. Mọi id `< SYMBOL_BASE` là marker reserved.
 pub const SYMBOL_BASE: u64 = 100;
 
-/// Marker: bắt đầu loop body.
-pub const MARKER_LOOP: u64 = 1;
-
-/// Marker: recursive call (gọi lại chính function đang xét) — dự trữ.
-pub const MARKER_REC_CALL: u64 = 2;
-
-/// Marker: nhánh khi điều kiện đúng.
-pub const MARKER_IF_TRUE: u64 = 3;
-
-/// Marker: nhánh khi điều kiện sai.
-pub const MARKER_IF_FALSE: u64 = 4;
-
-/// Marker: kết thúc một nhánh if/else.
-pub const MARKER_BRANCH_END: u64 = 5;
-
-/// Marker: return statement.
-pub const MARKER_RETURN: u64 = 6;
-
-/// Marker: loop back edge (quay lại đầu loop).
-pub const MARKER_LOOP_BACK: u64 = 7;
-
-/// Marker: case trong switch.
-pub const MARKER_SWITCH_CASE: u64 = 8;
-
-/// Marker: kết thúc switch.
-pub const MARKER_SWITCH_END: u64 = 9;
-
-/// Marker: break statement.
-pub const MARKER_BREAK: u64 = 10;
-
-/// Marker: continue statement.
-pub const MARKER_CONTINUE: u64 = 11;
-
-/// Marker: throw/raise exception.
-pub const MARKER_THROW: u64 = 12;
-
-/// Marker: bắt đầu call expression (dùng cho nested call depth).
-pub const MARKER_CALL_ENTER: u64 = 17;
-
-/// Marker: kết thúc call expression.
-pub const MARKER_CALL_EXIT: u64 = 18;
-
-/// Marker: đóng switch expression (tách các switch riêng biệt).
-pub const MARKER_SWITCH_CLOSE: u64 = 19;
-
-/// Marker: bắt đầu switch expression (dùng cho discriminant text).
-pub const MARKER_SWITCH_START: u64 = 20;
-
-/// Marker: kết thúc statement (tách các statements trong block).
-pub const MARKER_STMT_END: u64 = 21;
-
-/// `true` nếu `id` là một fixed marker (nằm trong vùng reserved).
+/// Helper: chuyển từ raw id sang Marker (dùng trong code graph).
 #[inline]
 pub fn is_marker(id: u64) -> bool {
     id > 0 && id < SYMBOL_BASE
 }
 
-/// Tên người đọc được của marker — `None` nếu `id` không phải marker.
-pub fn marker_name(id: u64) -> Option<&'static str> {
-    Some(match id {
-        MARKER_LOOP => "LOOP",
-        MARKER_REC_CALL => "RECURSIVE_CALL",
-        MARKER_IF_TRUE => "IF_TRUE",
-        MARKER_IF_FALSE => "IF_FALSE",
-        MARKER_BRANCH_END => "BRANCH_END",
-        MARKER_RETURN => "RETURN",
-        MARKER_LOOP_BACK => "LOOP_BACK",
-        MARKER_SWITCH_CASE => "SWITCH_CASE",
-        MARKER_SWITCH_END => "SWITCH_END",
-        MARKER_BREAK => "BREAK",
-        MARKER_CONTINUE => "CONTINUE",
-        MARKER_THROW => "THROW",
-        MARKER_CALL_ENTER => "CALL_ENTER",
-        MARKER_CALL_EXIT => "CALL_EXIT",
-        MARKER_SWITCH_CLOSE => "SWITCH_CLOSE",
-        MARKER_SWITCH_START => "SWITCH_START",
-        MARKER_STMT_END => "STMT_END",
-        _ => return None,
-    })
+/// Backward compatibility: MARKER_* constants (hiện đã được thay thế bằng enum Marker).
+pub const MARKER_LOOP: u64 = 1;
+pub const MARKER_REC_CALL: u64 = 2;
+pub const MARKER_IF_TRUE: u64 = 3;
+pub const MARKER_IF_FALSE: u64 = 4;
+pub const MARKER_BRANCH_END: u64 = 5;
+pub const MARKER_RETURN: u64 = 6;
+pub const MARKER_LOOP_BACK: u64 = 7;
+pub const MARKER_SWITCH_CASE: u64 = 8;
+pub const MARKER_SWITCH_END: u64 = 9;
+pub const MARKER_BREAK: u64 = 10;
+pub const MARKER_CONTINUE: u64 = 11;
+pub const MARKER_THROW: u64 = 12;
+pub const MARKER_CALL_ENTER: u64 = 17;
+pub const MARKER_CALL_EXIT: u64 = 18;
+pub const MARKER_SWITCH_CLOSE: u64 = 19;
+pub const MARKER_SWITCH_START: u64 = 20;
+pub const MARKER_STMT_END: u64 = 21;
+pub const MARKER_TRY_START: u64 = 22;
+pub const MARKER_TRY_END: u64 = 23;
+pub const MARKER_CATCH_START: u64 = 24;
+
+/// Helper để đọc chain sang danh sách marker — tiện cho code đọc.
+#[allow(dead_code)]
+#[inline]
+pub fn parse_markers(chain: &[u64]) -> Vec<Marker> {
+    chain.iter().filter_map(|&id| Marker::from_id(id)).collect()
 }
 
-/// Id của marker theo tên (đảo của `marker_name`) — `None` nếu không khớp.
-/// Dùng cho pattern của `search_flow` (VD `"LOOP, save"`).
-pub fn marker_id(name: &str) -> Option<u64> {
-    Some(match name {
-        "LOOP" => MARKER_LOOP,
-        "RECURSIVE_CALL" => MARKER_REC_CALL,
-        "IF_TRUE" => MARKER_IF_TRUE,
-        "IF_FALSE" => MARKER_IF_FALSE,
-        "BRANCH_END" => MARKER_BRANCH_END,
-        "RETURN" => MARKER_RETURN,
-        "LOOP_BACK" => MARKER_LOOP_BACK,
-        "SWITCH_CASE" => MARKER_SWITCH_CASE,
-        "SWITCH_END" => MARKER_SWITCH_END,
-        "BREAK" => MARKER_BREAK,
-        "CONTINUE" => MARKER_CONTINUE,
-        "THROW" => MARKER_THROW,
-        "CALL_ENTER" => MARKER_CALL_ENTER,
-        "CALL_EXIT" => MARKER_CALL_EXIT,
-        "SWITCH_CLOSE" => MARKER_SWITCH_CLOSE,
-        "SWITCH_START" => MARKER_SWITCH_START,
-        "STMT_END" => MARKER_STMT_END,
-        _ => return None,
-    })
+/// Helper để đọc chain sang danh sách symbol calls (skip marker, 0, self).
+#[allow(dead_code)]
+#[inline]
+pub fn extract_calls(chain: &[u64], func_id: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for &e in chain {
+        if is_marker(e) || e == 0 || e == func_id || !seen.insert(e) {
+            continue;
+        }
+        out.push(e);
+    }
+    out
 }
 
 // ==================== Kinds ====================
@@ -493,6 +583,116 @@ pub struct CallSiteResult {
     pub file: String,
     #[serde(default)]
     pub call_sites: Vec<CallSite>,
+}
+
+// ==================== Full-flow trace (debug-style call/return path) ====================
+
+/// Hành động tại một bước trace trong flow path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[cfg_attr(feature = "graphql", graphql(rename_items = "SCREAMING_SNAKE_CASE"))]
+#[allow(dead_code)]
+pub enum TraceAction {
+    /// Gọi xuống hàm khác (push vào call stack).
+    Call,
+    /// Return về hàm gọi trước (pop khỏi call stack).
+    Return,
+    /// Ném exception / bail out (không return bình thường).
+    Throw,
+    /// Assert fail (xử lý tương tự throw).
+    Assert,
+    /// Nhánh if/else/switch (điểm phân nhánh).
+    Branch,
+    /// Vào vòng lặp.
+    Loop,
+    /// Câu lệnh thông thường.
+    Statement,
+}
+
+/// Kết thúc của một full-flow path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[cfg_attr(feature = "graphql", graphql(rename_items = "SCREAMING_SNAKE_CASE"))]
+#[allow(dead_code)]
+pub enum PathEnding {
+    /// Return bình thường về caller.
+    Returned,
+    /// Throw exception / bail out.
+    Threw,
+    /// Assert fail.
+    Asserted,
+    /// Đạt giới hạn depth (cắt ngắn).
+    DepthLimit,
+    /// Đạt giới hạn số paths (cắt ngắn).
+    PathLimit,
+}
+
+// Converter from Marker to TraceAction
+impl From<Marker> for TraceAction {
+    fn from(marker: Marker) -> Self {
+        match marker {
+            Marker::CallEnter | Marker::RecCall => Self::Call,
+            Marker::CallExit | Marker::Return => Self::Return,
+            Marker::Throw => Self::Throw,
+            Marker::IfTrue
+            | Marker::IfFalse
+            | Marker::SwitchCase
+            | Marker::SwitchEnd
+            | Marker::SwitchClose
+            | Marker::SwitchStart
+            | Marker::BranchEnd => Self::Branch,
+            Marker::Loop | Marker::LoopBack => Self::Loop,
+            Marker::Break | Marker::Continue | Marker::StmtEnd => Self::Statement,
+            Marker::TryStart | Marker::TryEnd | Marker::CatchStart => Self::Statement,
+        }
+    }
+}
+
+/// Tên người đọc được của marker — `None` nếu `id` không phải marker (backward compat).
+#[inline]
+pub fn marker_name(id: u64) -> Option<&'static str> {
+    Marker::from_id(id).map(|m| m.as_str())
+}
+
+/// Id của marker theo tên (đảo của `marker_name`) — `None` nếu không khớp (backward compat).
+#[inline]
+pub fn marker_id(name: &str) -> Option<u64> {
+    Marker::parse(name).map(|m| m.id())
+}
+
+/// Một bước trong full-flow path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
+#[allow(dead_code)]
+pub struct FlowStep {
+    /// Id của symbol tại bước này.
+    pub symbol_id: u64,
+    /// Tên symbol.
+    pub symbol_name: String,
+    /// File chứa symbol.
+    pub file: String,
+    /// Số dòng (nếu có).
+    pub line: u32,
+    /// Hành động tại bước này.
+    pub action: TraceAction,
+    /// Độ深度 của call stack tại thời điểm này.
+    pub stack_depth: usize,
+    /// Điều kiện nhánh / điều kiện throw (nếu có).
+    #[serde(default)]
+    pub condition: Option<String>,
+}
+
+/// Một full-flow path hoàn chỉnh từ hàm start đến hàm target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::SimpleObject))]
+#[allow(dead_code)]
+pub struct FullFlowPath {
+    /// Các bước đi trong path.
+    pub steps: Vec<FlowStep>,
+    /// Path kết thúc như thế nào.
+    pub ended_with: PathEnding,
 }
 
 // ==================== Search / class queries ====================

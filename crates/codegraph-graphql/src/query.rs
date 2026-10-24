@@ -5,8 +5,8 @@
 use async_graphql::{Context, Object, Result as GqlResult, ID};
 use codegraph_api::GraphApi;
 use codegraph_core::{
-    ClassInfo, DependenciesReport, FileInfo, FlowResult, FunctionScope, SearchFlowResult,
-    SemgraphStats, Symbol, SymbolKind, SymbolMatch,
+    ClassInfo, DependenciesReport, FileInfo, FlowResult, FullFlowPath, FunctionScope,
+    SearchFlowResult, SemgraphStats, Symbol, SymbolKind, SymbolMatch,
 };
 use codegraph_docs::tokenize::DocToken;
 use codegraph_source::GitRepo;
@@ -327,6 +327,23 @@ impl Query {
             files: 0,
             next_id: 0,
         }))
+    }
+
+    /// Trace full flow đến targetId với stacktrace từ các caller (debug-style).
+    async fn trace_full_flow(
+        &self,
+        ctx: &Context<'_>,
+        target_id: ID,
+        max_depth: Option<i32>,
+        max_paths: Option<i32>,
+    ) -> GqlResult<Vec<FullFlowPath>> {
+        let target_id: u64 = parse_id(&target_id)?;
+        let max_depth = max_depth.unwrap_or(5).max(1) as usize;
+        let max_paths = max_paths.unwrap_or(50).max(1) as usize;
+        let api = api_for(ctx).await?;
+        api.trace_full_flow(target_id, max_depth, max_paths)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))
     }
 
     /// Class info: symbol + fields + methods.

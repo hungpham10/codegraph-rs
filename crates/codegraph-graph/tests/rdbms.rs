@@ -108,7 +108,7 @@ async fn rdbms_ingest_reopen_roundtrip() {
 
     {
         let mut idx = GraphIndex::open_route(&route).await.expect("open rdbms");
-        idx.ingest(&[r]).await.expect("ingest");
+        idx.ingest(&[r], None).await.expect("ingest");
         assert_eq!(idx.version(), 1);
     }
 
@@ -157,10 +157,10 @@ async fn rdbms_empty_ingest_wipes_store() {
         vec![],
     );
     let mut idx = GraphIndex::open_route(&route).await.expect("open rdbms");
-    idx.ingest(&[r]).await.expect("ingest");
+    idx.ingest(&[r], None).await.expect("ingest");
     assert_eq!(idx.stats().symbols, 1);
 
-    idx.ingest(&[]).await.expect("empty ingest");
+    idx.ingest(&[], None).await.expect("empty ingest");
     assert_eq!(idx.version(), 2);
     assert_eq!(idx.stats().symbols, 0);
     assert!(idx.symbol_by_id(SYMBOL_BASE).is_none());

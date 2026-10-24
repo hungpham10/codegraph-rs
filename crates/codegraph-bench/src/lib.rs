@@ -104,7 +104,7 @@ pub fn index_at(parsed: &[ParseResult], dsn: Option<&str>) -> Result<GraphIndex,
             Some(d) => GraphIndex::open(d).await?,
             None => GraphIndex::in_memory(),
         };
-        idx.ingest(parsed).await?;
+        idx.ingest(parsed, None).await?;
         Ok(idx)
     })
 }

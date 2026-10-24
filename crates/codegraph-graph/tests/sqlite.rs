@@ -88,7 +88,7 @@ async fn index_ingest_reopen_roundtrip() {
     );
     {
         let mut idx = GraphIndex::open(&path).await.unwrap();
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
         assert_eq!(idx.version(), 1);
     }
 
@@ -131,10 +131,10 @@ async fn empty_ingest_wipes_store() {
         vec![],
     );
     let mut idx = GraphIndex::open(&path).await.unwrap();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
     assert_eq!(idx.stats().symbols, 1);
 
-    idx.ingest(&[]).await.unwrap();
+    idx.ingest(&[], None).await.unwrap();
     assert_eq!(idx.version(), 2);
     assert_eq!(idx.stats().symbols, 0);
     assert!(idx.symbol_by_id(SYMBOL_BASE).is_none());
@@ -161,7 +161,7 @@ async fn shared_index_rebuilds_on_reindex() {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE])]),
             vec![],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
     }
 
     // "Server": shared index trên cùng file.
@@ -179,7 +179,7 @@ async fn shared_index_rebuilds_on_reindex() {
             HashMap::from([(SYMBOL_BASE, vec![SYMBOL_BASE])]),
             vec![],
         );
-        idx.ingest(&[r]).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
     }
     let idx2 = sgi.ensure_fresh().await;
     assert_eq!(idx2.version(), 2);
@@ -213,7 +213,7 @@ async fn ingest_same_function_name_across_files_stays_distinct() {
     );
 
     let mut idx = GraphIndex::open(&db_str).await.unwrap();
-    idx.ingest(&[r_store, r_cache]).await.unwrap();
+    idx.ingest(&[r_store, r_cache], None).await.unwrap();
 
     // Cả 2 symbol cùng tên nhưng id global khác nhau, giữ đúng file.
     assert_eq!(idx.stats().symbols, 2);
@@ -278,7 +278,7 @@ async fn sandbox_search_kinds_finds_java_method() {
         vec![],
     );
     let mut idx = GraphIndex::open(&db_str).await.unwrap();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     // Trước fix: lọc Function-only → bỏ Method → empty (sandbox fail).
     let only_func = idx
@@ -368,7 +368,7 @@ async fn external_qualified_call_not_linked_to_local_variable() {
         calls,
     );
     let mut idx = GraphIndex::open(&db_str).await.unwrap();
-    idx.ingest(&[r]).await.unwrap();
+    idx.ingest(&[r], None).await.unwrap();
 
     let cees = idx.callees(a).await.unwrap();
     assert!(

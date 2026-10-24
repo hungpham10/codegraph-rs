@@ -63,7 +63,7 @@ fn benchmark_context(c: &mut crit::Criterion) {
         let dsn = format!("sqlite://{}", dir.path().join("context.db").display());
         let shared = rt.block_on(async {
             let mut idx = GraphIndex::open(&dsn).await.unwrap();
-            idx.ingest(&[fixture(fan_in)]).await.unwrap();
+            idx.ingest(&[fixture(fan_in)], None).await.unwrap();
             drop(idx);
             let shared = Arc::new(SharedGraphIndex::open(Some(dsn.clone())).await.unwrap());
             shared.ensure_fresh().await;

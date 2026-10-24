@@ -34,15 +34,18 @@ async fn callers_timeout_resume_dispatch() {
         language: "rust".into(),
     };
     let mut idx = GraphIndex::open(&dsn).await.unwrap();
-    idx.ingest(&[ParseResult {
-        path: "a.rs".into(),
-        language: "rust".into(),
-        bytes: 0,
-        lines: 1,
-        symbols: vec![symbol(a, "caller"), symbol(b, "callee")],
-        chains: HashMap::from([(a, vec![a, b])]),
-        calls: vec![],
-    }])
+    idx.ingest(
+        &[ParseResult {
+            path: "a.rs".into(),
+            language: "rust".into(),
+            bytes: 0,
+            lines: 1,
+            symbols: vec![symbol(a, "caller"), symbol(b, "callee")],
+            chains: HashMap::from([(a, vec![a, b])]),
+            calls: vec![],
+        }],
+        None,
+    )
     .await
     .unwrap();
     drop(idx);

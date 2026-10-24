@@ -124,7 +124,7 @@ impl Orchestrator {
         let ingest_progress: Option<Arc<dyn IngestProgress>> = progress
             .as_ref()
             .map(|bar| Arc::new(IngestBar(bar.clone())) as Arc<dyn IngestProgress>);
-        index.ingest_with_progress(&parsed, ingest_progress).await?;
+        index.ingest(&parsed, ingest_progress).await?;
         // Finish the progress bar on success.
         if let Some(bar) = progress {
             bar.finish_with_message("Indexing complete");

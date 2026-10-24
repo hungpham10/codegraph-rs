@@ -16,10 +16,10 @@
 use crate::languages::effects::classify_effect;
 use codegraph_core::{
     Annotation, CallRecord, Result, ScopeLevel, Symbol, SymbolKind, MARKER_BRANCH_END,
-    MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE, MARKER_IF_FALSE,
-    MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_STMT_END,
+    MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CATCH_START, MARKER_CONTINUE,
+    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN, MARKER_STMT_END,
     MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
-    SYMBOL_BASE,
+    MARKER_TRY_END, MARKER_TRY_START, SYMBOL_BASE,
 };
 use codegraph_graph::ParseResult;
 use std::collections::HashMap;
@@ -693,7 +693,10 @@ fn walk_chain(
         let loop_cond_text = cond_node
             .and_then(|c| text(&c, ctx.src))
             .filter(|t| !t.is_empty());
-        let loop_cond = loop_cond_text.clone().or_else(|| condition.clone());
+        // KHÔNG fallback về condition của `if` bao ngoài: `for i in range(n)` lồng trong
+        // `if c:` sẽ gán nhãn điều kiện CỦA IF cho mọi call trong loop → flood + sai.
+        // Loop không có condition riêng thì body calls mang condition = None.
+        let loop_cond = loop_cond_text.clone();
         // Nhãn trigger của loop ngay tại marker LOOP.
         if let Some(l) = &loop_cond_text {
             emit_branch_label(ctx, l);
@@ -793,20 +796,40 @@ fn walk_chain(
     }
     if ctx.spec.throw_kinds.contains(&k) {
         chain_push(ctx, MARKER_THROW);
+        // Nhãn exception type ngay tại THROW (`throw ValueError(...)` →
+        // `throw ValueError`) — interpreter dùng để match catch handler.
+        if let Some(t) = exception_type_of(node, ctx.src) {
+            emit_branch_label(ctx, &format!("throw {t}"));
+        } else {
+            emit_branch_label(ctx, "throw");
+        }
         for ch in named_children(node) {
             walk_chain(ctx, &ch, depth + 1, in_loop, condition.clone());
         }
         return;
     }
 
-    // 7. Try.
+    // 7. Try — layout: [TRY_START, ...try body..., TRY_END, CATCH_START, <handler1>,
+    //    CATCH_START, <handler2>, ...]. Interpreter giữ runtime catch_stack (push tại
+    //    TRY_START, pop tại TRY_END) và khi bắt THROW nhảy tới CATCH_START khớp type
+    //    (nhãn `except <Type>`/`catch <Type>` gắn tại CATCH_START; handler không type
+    //    khớp mọi exception).
     if ctx.spec.try_kinds.contains(&k) {
+        chain_push(ctx, MARKER_TRY_START);
         if let Some(body) = node.child_by_field_name(ctx.spec.body_field) {
             walk_chain(ctx, &body, depth + 1, in_loop, condition.clone());
+        } else {
+            walk_block(ctx, node, depth + 1, in_loop, condition.clone());
         }
+        chain_push(ctx, MARKER_TRY_END);
         for ch in named_children(node) {
             if ctx.spec.except_kinds.contains(&ch.kind()) {
-                chain_push(ctx, MARKER_IF_TRUE);
+                chain_push(ctx, MARKER_CATCH_START);
+                // Nhãn handler: `except ValueError:` / `catch (IOException e)` → type.
+                let label = except_label(&ch, ctx.src)
+                    .map(|l| format!("catch {l}"))
+                    .unwrap_or_else(|| "catch".to_string());
+                emit_branch_label(ctx, &label);
                 walk_clause(ctx, &ch, depth + 1, in_loop, condition.clone());
                 chain_push(ctx, MARKER_BRANCH_END);
             }
@@ -1111,6 +1134,43 @@ fn is_case_body_kind(kind: &str) -> bool {
         || kind.contains("statement")
         || kind == "declaration_list"
         || kind == "compound_statement"
+}
+
+/// Nhãn handler của `except`/`catch` — `except ValueError:` → `ValueError`.
+/// Tìm node đầu tiên không phải body trong except_clause.
+fn except_label<'a>(node: &Node<'a>, src: &[u8]) -> Option<String> {
+    named_children(node)
+        .into_iter()
+        .find(|c| !is_case_body_kind(c.kind()))
+        .and_then(|c| text(&c, src))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            // Java `catch (IOException e)` → `IOException e` → `IOException`.
+            let t = t.trim_start_matches('(').trim();
+            t.split_whitespace().next().unwrap_or(t).to_string()
+        })
+}
+
+/// Exception type của một `throw`/`raise` — `raise ValueError("x")` → `ValueError`,
+/// `throw new FooException()` → `FooException`. Lấy text của expression con, cắt
+/// bỏ `new`/constructor call/attribute truy cập.
+fn exception_type_of(node: &Node, src: &[u8]) -> Option<String> {
+    let raw = named_children(node)
+        .into_iter()
+        .next()
+        .and_then(|c| text(&c, src))?;
+    let mut t = raw.trim();
+    if let Some(rest) = t.strip_prefix("new ") {
+        t = rest.trim();
+    }
+    let t = t
+        .split(['(', ' ', ':', ';', '\n'])
+        .next()
+        .unwrap_or(t)
+        .trim();
+    let t = t.rsplit(['.', ':']).next().unwrap_or(t); // module.Exception → Exception
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 /// Gắn **nhãn nhánh** vào đúng vị trí marker trong chain (không thêm node):
