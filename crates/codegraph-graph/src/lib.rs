@@ -65,13 +65,13 @@ pub use crate::storage::{
 use crate::vector_index::VectorIndex;
 use codegraph_core::{
     BranchLabel, CallRecord, CallSite, CallSiteResult, ClassInfo, DependenciesReport, Dependency,
-    Error, FileInfo, FlowCall, FlowResult, FlowStep, FullFlowPath, FunctionScope, MemberInfo,
-    MARKER_BRANCH_END, MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CONTINUE,
-    MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
-    MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END,
-    MARKER_SWITCH_START, MARKER_THROW, MARKER_CATCH_START, MARKER_TRY_END, MARKER_TRY_START,
-    PathEnding, ResolveResult, SearchFlowResult, SemgraphStats,
-    StorageRoute, Symbol, SymbolKind, SymbolMatch, TraceAction, is_marker, marker_name, SYMBOL_BASE,
+    Error, FileInfo, FlowCall, FlowResult, FlowStep, FullFlowPath, FunctionScope,
+    MARKER_BRANCH_END, MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CATCH_START,
+    MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN,
+    MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
+    MARKER_TRY_END, MARKER_TRY_START, MemberInfo, PathEnding, ResolveResult, SYMBOL_BASE,
+    SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch, TraceAction,
+    is_marker, marker_name,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -501,16 +501,16 @@ fn rrf_fuse(lists: &[Vec<u64>]) -> Vec<u64> {
 // path bằng worklist (không đệ quy clone) — code sau if/else luôn được trace.
 
 /// Số frame tối đa khi descend vào callee (root frame + callee frames).
-    /// Chỉ descend 1 mức: root (1) + callee internals (2); sâu hơn = leaf.
-    const FLOW_DESCEND_MAX_FRAMES: usize = 2;
-    /// Chỉ descend vào callee có chain <= ngưỡng phần tử này (gọn, đọc nổi).
-    const MAX_DESCEND_CHAIN: usize = 50;
+/// Chỉ descend 1 mức: root (1) + callee internals (2); sâu hơn = leaf.
+const FLOW_DESCEND_MAX_FRAMES: usize = 2;
+/// Chỉ descend vào callee có chain <= ngưỡng phần tử này (gọn, đọc nổi).
+const MAX_DESCEND_CHAIN: usize = 50;
 
 /// Tổng step budget cho mọi path-state của một trace (chống nổ tổ hợp).
 const FLOW_TOTAL_STEPS: usize = 12000;
-    /// Số step tối đa của MỘT path — vượt thì kết thúc path bằng DepthLimit
-    /// (vẫn được trả về, nhưng rank sau path hoàn chỉnh) để output luôn đọc nổi.
-    const MAX_PATH_STEPS: usize = 800;
+/// Số step tối đa của MỘT path — vượt thì kết thúc path bằng DepthLimit
+/// (vẫn được trả về, nhưng rank sau path hoàn chỉnh) để output luôn đọc nổi.
+const MAX_PATH_STEPS: usize = 800;
 
 /// Vị trí matching BRANCH_END của một khối mở bằng IF_TRUE/CATCH_START
 /// (đếm cân bằng cả hai loại open — try/catch lồng trong if và ngược lại).
@@ -588,7 +588,9 @@ fn handler_positions(chain: &[u64], try_end: usize) -> Vec<usize> {
     let mut p = try_end + 1;
     while p < chain.len() && chain[p] == MARKER_CATCH_START {
         out.push(p);
-        p = matching_branch_end(chain, p).map(|e| e + 1).unwrap_or(p + 1);
+        p = matching_branch_end(chain, p)
+            .map(|e| e + 1)
+            .unwrap_or(p + 1);
     }
     out
 }
@@ -596,7 +598,9 @@ fn handler_positions(chain: &[u64], try_end: usize) -> Vec<usize> {
 /// Bỏ qua các handler còn lại kể từ vị trí p (đứng ngay trước CATCH_START).
 fn skip_handlers(chain: &[u64], mut p: usize) -> usize {
     while p < chain.len() && chain[p] == MARKER_CATCH_START {
-        p = matching_branch_end(chain, p).map(|e| e + 1).unwrap_or(p + 1);
+        p = matching_branch_end(chain, p)
+            .map(|e| e + 1)
+            .unwrap_or(p + 1);
     }
     p
 }
@@ -2272,9 +2276,7 @@ impl GraphIndex {
 
         // ── Kiểm tra target tồn tại ──
         if !self.symbols.contains_key(&target_id) {
-            return Err(Error::Invalid(format!(
-                "symbol id {target_id} not found"
-            )));
+            return Err(Error::Invalid(format!("symbol id {target_id} not found")));
         }
 
         // ── Dùng flow chain của target để trace nội bộ ──
@@ -2333,7 +2335,10 @@ impl GraphIndex {
                 ))
                 .await;
 
-                for call_path in paths_to_target.into_iter().take(max_paths - all_paths.len()) {
+                for call_path in paths_to_target
+                    .into_iter()
+                    .take(max_paths - all_paths.len())
+                {
                     // Steps từ call path
                     let mut base_steps: Vec<FlowStep> = Vec::new();
                     for (i, &sid) in call_path.iter().enumerate() {
@@ -2381,7 +2386,10 @@ impl GraphIndex {
                     .count()
             };
             let depth = |p: &FullFlowPath| p.steps.iter().map(|s| s.stack_depth).max().unwrap_or(0);
-            completed(b).cmp(&completed(a)).then(calls(b).cmp(&calls(a))).then(depth(b).cmp(&depth(a)))
+            completed(b)
+                .cmp(&completed(a))
+                .then(calls(b).cmp(&calls(a)))
+                .then(depth(b).cmp(&depth(a)))
         });
         if all_paths.len() > max_paths {
             all_paths.truncate(max_paths);
@@ -2430,13 +2438,7 @@ impl GraphIndex {
                 current.push(c.id);
                 visited.insert(c.id);
                 Box::pin(self.dfs_call_paths_to_target(
-                    c.id,
-                    target_id,
-                    current,
-                    visited,
-                    max_depth,
-                    max_paths,
-                    paths,
+                    c.id, target_id, current, visited, max_depth, max_paths, paths,
                 ))
                 .await;
                 visited.remove(&c.id);
@@ -2596,10 +2598,7 @@ impl GraphIndex {
         let mut used = 0usize;
 
         while !st.frames.is_empty() {
-            if *total_steps >= FLOW_TOTAL_STEPS
-                || paths.len() >= max_paths
-                || work.len() > 4096
-            {
+            if *total_steps >= FLOW_TOTAL_STEPS || paths.len() >= max_paths || work.len() > 4096 {
                 return None;
             }
             if used >= state_budget {
@@ -2764,15 +2763,21 @@ impl GraphIndex {
                                         }
                                     }
                                     let mut handler_hit = None;
-                                    eprintln!("DBG3 cid={cid} cp={cp_pos} tries={open_tries:?} labels={:?} thrown={thrown_type:?}", fr.branch_labels);
+                                    eprintln!(
+                                        "DBG3 cid={cid} cp={cp_pos} tries={open_tries:?} labels={:?} thrown={thrown_type:?}",
+                                        fr.branch_labels
+                                    );
                                     for &ts in open_tries.iter().rev() {
-                                        let te =
-                                            matching_try_end(&fr.chain, ts).unwrap_or(fr.chain.len());
+                                        let te = matching_try_end(&fr.chain, ts)
+                                            .unwrap_or(fr.chain.len());
                                         let handlers = handler_positions(&fr.chain, te);
                                         if let Some(&cp) = handlers.iter().find(|&&hpos| {
                                             catch_matches(
                                                 thrown_type,
-                                                fr.branch_labels.iter().find(|b| b.position == hpos).map(|b| b.label.as_str()),
+                                                fr.branch_labels
+                                                    .iter()
+                                                    .find(|b| b.position == hpos)
+                                                    .map(|b| b.label.as_str()),
                                             )
                                         }) {
                                             handler_hit = Some((cp, open_tries.clone(), ts));
@@ -2787,7 +2792,8 @@ impl GraphIndex {
                                             .unwrap_or(fr.chain.len());
                                         nf.handlers.push(hend);
                                         // Try còn mở BÊN NGOÀI try vừa catch (rethrow).
-                                        let idx = open_tries.iter().position(|&t| t == ts).unwrap_or(0);
+                                        let idx =
+                                            open_tries.iter().position(|&t| t == ts).unwrap_or(0);
                                         nf.catch_stack = open_tries[..idx].to_vec();
                                         // Caller frame thật thay thế phần base đã unwind.
                                         st.base_depth = st.pending_callers.len();
@@ -2895,9 +2901,18 @@ impl GraphIndex {
                         continue;
                     }
                     MARKER_CALL_ENTER => {
-                        let callee = st.frames.last().unwrap().chain.get(pos + 1).copied().unwrap_or(0);
-                        self.sim_handle_call(&mut st, work, seen, flow_cache, pos, callee, paths, max_paths)
-                            .await;
+                        let callee = st
+                            .frames
+                            .last()
+                            .unwrap()
+                            .chain
+                            .get(pos + 1)
+                            .copied()
+                            .unwrap_or(0);
+                        self.sim_handle_call(
+                            &mut st, work, seen, flow_cache, pos, callee, paths, max_paths,
+                        )
+                        .await;
                         continue;
                     }
                     MARKER_CALL_EXIT => {
@@ -2906,10 +2921,8 @@ impl GraphIndex {
                         // khi phần tử kế là RETURN của chính frame (tránh double
                         // return: return-from-call rồi return-of-function).
                         let f0 = st.frames.last().unwrap();
-                        let next_is_return = f0
-                            .chain
-                            .get(pos + 1)
-                            .is_none_or(|&e| e == MARKER_RETURN);
+                        let next_is_return =
+                            f0.chain.get(pos + 1).is_none_or(|&e| e == MARKER_RETURN);
                         let leaf = f0.leaf_pending;
                         let f0 = st.frames.last_mut().unwrap();
                         f0.leaf_pending = false;
@@ -2961,7 +2974,11 @@ impl GraphIndex {
                     MARKER_LOOP_BACK => {
                         let (top_loop, d, top_id) = {
                             let f = st.frames.last().unwrap();
-                            (f.loops.last().copied(), st.base_depth + st.frames.len(), f.func_id)
+                            (
+                                f.loops.last().copied(),
+                                st.base_depth + st.frames.len(),
+                                f.func_id,
+                            )
                         };
                         if let Some((lp, back)) = top_loop {
                             let cnt = st
@@ -3021,11 +3038,19 @@ impl GraphIndex {
                                 .iter()
                                 .map(|&cp| (cp, f.labels.get(&cp).cloned()))
                                 .collect();
-                            (cases, close, st.base_depth + st.frames.len(), f.func_id, labels)
+                            (
+                                cases,
+                                close,
+                                st.base_depth + st.frames.len(),
+                                f.func_id,
+                                labels,
+                            )
                         };
                         // Fork path-per-case (mỗi case một path, gặp SWITCH_END
                         // thì thoát switch); path chính = no-match, nhảy past close.
-                        for (&cp, label) in cases.iter().zip(case_labels.into_iter().map(|(_, l)| l)) {
+                        for (&cp, label) in
+                            cases.iter().zip(case_labels.into_iter().map(|(_, l)| l))
+                        {
                             let mut cst = st.clone();
                             {
                                 let cf = cst.frames.last_mut().unwrap();
@@ -3095,7 +3120,10 @@ impl GraphIndex {
                 let f = st.frames.last().unwrap();
                 (
                     callee == 0 || callee == f.func_id || is_marker(callee),
-                    f.calls.get(&pos).cloned().unwrap_or_else(|| (String::new(), 0, None)),
+                    f.calls
+                        .get(&pos)
+                        .cloned()
+                        .unwrap_or_else(|| (String::new(), 0, None)),
                 )
             };
             if is_leaf {
@@ -3116,8 +3144,10 @@ impl GraphIndex {
                 f.pos += 1;
                 continue;
             }
-            self.sim_handle_call(&mut st, work, seen, flow_cache, pos, callee, paths, max_paths)
-                .await;
+            self.sim_handle_call(
+                &mut st, work, seen, flow_cache, pos, callee, paths, max_paths,
+            )
+            .await;
         }
         None
     }
@@ -3144,11 +3174,7 @@ impl GraphIndex {
         let in_reiterated_loop = f
             .loops
             .last()
-            .is_some_and(|&(lp, _)| {
-                st.loop_iters
-                    .get(&(f.func_id, lp))
-                    .is_some_and(|c| *c > 0)
-            });
+            .is_some_and(|&(lp, _)| st.loop_iters.get(&(f.func_id, lp)).is_some_and(|c| *c > 0));
         // Cycle guard: không descend vào hàm đã nằm trên stack (đệ quy trực
         // tiếp/gián tiếp) — chain của nó đã được trace ở frame đó.
         // Chỉ descend khi chain của callee gọn (<= MAX_DESCEND_CHAIN phần tử)
@@ -3179,14 +3205,12 @@ impl GraphIndex {
         let sym = self.symbols.get(&callee);
         st.steps.push(FlowStep {
             symbol_id: callee,
-            symbol_name: sym
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| {
-                    f.calls
-                        .get(&(pos + 1))
-                        .map(|(n, _, _)| n.clone())
-                        .unwrap_or_default()
-                }),
+            symbol_name: sym.map(|s| s.name.clone()).unwrap_or_else(|| {
+                f.calls
+                    .get(&(pos + 1))
+                    .map(|(n, _, _)| n.clone())
+                    .unwrap_or_default()
+            }),
             file: sym.map(|s| s.file.clone()).unwrap_or_default(),
             line: sym.map(|s| s.line).unwrap_or(0),
             action: TraceAction::Call,

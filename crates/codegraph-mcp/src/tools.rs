@@ -621,12 +621,12 @@ pub async fn dispatch_with_api(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(5)
                 .max(1) as usize; // caller hops — path caller→target dài hops+1
-            let max_paths = args
-                .get("max_paths")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(50) as usize;
+            let max_paths = args.get("max_paths").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
             let paths = api.trace_full_flow(target_id, max_depth, max_paths).await?;
-            emit_value(root.as_str(), serde_json::to_value(&paths).unwrap_or(Value::Null))
+            emit_value(
+                root.as_str(),
+                serde_json::to_value(&paths).unwrap_or(Value::Null),
+            )
         }
         "codegraph_search_flow" => {
             let pattern = arg_str(&args, "pattern")?;

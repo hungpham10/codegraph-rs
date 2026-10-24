@@ -6,8 +6,8 @@ use codegraph_core::{
     CallRecord, EffectType, MARKER_BRANCH_END, MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT,
     MARKER_CATCH_START, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK,
     MARKER_RETURN, MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START,
-    MARKER_THROW, MARKER_TRY_END, MARKER_TRY_START, PathEnding, ScopeLevel, Symbol, SymbolKind,
-    SYMBOL_BASE,
+    MARKER_THROW, MARKER_TRY_END, MARKER_TRY_START, PathEnding, SYMBOL_BASE, ScopeLevel, Symbol,
+    SymbolKind,
 };
 use codegraph_graph::{GraphIndex, ParseResult};
 use std::collections::HashMap;
@@ -87,7 +87,13 @@ async fn build_idx(chains: HashMap<u64, Vec<u64>>, calls: Vec<CallRecord>) -> Gr
     let mut idx = GraphIndex::in_memory();
     // register() gán id tuần tự theo thứ tự symbols trong Vec — giữ đúng
     // thứ tự [a, b, c, handler] để id khớp với consts A/B/C/H.
-    let symbols = vec![sym("a", A), sym("b", B), sym("c", C), sym("handler", H), sym("d", D)];
+    let symbols = vec![
+        sym("a", A),
+        sym("b", B),
+        sym("c", C),
+        sym("handler", H),
+        sym("d", D),
+    ];
     idx.ingest(&[result("t.py", symbols, chains, calls)], None)
         .await
         .unwrap();
@@ -99,7 +105,19 @@ async fn if_else_paths_continue_after_block() {
     // Regression: true path không được cắt ở IF_FALSE/BRANCH_END — code sau
     // if/else (call d) phải xuất hiện trong MỌI path.
     let chains = HashMap::from([
-        (A, vec![A, MARKER_IF_TRUE, B, MARKER_IF_FALSE, C, MARKER_BRANCH_END, D, MARKER_RETURN]),
+        (
+            A,
+            vec![
+                A,
+                MARKER_IF_TRUE,
+                B,
+                MARKER_IF_FALSE,
+                C,
+                MARKER_BRANCH_END,
+                D,
+                MARKER_RETURN,
+            ],
+        ),
         (D, vec![D, MARKER_RETURN]),
         (B, vec![B, MARKER_RETURN]),
         (C, vec![C, MARKER_RETURN]),
@@ -130,8 +148,17 @@ async fn switch_paths_per_case() {
         (
             A,
             vec![
-                A, MARKER_SWITCH_START, MARKER_SWITCH_CASE, B, MARKER_SWITCH_END,
-                MARKER_SWITCH_CASE, C, MARKER_SWITCH_END, MARKER_SWITCH_CLOSE, A, MARKER_RETURN,
+                A,
+                MARKER_SWITCH_START,
+                MARKER_SWITCH_CASE,
+                B,
+                MARKER_SWITCH_END,
+                MARKER_SWITCH_CASE,
+                C,
+                MARKER_SWITCH_END,
+                MARKER_SWITCH_CLOSE,
+                A,
+                MARKER_RETURN,
             ],
         ),
         (B, vec![B, MARKER_RETURN]),
@@ -155,7 +182,13 @@ async fn loop_break_exits_then_continues() {
         (
             A,
             vec![
-                A, MARKER_LOOP, B, MARKER_BREAK, MARKER_LOOP_BACK, A, MARKER_RETURN,
+                A,
+                MARKER_LOOP,
+                B,
+                MARKER_BREAK,
+                MARKER_LOOP_BACK,
+                A,
+                MARKER_RETURN,
             ],
         ),
         (B, vec![B, MARKER_RETURN]),
@@ -174,7 +207,10 @@ async fn loop_break_exits_then_continues() {
 async fn loop_max_iter_exits_and_continues() {
     // while { b(); } (không break) → path thoát qua max_iter rồi chạy code sau.
     let chains = HashMap::from([
-        (A, vec![A, MARKER_LOOP, B, MARKER_LOOP_BACK, A, MARKER_RETURN]),
+        (
+            A,
+            vec![A, MARKER_LOOP, B, MARKER_LOOP_BACK, A, MARKER_RETURN],
+        ),
         (B, vec![B, MARKER_RETURN]),
     ]);
     let idx = build_idx(chains, vec![]).await;
@@ -204,7 +240,10 @@ async fn call_descends_and_returns_with_stack_depths() {
     ]);
     let idx = build_idx(chains, vec![]).await;
     let paths = idx.trace_full_flow(B, 5, 50).await.unwrap();
-    assert!(paths.iter().any(|p| names(p).contains(&"c".to_string())), "phải descend vào c: {paths:?}");
+    assert!(
+        paths.iter().any(|p| names(p).contains(&"c".to_string())),
+        "phải descend vào c: {paths:?}"
+    );
     let p = paths
         .iter()
         .find(|p| names(p).contains(&"c".to_string()))
@@ -221,7 +260,11 @@ async fn call_descends_and_returns_with_stack_depths() {
     // Return của c rồi return của b.
     let returns: Vec<&codegraph_core::FlowStep> =
         p.steps.iter().filter(|s| s.symbol_name == "c").collect();
-    assert!(returns.iter().any(|s| s.action == codegraph_core::TraceAction::Return));
+    assert!(
+        returns
+            .iter()
+            .any(|s| s.action == codegraph_core::TraceAction::Return)
+    );
 }
 
 #[tokio::test]
@@ -232,9 +275,19 @@ async fn throw_unwinds_to_matching_catch() {
         (
             A,
             vec![
-                A, MARKER_TRY_START, MARKER_CALL_ENTER, B, MARKER_CALL_EXIT, MARKER_TRY_END,
-                MARKER_CATCH_START, MARKER_CALL_ENTER, H, MARKER_CALL_EXIT, MARKER_BRANCH_END,
-                A, MARKER_RETURN,
+                A,
+                MARKER_TRY_START,
+                MARKER_CALL_ENTER,
+                B,
+                MARKER_CALL_EXIT,
+                MARKER_TRY_END,
+                MARKER_CATCH_START,
+                MARKER_CALL_ENTER,
+                H,
+                MARKER_CALL_EXIT,
+                MARKER_BRANCH_END,
+                A,
+                MARKER_RETURN,
             ],
         ),
         (B, vec![B, MARKER_THROW]),
@@ -251,7 +304,9 @@ async fn throw_unwinds_to_matching_catch() {
     assert!(
         paths.iter().any(|p| {
             p.ended_with == PathEnding::Returned
-                && p.steps.iter().any(|s| s.action == codegraph_core::TraceAction::Throw)
+                && p.steps
+                    .iter()
+                    .any(|s| s.action == codegraph_core::TraceAction::Throw)
                 && names(p).contains(&"handler".to_string())
         }),
         "throw phải unwind về catch rồi chạy handler: {paths:?}"
@@ -265,9 +320,19 @@ async fn throw_wrong_type_unwinds_through() {
         (
             A,
             vec![
-                A, MARKER_TRY_START, MARKER_CALL_ENTER, B, MARKER_CALL_EXIT, MARKER_TRY_END,
-                MARKER_CATCH_START, MARKER_CALL_ENTER, H, MARKER_CALL_EXIT, MARKER_BRANCH_END,
-                A, MARKER_RETURN,
+                A,
+                MARKER_TRY_START,
+                MARKER_CALL_ENTER,
+                B,
+                MARKER_CALL_EXIT,
+                MARKER_TRY_END,
+                MARKER_CATCH_START,
+                MARKER_CALL_ENTER,
+                H,
+                MARKER_CALL_EXIT,
+                MARKER_BRANCH_END,
+                A,
+                MARKER_RETURN,
             ],
         ),
         (B, vec![B, MARKER_THROW]),
@@ -286,7 +351,9 @@ async fn throw_wrong_type_unwinds_through() {
         "type không khớp phải unwind hết: {paths:?}"
     );
     assert!(
-        !paths.iter().any(|p| names(p).contains(&"handler".to_string())),
+        !paths
+            .iter()
+            .any(|p| names(p).contains(&"handler".to_string())),
         "handler không được chạy khi type không khớp: {paths:?}"
     );
 }
@@ -299,9 +366,19 @@ async fn throw_crosses_two_frames_to_catch() {
         (
             A,
             vec![
-                A, MARKER_TRY_START, MARKER_CALL_ENTER, B, MARKER_CALL_EXIT, MARKER_TRY_END,
-                MARKER_CATCH_START, MARKER_CALL_ENTER, H, MARKER_CALL_EXIT, MARKER_BRANCH_END,
-                A, MARKER_RETURN,
+                A,
+                MARKER_TRY_START,
+                MARKER_CALL_ENTER,
+                B,
+                MARKER_CALL_EXIT,
+                MARKER_TRY_END,
+                MARKER_CATCH_START,
+                MARKER_CALL_ENTER,
+                H,
+                MARKER_CALL_EXIT,
+                MARKER_BRANCH_END,
+                A,
+                MARKER_RETURN,
             ],
         ),
         (B, vec![B, MARKER_CALL_ENTER, C, MARKER_CALL_EXIT]),
