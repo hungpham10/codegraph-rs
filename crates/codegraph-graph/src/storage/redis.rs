@@ -690,6 +690,54 @@ impl EntityStorage for RedisStorage {
         Ok(out)
     }
 
+    async fn set_file_deps(&mut self, path: &str, deps: &[u8]) -> Result<()> {
+        let mut conn = self.lock().await;
+        cmd("HSET")
+            .arg(self.kb.key("filedeps"))
+            .arg(path)
+            .arg(deps)
+            .query_async::<()>(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn all_file_deps(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut conn = self.lock().await;
+        let map: HashMap<String, Vec<u8>> = cmd("HGETALL")
+            .arg(self.kb.key("filedeps"))
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        let mut out: Vec<(String, Vec<u8>)> = map.into_iter().collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    async fn set_fn_ptr_assigns(&mut self, path: &str, assigns: &[u8]) -> Result<()> {
+        let mut conn = self.lock().await;
+        cmd("HSET")
+            .arg(self.kb.key("fnptpassigns"))
+            .arg(path)
+            .arg(assigns)
+            .query_async::<()>(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn all_fn_ptr_assigns(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut conn = self.lock().await;
+        let map: HashMap<String, Vec<u8>> = cmd("HGETALL")
+            .arg(self.kb.key("fnptpassigns"))
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
+        let mut out: Vec<(String, Vec<u8>)> = map.into_iter().collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
     async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<()> {
         let mut conn = self.lock().await;
         cmd("HSET")
@@ -784,6 +832,8 @@ impl EntityStorage for RedisStorage {
             .arg(self.kb.key("nextid"))
             .arg(self.kb.key("callrecords"))
             .arg(self.kb.key("callnames"))
+            .arg(self.kb.key("filedeps"))
+            .arg(self.kb.key("fnptpassigns"))
             .arg(self.kb.key("files"))
             .arg(self.kb.key("version"))
             .query_async::<()>(&mut *conn)

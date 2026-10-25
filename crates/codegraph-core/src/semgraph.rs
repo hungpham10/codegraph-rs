@@ -42,11 +42,17 @@ pub enum Marker {
     TryStart = 22,
     TryEnd = 23,
     CatchStart = 24,
+    /// Go `go f()` — call bất đồng bộ.
+    Go = 25,
+    /// Go `defer f()` — call hoãn đến khi return.
+    Defer = 26,
+    /// Call trong ngữ cảnh await (`await f()`, `await expr`) — async boundary.
+    Await = 27,
 }
 
 impl Marker {
     /// All variant values (các hằng MARKER_*).
-    pub const ALL: [Marker; 20] = [
+    pub const ALL: [Marker; 23] = [
         Marker::Loop,
         Marker::RecCall,
         Marker::IfTrue,
@@ -67,6 +73,9 @@ impl Marker {
         Marker::TryStart,
         Marker::TryEnd,
         Marker::CatchStart,
+        Marker::Go,
+        Marker::Defer,
+        Marker::Await,
     ];
 
     /// Giá trị u64 tương ứng (cho tương thích với chain cũ).
@@ -99,6 +108,9 @@ impl Marker {
             22 => Some(Marker::TryStart),
             23 => Some(Marker::TryEnd),
             24 => Some(Marker::CatchStart),
+            25 => Some(Marker::Go),
+            26 => Some(Marker::Defer),
+            27 => Some(Marker::Await),
             _ => None,
         }
     }
@@ -126,6 +138,9 @@ impl Marker {
             Marker::TryStart => "TRY_START",
             Marker::TryEnd => "TRY_END",
             Marker::CatchStart => "CATCH_START",
+            Marker::Go => "GO",
+            Marker::Defer => "DEFER",
+            Marker::Await => "AWAIT",
         }
     }
 
@@ -153,6 +168,9 @@ impl Marker {
             "try_start" => Some(Marker::TryStart),
             "try_end" => Some(Marker::TryEnd),
             "catch_start" => Some(Marker::CatchStart),
+            "go" => Some(Marker::Go),
+            "defer" => Some(Marker::Defer),
+            "await" => Some(Marker::Await),
             _ => None,
         }
     }
@@ -190,6 +208,9 @@ pub const MARKER_STMT_END: u64 = 21;
 pub const MARKER_TRY_START: u64 = 22;
 pub const MARKER_TRY_END: u64 = 23;
 pub const MARKER_CATCH_START: u64 = 24;
+pub const MARKER_GO: u64 = 25;
+pub const MARKER_DEFER: u64 = 26;
+pub const MARKER_AWAIT: u64 = 27;
 
 /// Helper để đọc chain sang danh sách marker — tiện cho code đọc.
 #[allow(dead_code)]
@@ -332,6 +353,8 @@ pub enum EffectType {
     FileRead,
     FileWrite,
     Log,
+    /// Go `panic(...)` / `log.Fatal*` / `os.Exit` — chấm dứt luồng (error edge).
+    Panic,
 }
 
 impl EffectType {
@@ -347,6 +370,7 @@ impl EffectType {
             Self::FileRead => "file_read",
             Self::FileWrite => "file_write",
             Self::Log => "log",
+            Self::Panic => "panic",
         }
     }
 
@@ -364,6 +388,7 @@ impl EffectType {
             "file_read" => Self::FileRead,
             "file_write" => Self::FileWrite,
             "log" => Self::Log,
+            "panic" => Self::Panic,
             _ => return None,
         })
     }
@@ -419,6 +444,14 @@ pub struct Symbol {
     #[serde(default)]
     pub annotations: Vec<Annotation>,
     pub language: String,
+    /// Trait/interface được impl block hiện thực (VD `impl Display for Foo`
+    /// → `"Display"`) — nguyên liệu cho dynamic-dispatch fan-out index.
+    #[serde(default)]
+    pub impl_trait: Option<String>,
+    /// Signature key chuẩn hóa `(param_types)(result_types)` (bỏ tên param) —
+    /// Go method-set matching so cả signature, không chỉ tên method.
+    #[serde(default)]
+    pub sig_key: Option<String>,
 }
 
 /// Annotation (VD `@Override`, `@Cacheable`).
@@ -431,10 +464,35 @@ pub struct Annotation {
     pub line: u32,
 }
 
+/// Call site được resolve bằng đường nào.
+///
+/// Dynamic dispatch (fan-out qua trait/interface hierarchy) KHÔNG ghi đè
+/// chain slot — candidates lưu trong [`CallRecord::candidates`], edges sinh
+/// riêng ở `build_call_indexes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "graphql", derive(async_graphql::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionKind {
+    /// Resolve tĩnh bằng exact name.
+    #[default]
+    Exact,
+    /// Qua alias `var.method` → `TypeName.method`.
+    Alias,
+    /// Qua short-name fallback (phần sau dấu chấm).
+    ShortName,
+    /// Dynamic: fan-out qua trait/interface hierarchy, có `candidates`.
+    HierarchyFanOut,
+    /// Dynamic: method thuộc trait/interface nhưng không có impl trong repo.
+    UnresolvedDynamic,
+    /// Dynamic: call qua biến function pointer được track qua assign-site
+    /// (`p = f;` / `void (*p)(int) = f;`) — C/C++ callback pattern.
+    PointerAssign,
+}
+
 /// Call record thô — persist để render flow khi call không resolve được.
 ///
 /// Vị trí `0` trong chain là placeholder, được thay bằng id thật khi resolve.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CallRecord {
     pub caller_id: SymbolId,
     /// Tên call đầy đủ (VD `fmt.Println`, `requests.get`).
@@ -457,6 +515,17 @@ pub struct CallRecord {
     /// `true` nếu assignment tạo biến mới, `false` nếu update biến đã có.
     #[serde(default)]
     pub is_new_var: bool,
+    /// Text receiver khi call dạng `recv.method()` (VD `self.boxed`) — hint
+    /// cho resolve phase quyết định dynamic dispatch.
+    #[serde(default)]
+    pub receiver_text: Option<String>,
+    /// Call site được resolve bằng đường nào.
+    #[serde(default)]
+    pub resolved_via: ResolutionKind,
+    /// Targets fan-out khi dynamic dispatch (trait/interface hierarchy).
+    /// KHÔNG đi vào chain — edges sinh riêng ở `build_call_indexes`.
+    #[serde(default)]
+    pub candidates: Vec<SymbolId>,
 }
 
 /// Giá trị của inverted index `call name → call sites` (dùng cho query
@@ -471,6 +540,12 @@ pub struct CallSite {
     pub is_loop_body: bool,
     #[serde(default)]
     pub arg_exprs: Vec<String>,
+    /// Call site được resolve bằng đường nào (dynamic fan-out flag).
+    #[serde(default)]
+    pub resolved_via: ResolutionKind,
+    /// Số target fan-out khi dynamic (0 = call tĩnh hoặc không fan-out).
+    #[serde(default)]
+    pub candidates: u32,
 }
 
 /// Thông tin file trong graph (không lưu content — dùng cho files/status).
@@ -534,6 +609,12 @@ pub struct FlowCall {
     /// `true` nếu assignment tạo biến mới, `false` nếu update biến đã có.
     #[serde(default)]
     pub is_new_var: bool,
+    /// Call site được resolve bằng đường nào (dynamic dispatch flag).
+    #[serde(default)]
+    pub resolved_via: ResolutionKind,
+    /// Tên các target fan-out khi dynamic dispatch (đã resolve id → name).
+    #[serde(default)]
+    pub candidate_names: Vec<String>,
 }
 
 /// Kết quả resolve symbol theo id/name — `ambiguous=true` khi name trùng nhiều
@@ -646,6 +727,7 @@ impl From<Marker> for TraceAction {
             Marker::Loop | Marker::LoopBack => Self::Loop,
             Marker::Break | Marker::Continue | Marker::StmtEnd => Self::Statement,
             Marker::TryStart | Marker::TryEnd | Marker::CatchStart => Self::Statement,
+            Marker::Go | Marker::Defer | Marker::Await => Self::Statement,
         }
     }
 }

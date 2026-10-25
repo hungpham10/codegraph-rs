@@ -36,6 +36,10 @@ struct ClassifierRule {
 /// Bảng default — thứ tự quan trọng, đọc từ trên xuống, pattern đầu tiên match
 /// sẽ thắng.
 const DEFAULT_RULES: &[(MatchTy, &str, EffectType)] = &[
+    // ── Terminal / error (xét trước mọi thứ — panic chấm dứt luồng) ──
+    (MatchTy::Exact, "panic", EffectType::Panic),
+    (MatchTy::Contains, "Fatal", EffectType::Panic),
+    (MatchTy::Contains, "os.Exit", EffectType::Panic),
     // ── Prefix-based (high precision) ──
     (MatchTy::Prefix, "http.", EffectType::HttpCall),
     (MatchTy::Prefix, "net/http.", EffectType::HttpCall),

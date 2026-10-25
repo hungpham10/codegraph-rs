@@ -1,5 +1,6 @@
-use crate::languages::common::{text, CallRule, LangSpec};
+use crate::languages::common::{named_children, text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
+use codegraph_graph::{FileDeps, ImportAlias};
 use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
@@ -42,11 +43,6 @@ pub static SPEC: LangSpec = LangSpec {
     ],
     param_kinds: &["parameter"],
     annotation_kinds: &["attribute"],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: None,
-    value_func_kinds: &[],
     calls: &[
         CallRule {
             kind: "invocation_expression",
@@ -63,33 +59,153 @@ pub static SPEC: LangSpec = LangSpec {
             target_fn: None,
         },
     ],
-    class_type_name: None,
-    if_kinds: &["if_statement"],
-    elif_kinds: &[],
-    if_block_kinds: &[],
-    loop_kinds: &[
-        "for_statement",
-        "foreach_statement",
-        "while_statement",
-        "do_statement",
-    ],
-    switch_kinds: &["switch_statement", "switch_expression"],
-    switch_block_kinds: &["switch_body"],
-    switch_case_kinds: &["switch_section", "switch_expression_arm"],
-    switch_default_kinds: &[],
-    return_kinds: &["return_statement"],
-    break_kinds: &["break_statement"],
-    continue_kinds: &["continue_statement"],
-    throw_kinds: &["throw_statement"],
-    try_kinds: &["try_statement"],
-    except_kinds: &["catch_clause", "catch_declaration"],
-    try_else_kinds: &[],
-    finally_kinds: &["finally_clause"],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec {
+        impl_trait_fn: Some(csharp_bases),
+        sig_key_fn: Some(csharp_signature_key),
+        file_deps_fn: Some(csharp_using_deps),
+        fn_ptr_assign_fn: Some(csharp_fn_value_assign),
+        ..HookSpec::none()
+    },
+    markers: MarkerSpec {
+        if_kinds: &["if_statement"],
+        loop_kinds: &[
+            "for_statement",
+            "foreach_statement",
+            "while_statement",
+            "do_statement",
+        ],
+        switch_kinds: &["switch_statement", "switch_expression"],
+        switch_block_kinds: &["switch_body"],
+        switch_case_kinds: &["switch_section", "switch_expression_arm"],
+        return_kinds: &["return_statement"],
+        break_kinds: &["break_statement"],
+        continue_kinds: &["continue_statement"],
+        throw_kinds: &["throw_statement"],
+        try_kinds: &["try_statement"],
+        except_kinds: &["catch_clause", "catch_declaration"],
+        finally_kinds: &["finally_clause"],
+        await_kinds: &["await_expression"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
+/// Bases: `class FileRepo : BaseRepo, IRepo` — base_list (node kind, unnamed
+/// child) chứa base_type con. Base class + interfaces → fan-out.
+fn csharp_bases(node: &Node, src: &[u8]) -> Option<String> {
+    if !matches!(
+        node.kind(),
+        "class_declaration" | "record_declaration" | "struct_declaration"
+    ) {
+        return None;
+    }
+    let base_list = node
+        .children(&mut node.walk())
+        .find(|c| c.kind() == "base_list")?;
+    let mut names: Vec<String> = Vec::new();
+    for ch in named_children(&base_list) {
+        if let Some(t) = text(&ch, src) {
+            let base = t.split('<').next().unwrap_or("").trim().to_string();
+            if !base.is_empty() {
+                names.push(base);
+            }
+        }
+    }
+    names.dedup();
+    (!names.is_empty()).then(|| names.join(","))
+}
+
+/// Signature key `(params)(return)` — method/constructor có type hints.
+fn csharp_signature_key(node: &Node, src: &[u8]) -> Option<String> {
+    if !matches!(
+        node.kind(),
+        "method_declaration" | "constructor_declaration"
+    ) {
+        return None;
+    }
+    let mut pt: Vec<String> = Vec::new();
+    if let Some(params) = node.child_by_field_name("parameters") {
+        for ch in named_children(&params) {
+            if let Some(t) = ch.child_by_field_name("type") {
+                if let Some(txt) = text(&t, src) {
+                    pt.push(txt.replace(' ', ""));
+                }
+            }
+        }
+    }
+    // C# return field là "returns" (không phải "type" như đa số grammar).
+    let rt = node
+        .child_by_field_name("returns")
+        .and_then(|t| text(&t, src))
+        .map(|t| t.replace(' ', ""))
+        .unwrap_or_else(|| "void".to_string());
+    Some(format!("({})({})", pt.join(","), rt))
+}
+
+/// `using` directives → FileDeps:
+/// - `using App.Repos;` → alias "Repos", path "App.Repos"
+/// - `using Db = App.Data;` → alias "Db", path "App.Data"
+///
+/// Function-value C#: `Action handler = Process;` — variable_declarator
+/// với value identifier thuần. Lambda (`x => ...`) — skip.
+fn csharp_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "variable_declarator" {
+        return None;
+    }
+    let name = node.child_by_field_name("name")?;
+    if name.kind() != "identifier" {
+        return None;
+    }
+    // C# grammar: value (Process) là identifier UNNAMED (không có field
+    // "value") — lấy identifier con CUỐI khác name.
+    let mut target: Option<Node> = None;
+    let mut cursor = node.walk();
+    for ch in node.children(&mut cursor) {
+        if ch.kind() == "identifier" && ch.id() != name.id() {
+            target = Some(ch);
+        }
+    }
+    let value = target?;
+    Some((text(&name, src)?, text(&value, src)?))
+}
+
+fn csharp_using_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
+    let mut imports: Vec<ImportAlias> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "using_directive" {
+            let mut alias: Option<String> = None;
+            let mut path: Option<String> = None;
+            let mut cursor = n.walk();
+            for ch in n.children(&mut cursor) {
+                match ch.kind() {
+                    "identifier" => alias = Some(text(&ch, src).unwrap_or_default()),
+                    "qualified_name" => path = text(&ch, src),
+                    _ => {}
+                }
+            }
+            drop(cursor);
+            if let Some(path) = path {
+                let alias =
+                    alias.unwrap_or_else(|| path.rsplit('.').next().unwrap_or("").to_string());
+                if !alias.is_empty() {
+                    imports.push(ImportAlias { alias, path });
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    if imports.is_empty() {
+        None
+    } else {
+        Some(FileDeps {
+            package: None,
+            imports,
+        })
+    }
+}
 
 crate::lang_parser!(CSharpParser, SPEC);
 

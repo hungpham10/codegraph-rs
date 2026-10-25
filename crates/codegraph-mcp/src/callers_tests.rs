@@ -32,6 +32,8 @@ async fn callers_timeout_resume_dispatch() {
         doc: None,
         annotations: vec![],
         language: "rust".into(),
+        impl_trait: None,
+        sig_key: None,
     };
     let mut idx = GraphIndex::open(&dsn).await.unwrap();
     idx.ingest(
@@ -43,6 +45,8 @@ async fn callers_timeout_resume_dispatch() {
             symbols: vec![symbol(a, "caller"), symbol(b, "callee")],
             chains: HashMap::from([(a, vec![a, b])]),
             calls: vec![],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         }],
         None,
     )

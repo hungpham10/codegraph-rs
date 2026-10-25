@@ -497,6 +497,8 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "test".to_string(),
+            impl_trait: None,
+            sig_key: None,
         }
     }
 
@@ -514,6 +516,8 @@ mod tests {
             symbols,
             chains,
             calls,
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         }
     }
 
@@ -630,6 +634,7 @@ index 0000000..2222222
             target_method: None,
             into_var: None,
             is_new_var: false,
+            ..Default::default()
         }];
         let r = result(
             "a.ts",

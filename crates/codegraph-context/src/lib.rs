@@ -291,6 +291,8 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
+            sig_key: None,
         }
     }
 
@@ -327,6 +329,8 @@ mod tests {
                 symbols: vec![sym_at("RestEndpoint", 100, abs.as_str())],
                 chains: std::collections::HashMap::new(),
                 calls: vec![],
+                fn_ptr_assigns: Vec::new(),
+                file_deps: None,
             };
             idx.ingest(&[r], None).await.unwrap();
         }
@@ -365,6 +369,8 @@ mod tests {
                 symbols: vec![sym("RestEndpoint", 100)],
                 chains: std::collections::HashMap::new(),
                 calls: vec![],
+                fn_ptr_assigns: Vec::new(),
+                file_deps: None,
             };
             idx.ingest(&[r], None).await.unwrap();
         }
@@ -397,6 +403,8 @@ mod tests {
                 symbols: vec![sym("RestEndpoint", 100)],
                 chains: std::collections::HashMap::new(),
                 calls: vec![],
+                fn_ptr_assigns: Vec::new(),
+                file_deps: None,
             };
             idx.ingest(&[r], None).await.unwrap();
         }

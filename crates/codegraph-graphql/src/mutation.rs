@@ -239,6 +239,63 @@ impl Mutation {
         })
     }
 
+    /// Đọc/ghi `[[effect_rules]]` trong .codegraph/config.toml — khai báo
+    /// hành vi của call/macro (VD macro exception-like → panic). op:
+    /// list|add|remove; áp dụng từ lần index kế tiếp.
+    async fn config_effects(
+        &self,
+        ctx: &Context<'_>,
+        op: String,
+        matcher: Option<String>,
+        text: Option<String>,
+        effect: Option<String>,
+        index: Option<i32>,
+    ) -> GqlResult<String> {
+        use codegraph_extract::config;
+        let state = ctx.data::<Arc<AppState>>()?;
+        let root = state
+            .session
+            .root()
+            .await
+            .ok_or_else(|| async_graphql::Error::new("session root unavailable"))?;
+        match op.as_str() {
+            "list" => {
+                let rules = config::list_effect_rules(&root);
+                if rules.is_empty() {
+                    return Ok("No effect rules configured.".into());
+                }
+                Ok(rules
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| format!("[{i}] {} {:?} → {}", r.matcher, r.text, r.effect))
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            "add" => config::add_effect_rule(
+                &root,
+                matcher.as_deref().unwrap_or(""),
+                text.as_deref().unwrap_or(""),
+                effect.as_deref().unwrap_or(""),
+            )
+            .map_err(async_graphql::Error::new)
+            .map(|_| "Added. Applies from the next index.".to_string()),
+            "remove" => {
+                let idx = index.unwrap_or(-1);
+                if idx < 0 {
+                    return Err(async_graphql::Error::new("remove requires index"));
+                }
+                match config::remove_effect_rule(&root, idx as usize) {
+                    Ok(true) => Ok(format!("Removed effect rule [{idx}].")),
+                    Ok(false) => Ok(format!("No rule at index {idx}.")),
+                    Err(e) => Err(async_graphql::Error::new(e)),
+                }
+            }
+            other => Err(async_graphql::Error::new(format!(
+                "unknown op {other:?} — list|add|remove"
+            ))),
+        }
+    }
+
     /// Xoá một document theo id.
     async fn graphdoc_remove(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         let state = ctx.data::<Arc<AppState>>()?;

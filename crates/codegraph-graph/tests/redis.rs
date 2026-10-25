@@ -36,6 +36,8 @@ fn sym(file: &str, name: &str, id: u64) -> Symbol {
         doc: None,
         annotations: Vec::new(),
         language: "ts".to_string(),
+        impl_trait: None,
+        sig_key: None,
     }
 }
 
@@ -53,6 +55,8 @@ fn result(
         symbols,
         chains,
         calls,
+        fn_ptr_assigns: Vec::new(),
+        file_deps: None,
     }
 }
 
@@ -89,6 +93,7 @@ async fn redis_ingest_reopen_roundtrip() {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        ..Default::default()
     }];
     let r = result(
         "a.ts",

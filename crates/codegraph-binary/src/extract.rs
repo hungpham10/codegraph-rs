@@ -154,6 +154,8 @@ fn do_extract(
             doc: None,
             annotations,
             language: "binary".to_string(),
+            impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -204,6 +206,8 @@ fn do_extract(
             doc: None,
             annotations,
             language: "binary".to_string(),
+            impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -247,6 +251,8 @@ fn do_extract(
                 line: 0,
             }],
             language: "binary".to_string(),
+            impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -271,6 +277,8 @@ fn do_extract(
             doc: s.string.as_deref().map(|s| s.chars().take(200).collect()),
             annotations: Vec::new(),
             language: "binary".to_string(),
+            impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -311,6 +319,8 @@ fn do_extract(
         symbols,
         chains,
         calls,
+        fn_ptr_assigns: Vec::new(),
+        file_deps: None,
     })
 }
 
@@ -552,6 +562,9 @@ fn build_chains_with_cfg(
                             target_method: None,
                             into_var: None,
                             is_new_var: false,
+                            receiver_text: None,
+                            resolved_via: codegraph_core::ResolutionKind::default(),
+                            candidates: Vec::new(),
                         });
                     }
                     "cjmp" => {
@@ -635,6 +648,9 @@ fn build_chains_from_graph(
                 target_method: None,
                 into_var: None,
                 is_new_var: false,
+                receiver_text: None,
+                resolved_via: codegraph_core::ResolutionKind::default(),
+                candidates: Vec::new(),
             });
         }
         chains.insert(caller_id, chain);

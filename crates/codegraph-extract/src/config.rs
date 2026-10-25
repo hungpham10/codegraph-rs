@@ -201,6 +201,129 @@ struct EmbeddingSection {
     execution_provider: Option<String>,
 }
 
+// ── Effect-rule runtime config (MCP `codegraph_config_effects` + GraphQL) ──
+// Macro/call semantics do LLM khai báo lúc runtime: đọc/ghi `[[effect_rules]]`
+// trong .codegraph/config.toml bằng toml_edit (giữ nguyên mọi section khác).
+// Orchestrator install_current lại config MỖI lần index → rule mới áp dụng
+// từ lần index kế tiếp (đồng thời install ngay cho thread hiện tại).
+
+/// Một rule trong file — dạng raw để list trung thực cả rule không hợp lệ.
+#[derive(Debug, Clone)]
+pub struct EffectRuleView {
+    /// `contains` | `prefix` | `exact`.
+    pub matcher: String,
+    pub text: String,
+    pub effect: String,
+}
+
+fn effect_config_path(root: &Utf8Path) -> Utf8PathBuf {
+    root.join(".codegraph").join("config.toml")
+}
+
+/// Đọc `[[effect_rules]]` hiện có (raw — kể cả effect string không hợp lệ).
+pub fn list_effect_rules(root: &Utf8Path) -> Vec<EffectRuleView> {
+    let Ok(raw) = std::fs::read_to_string(effect_config_path(root)) else {
+        return Vec::new();
+    };
+    let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(arr) = doc.get("effect_rules").and_then(|i| i.as_array_of_tables()) {
+        for t in arr.iter() {
+            let (matcher, text) = t
+                .get("call")
+                .and_then(|c| c.as_table())
+                .map(|c| {
+                    for k in ["contains", "prefix", "exact"] {
+                        if let Some(v) = c.get(k).and_then(|v| v.as_str()) {
+                            return (k.to_string(), v.to_string());
+                        }
+                    }
+                    (String::new(), String::new())
+                })
+                .unwrap_or_default();
+            let effect = t
+                .get("effect")
+                .and_then(|e| e.as_str())
+                .unwrap_or_default()
+                .to_string();
+            out.push(EffectRuleView {
+                matcher,
+                text,
+                effect,
+            });
+        }
+    }
+    out
+}
+
+/// Thêm rule (prepend vị trí cuối) + áp dụng ngay cho thread hiện tại.
+/// Rule config được xét TRƯỚC bảng default (first-match-wins).
+pub fn add_effect_rule(
+    root: &Utf8Path,
+    matcher: &str,
+    text: &str,
+    effect: &str,
+) -> Result<(), String> {
+    if !matches!(matcher, "contains" | "prefix" | "exact") {
+        return Err(format!(
+            "matcher phải là contains|prefix|exact, nhận được {matcher:?}"
+        ));
+    }
+    if codegraph_core::EffectType::parse(effect).is_none() {
+        return Err(format!(
+            "effect không hợp lệ {effect:?} — dùng snake_case: panic, sql_query, http_call, …"
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err("text matcher rỗng".into());
+    }
+    let path = effect_config_path(root);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("config.toml không parse được: {e}"))?;
+    if !doc.contains_key("effect_rules") {
+        doc["effect_rules"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let arr = doc["effect_rules"]
+        .as_array_of_tables_mut()
+        .ok_or("effect_rules phải là array-of-tables")?;
+    let mut call = toml_edit::Table::new();
+    call.insert(matcher, toml_edit::value(text));
+    let mut rule = toml_edit::Table::new();
+    rule.insert("call", toml_edit::Item::Table(call));
+    rule.insert("effect", toml_edit::value(effect));
+    arr.push(rule);
+    std::fs::write(&path, doc.to_string()).map_err(|e| e.to_string())?;
+    // Áp dụng ngay cho thread hiện tại (orchestrator tự reload mỗi index).
+    let classifier = ExtractConfig::load(root).effect_classifier;
+    crate::languages::effects::install_current(Some(std::sync::Arc::new(classifier)));
+    Ok(())
+}
+
+/// Xoá rule theo index (0-based, theo thứ tự `list_effect_rules`).
+pub fn remove_effect_rule(root: &Utf8Path, index: usize) -> Result<bool, String> {
+    let path = effect_config_path(root);
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("config.toml không parse được: {e}"))?;
+    let arr = doc["effect_rules"]
+        .as_array_of_tables_mut()
+        .ok_or("config không có [[effect_rules]]")?;
+    if index >= arr.len() {
+        return Ok(false);
+    }
+    arr.remove(index);
+    std::fs::write(&path, doc.to_string()).map_err(|e| e.to_string())?;
+    let classifier = ExtractConfig::load(root).effect_classifier;
+    crate::languages::effects::install_current(Some(std::sync::Arc::new(classifier)));
+    Ok(true)
+}
+
 /// Raw rule — `effect` để string để rule lỗi (unknown) bị skip + warn, không
 /// làm hỏng toàn bộ config; parse lại bằng `EffectType::parse`.
 #[derive(Debug, Deserialize)]
@@ -722,6 +845,38 @@ pub fn is_cpp_header(source: &str) -> bool {
         "::",
     ];
     MARKERS.iter().any(|m| sample.contains(m))
+}
+
+#[test]
+fn effect_rule_crud_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+    // init config mặc định
+    crate::project::init_project(&root).unwrap();
+    assert!(list_effect_rules(&root).is_empty());
+    // add: CHECK macro → panic (exception-like)
+    add_effect_rule(&root, "contains", "CHECK", "panic").unwrap();
+    add_effect_rule(&root, "prefix", "db.", "sql_query").unwrap();
+    let rules = list_effect_rules(&root);
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0].matcher, "contains");
+    assert_eq!(rules[0].text, "CHECK");
+    assert_eq!(rules[0].effect, "panic");
+    // rule thực sự hiệu lực với classifier load từ file
+    let classifier = ExtractConfig::load(&root).effect_classifier;
+    assert_eq!(classifier.classify("CHECK_OK").0, EffectType::Panic);
+    assert_eq!(classifier.classify("db.Query").0, EffectType::SqlQuery);
+    // invalidate: effect sai bị chặn, file không đổi
+    assert!(add_effect_rule(&root, "contains", "x", "nonsense").is_err());
+    assert_eq!(list_effect_rules(&root).len(), 2);
+    // remove theo index
+    assert!(remove_effect_rule(&root, 0).unwrap());
+    assert_eq!(list_effect_rules(&root).len(), 1);
+    assert_eq!(list_effect_rules(&root)[0].text, "db.");
+    assert!(!remove_effect_rule(&root, 9).unwrap());
+    // các section khác của config vẫn nguyên (storage etc. parse được)
+    let cfg = ExtractConfig::load(&root);
+    assert_eq!(cfg.storage.kind, StorageKind::Sqlite);
 }
 
 #[cfg(test)]

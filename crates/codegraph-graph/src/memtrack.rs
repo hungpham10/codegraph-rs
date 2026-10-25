@@ -246,6 +246,8 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "rust".into(),
+            impl_trait: None,
+            sig_key: None,
         };
         let mem = symbols_mem(&HashMap::from([(100, sym)]));
         assert_eq!(mem.entries, 1);
@@ -265,6 +267,8 @@ mod tests {
             condition: Some("x > 0".into()),
             is_loop_body: false,
             arg_exprs: vec!["a".into(), "b".into()],
+            resolved_via: codegraph_core::ResolutionKind::Exact,
+            candidates: 0,
         };
         let mem = call_names_mem(&HashMap::from([("lib::helper_0".to_string(), vec![site])]));
         assert_eq!(mem.entries, 1);

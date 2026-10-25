@@ -452,6 +452,24 @@ pub trait EntityStorage: Send + Sync {
         Ok(Vec::new())
     }
 
+    // ── File deps (package/imports) + fn-ptr assign-sites ──
+    // Persist ĐẦU VÀO thô của các dynamic index (file_imports/fn_ptr_index) —
+    // rebuild khi open (MCP restart không được mất resolution quality).
+    async fn set_file_deps(&mut self, _path: &str, _deps: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn all_file_deps(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+    async fn set_fn_ptr_assigns(&mut self, _path: &str, _assigns: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    async fn all_fn_ptr_assigns(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+
     // ── Call-name index ──
     /// Lưu inverted index `call name → call sites` (opaque bytes, JSON) — mặc
     /// định: no-op.

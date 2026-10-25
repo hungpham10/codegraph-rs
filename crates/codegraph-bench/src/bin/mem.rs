@@ -333,6 +333,8 @@ fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_gr
             doc: Some("Synthetic symbol để đo RAM — không phải code thật.".into()),
             annotations: Vec::<Annotation>::new(),
             language: "rust".into(),
+            impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -366,6 +368,9 @@ fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_gr
                     target_method: None,
                     into_var: None,
                     is_new_var: false,
+                    receiver_text: None,
+                    resolved_via: codegraph_core::ResolutionKind::default(),
+                    candidates: Vec::new(),
                 });
             }
         }
@@ -382,6 +387,8 @@ fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_gr
         symbols,
         chains,
         calls,
+        fn_ptr_assigns: Vec::new(),
+        file_deps: None,
     }
 }
 

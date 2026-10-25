@@ -21,7 +21,7 @@ use codegraph_core::{
     MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
     MARKER_TRY_END, MARKER_TRY_START, SYMBOL_BASE,
 };
-use codegraph_graph::ParseResult;
+use codegraph_graph::{FileDeps, FnPtrAssign, ParseResult};
 use std::collections::HashMap;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -34,6 +34,12 @@ pub type TargetFn = fn(&Node, &[u8]) -> (Option<String>, Option<String>);
 
 /// Post-process class symbol: `(class node, src) -> type_name` (VD TS heritage).
 pub type ClassTypeFn = fn(&Node, &[u8]) -> Option<String>;
+
+/// Gán function pointer: `(node, src) -> (var, target)`.
+pub type FnPtrAssignFn = fn(&Node, &[u8]) -> Option<(String, String)>;
+
+/// File deps (package/imports): root node -> FileDeps.
+pub type FileDepsFn = fn(&Node, &[u8]) -> Option<FileDeps>;
 
 /// Tìm name node cho hàm anonymous theo ngữ cảnh gán (`var a = function(){}`,
 /// `f = lambda: ...`) — node trả về làm cả name lẫn line để 2 pass khớp nhau.
@@ -51,8 +57,10 @@ pub struct CallRule {
     pub target_fn: Option<TargetFn>,
 }
 
-/// Declarative spec của một ngôn ngữ.
-#[allow(clippy::struct_excessive_bools)]
+/// Declarative spec của một ngôn ngữ — gom 3 nhóm: base / `hooks` (các
+/// callback tùy ngôn ngữ, mặc định none) / `markers` (control-flow rules).
+/// Mỗi language file chỉ khai field KHÁC default (FRU `..X::dflt()` hợp lệ
+/// trong `static`).
 pub struct LangSpec {
     pub language_name: &'static str,
     pub extensions: &'static [&'static str],
@@ -65,12 +73,16 @@ pub struct LangSpec {
     pub class_kinds: &'static [&'static str],
     /// Parameter node kinds — scope Parameter, scope_id = function chứa.
     pub param_kinds: &'static [&'static str],
+    /// Container node chứa parameter (Python `parameters`) — walker special-
+    /// case: identifier / typed_parameter / default_parameter con → Parameter.
+    pub param_container_kinds: &'static [&'static str],
+    /// `self.attr = <expr>` trong method → Field symbol (type từ RHS) —
+    /// Python/Ruby convention.
+    pub field_from_self_attr: bool,
     /// Annotation node kinds (VD Java `annotation`/`marker_annotation`).
     pub annotation_kinds: &'static [&'static str],
     /// Call rules.
     pub calls: &'static [CallRule],
-    /// Lấy type_name cho class symbol (TS `extends`/`implements` heritage).
-    pub class_type_name: Option<ClassTypeFn>,
     /// Cho phép dùng field `type` làm tên khi thiếu name/declarator (VD Rust
     /// `impl Foo` — tên nằm ở `type`). Bật cho ngôn ngữ không có node kind
     /// xung đột (C# `variable_declaration{type}` phải để false).
@@ -79,14 +91,104 @@ pub struct LangSpec {
     /// cùng tên, methods scoped vào impl. Bật flag để re-parent methods từ impl
     /// về symbol def cùng tên (xem `link_impl_methods_to_def`). Chỉ bật cho Rust.
     pub link_impl_methods: bool,
-    /// Hàm anonymous (lambda/function expression) gán qua biến/property: mượn
-    /// tên theo ngữ cảnh (JS `var a = function(){}`, Py `f = lambda: ...`,
-    /// Go `f := func(){}`, PHP `$f = function(){}`).
+    /// Callback tùy ngôn ngữ — mặc định [`HookSpec::none()`].
+    pub hooks: HookSpec,
+    /// Control-flow/marker rules + field names — mặc định [`MarkerSpec::dflt()`].
+    pub markers: MarkerSpec,
+}
+
+impl LangSpec {
+    /// Base defaults (các field bắt buộc — language/decls/calls — language
+    /// file PHẢI ghi đè; placeholder here chỉ để FRU hợp lệ).
+    pub const fn dflt() -> Self {
+        Self {
+            language_name: "",
+            extensions: &[],
+            ts_language: unspecified_ts_language,
+            decls: &[],
+            func_kinds: &[],
+            class_kinds: &[],
+            param_kinds: &[],
+            param_container_kinds: &[],
+            field_from_self_attr: false,
+            annotation_kinds: &[],
+            calls: &[],
+            name_type_fallback: false,
+            link_impl_methods: false,
+            hooks: HookSpec::none(),
+            markers: MarkerSpec::dflt(),
+        }
+    }
+}
+
+/// Placeholder cho [`LangSpec::dflt`] — language file không đặt `ts_language`
+/// sẽ panic lúc parse (không bao giờ chạy trong thực tế).
+fn unspecified_ts_language() -> tree_sitter::Language {
+    unreachable!("LangSpec.ts_language must be set per language")
+}
+
+/// Callback tùy ngôn ngữ — hầu hết là `None`; ngôn ngữ có hook mới ghi đè
+/// qua FRU: `hooks: HookSpec { receiver_fn: Some(..), ..HookSpec::none() }`.
+#[allow(clippy::type_complexity)]
+pub struct HookSpec {
+    /// Lấy type_name cho class symbol (TS `extends`/`implements` heritage).
+    pub class_type_name: Option<ClassTypeFn>,
+    /// Trait/interface mà impl block hiện thực (Rust `impl Display for Foo`,
+    /// Java `implements A, B`, C++ base class).
+    pub impl_trait_fn: Option<ClassTypeFn>,
+    /// Refine SymbolKind theo nội dung node (Go: `type_spec` có body
+    /// `interface_type` → Interface). Trả `None` để giữ kind từ `decls`.
+    pub refine_kind_fn: Option<fn(&Node) -> Option<SymbolKind>>,
+    /// Nhận gán function pointer (C/C++ `p = f;`, Go `handler := process`) —
+    /// quét full-tree, không phụ thuộc chain.
+    pub fn_ptr_assign_fn: Option<FnPtrAssignFn>,
+    /// Receiver base type của method (Go `func (f *File) Write` → `"File"`)
+    /// — nguyên liệu method-set matching; gán vào `Symbol.type_name`.
+    pub receiver_fn: Option<ClassTypeFn>,
+    /// Signature key chuẩn hóa `(param_types)(result_types)` cho
+    /// function/method — method-set matching so cả signature.
+    pub sig_key_fn: Option<ClassTypeFn>,
+    /// Signature text cho typedef/type_definition (C `typedef int (*cb)(int)`
+    /// — underlying type nằm trong declarator, field `type` chỉ giữ return).
+    pub typedef_sig_fn: Option<ClassTypeFn>,
+    /// Package + imports của file (Go package_clause/import_declaration) —
+    /// gọi 1 lần trên root node.
+    pub file_deps_fn: Option<FileDepsFn>,
+    /// Hàm anonymous gán qua biến/property: mượn tên theo ngữ cảnh
+    /// (JS `var a = function(){}`, Py `f = lambda: ...`).
     pub anonymous_name_fn: Option<ContextNameFn>,
-    /// Node kind của giá trị gán là hàm anonymous — decl Variable/Constant chứa
-    /// nó bị bỏ để tránh trùng tên với Function sinh từ `anonymous_name_fn`.
+    /// Node kind của giá trị gán là hàm anonymous — decl Variable/Constant
+    /// chứa nó bị bỏ để tránh trùng tên với Function từ `anonymous_name_fn`.
     pub value_func_kinds: &'static [&'static str],
-    // ── marker rules ──
+}
+
+impl HookSpec {
+    pub const fn none() -> Self {
+        Self {
+            class_type_name: None,
+            impl_trait_fn: None,
+            refine_kind_fn: None,
+            fn_ptr_assign_fn: None,
+            receiver_fn: None,
+            sig_key_fn: None,
+            typedef_sig_fn: None,
+            file_deps_fn: None,
+            anonymous_name_fn: None,
+            value_func_kinds: &[],
+        }
+    }
+}
+
+/// Control-flow/marker rules + field names — mỗi ngôn ngữ khai phần khác
+/// default (field names chuẩn: condition/consequence/alternative/body).
+pub struct MarkerSpec {
+    /// Node kinds launch goroutine (`go_statement`) — marker GO trong chain.
+    pub go_stmt_kinds: &'static [&'static str],
+    /// Node kinds defer call (`defer_statement`) — marker DEFER trong chain.
+    pub defer_kinds: &'static [&'static str],
+    /// Node kinds await (`await`, `await_expression`) — marker AWAIT trong
+    /// chain (async boundary: call bên trong mang ngữ cảnh await).
+    pub await_kinds: &'static [&'static str],
     pub if_kinds: &'static [&'static str],
     pub elif_kinds: &'static [&'static str],
     /// Block-like node kinds — fallback consequence/alternative khi thiếu field
@@ -111,6 +213,36 @@ pub struct LangSpec {
     pub if_cons_field: &'static str,
     pub if_alt_field: &'static str,
     pub body_field: &'static str,
+}
+
+impl MarkerSpec {
+    pub const fn dflt() -> Self {
+        Self {
+            go_stmt_kinds: &[],
+            defer_kinds: &[],
+            await_kinds: &[],
+            if_kinds: &[],
+            elif_kinds: &[],
+            if_block_kinds: &[],
+            loop_kinds: &[],
+            switch_kinds: &[],
+            switch_block_kinds: &[],
+            switch_case_kinds: &[],
+            switch_default_kinds: &[],
+            return_kinds: &[],
+            break_kinds: &[],
+            continue_kinds: &[],
+            throw_kinds: &[],
+            try_kinds: &[],
+            except_kinds: &[],
+            try_else_kinds: &[],
+            finally_kinds: &[],
+            if_cond_field: "condition",
+            if_cons_field: "consequence",
+            if_alt_field: "alternative",
+            body_field: "body",
+        }
+    }
 }
 
 // ==================== Pipeline ====================
@@ -182,7 +314,34 @@ pub fn run_spec(
         symbols,
         chains,
         calls,
+        fn_ptr_assigns: collect_fn_ptr_assigns(&root, src, spec),
+        file_deps: spec.hooks.file_deps_fn.and_then(|f| f(&root, src)),
     })
+}
+
+/// Quét full-tree thu gán function pointer (`spec.hooks.fn_ptr_assign_fn`) — gồm cả
+/// assignment ở scope toàn cục (`zend_compile_file = compile_file;`) mà pass
+/// chain (chỉ đi vào function body) không thấy.
+fn collect_fn_ptr_assigns(root: &Node, src: &[u8], spec: &LangSpec) -> Vec<FnPtrAssign> {
+    let Some(f) = spec.hooks.fn_ptr_assign_fn else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if let Some((var, target)) = f(&n, src) {
+            out.push(FnPtrAssign {
+                var,
+                target,
+                line: n.start_position().row as u32 + 1,
+            });
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    out
 }
 
 fn parse_tree(spec: &'static LangSpec, source: &str) -> Result<Tree> {
@@ -209,7 +368,173 @@ struct SymbolCtx<'a> {
 
 fn collect_symbols(node: &Node, ctx: &mut SymbolCtx, spec: &'static LangSpec) {
     let k = node.kind();
+    // Parameter container (Python `parameters`): identifier / typed_parameter /
+    // default_parameter con → Parameter symbol với type (nếu có type hint).
+    if spec.param_container_kinds.contains(&k) {
+        if let Some(&(fid, _)) = ctx.scope_stack.last() {
+            for ch in named_children(node) {
+                let (name_node, type_node) = match ch.kind() {
+                    "identifier" => (Some(ch), None),
+                    // Python: typed/default param; TS: required/optional param
+                    // (name ở field `pattern`, type ở field `type`); Ruby:
+                    // optional/keyword param (identifier con đầu); Scala:
+                    // parameter (field name + type).
+                    "typed_parameter" | "default_parameter" | "required_parameter"
+                    | "optional_parameter" | "keyword_parameter" | "parameter" => {
+                        let name = ch
+                            .child_by_field_name("name")
+                            .or_else(|| ch.child_by_field_name("pattern"))
+                            .or_else(|| {
+                                // typed_parameter (Python): identifier con
+                                // TRỰC TIẾP đầu tiên (first_identifier duyệt
+                                // DFS từ cuối → dính type).
+                                let mut cursor = ch.walk();
+                                let mut found = None;
+                                for g in ch.children(&mut cursor) {
+                                    if g.kind() == "identifier" {
+                                        found = Some(g);
+                                        break;
+                                    }
+                                }
+                                found
+                            });
+                        (name, ch.child_by_field_name("type"))
+                    }
+                    "rest_pattern" | "splat_parameter" => {
+                        // JS `...args` / Ruby `*args` — identifier con duy nhất.
+                        let mut cursor = ch.walk();
+                        let found = ch.children(&mut cursor).find(|g| g.kind() == "identifier");
+                        (found, None)
+                    }
+                    // Destructuring (`{a, b}`, `[x, y]`) — không tên đơn, bỏ.
+                    _ => (None, None),
+                };
+                let Some(name_node) = name_node else {
+                    continue;
+                };
+                let Some(pname) = text(&name_node, ctx.src) else {
+                    continue;
+                };
+                if pname.is_empty() {
+                    continue;
+                }
+                let id = ctx.next_id;
+                ctx.next_id += 1;
+                ctx.symbols.push(Symbol {
+                    id,
+                    name: pname,
+                    kind: SymbolKind::Parameter,
+                    scope: ScopeLevel::Parameter,
+                    scope_id: fid,
+                    type_ref: 0,
+                    // TS type_annotation text = ": Database" — bỏ ':' + trim.
+                    type_name: type_node
+                        .and_then(|t| text(&t, ctx.src))
+                        .map(|t| {
+                            t.trim_start_matches(':')
+                                .trim()
+                                .trim_end_matches('?')
+                                .to_string()
+                        })
+                        .filter(|t| !t.is_empty()),
+                    file: ctx.file.to_string(),
+                    line: name_node.start_position().row as u32 + 1,
+                    end_line: name_node.end_position().row as u32 + 1,
+                    signature: None,
+                    doc: None,
+                    annotations: Vec::new(),
+                    language: ctx.language.to_string(),
+                    impl_trait: None,
+                    sig_key: None,
+                });
+            }
+        }
+        // KHÔNG return — default_value có thể chứa call (`x=f()`).
+    }
+
+    // `self.attr = <expr>` trong method → Field (type từ RHS: `Database()`
+    // → "Database", identifier → text) — nguyên liệu instance-attr typing.
+    if spec.field_from_self_attr && k == "assignment" {
+        let left = node.child_by_field_name("left");
+        let is_self_attr = left.is_some_and(|left| {
+            if left.kind() != "attribute" {
+                return false;
+            }
+            let Some(obj) = left.child_by_field_name("object") else {
+                return false;
+            };
+            text(&obj, ctx.src).as_deref() == Some("self")
+                && left
+                    .child_by_field_name("attribute")
+                    .and_then(|a| text(&a, ctx.src))
+                    .is_some()
+        });
+        let attr_info = left
+            .unwrap()
+            .child_by_field_name("attribute")
+            .and_then(|a| text(&a, ctx.src).map(|t| (a, t)));
+        if is_self_attr {
+            let Some((attr, fname)) = attr_info else {
+                return;
+            };
+            // Class scope gần nhất trong stack (method đang đứng trong class).
+            let class_id = ctx
+                .scope_stack
+                .iter()
+                .rev()
+                .find(|(_, is_class)| *is_class)
+                .map(|(id, _)| *id);
+            if let Some(class_id) = class_id {
+                // RHS là call (`Database()`, `np.array()`) → type = callee text;
+                // RHS identifier thuần (`self.db = database`) → None (không có
+                // type info tin cậy).
+                let type_name = node.child_by_field_name("right").and_then(|right| {
+                    if right.kind() != "call" {
+                        return None;
+                    }
+                    right
+                        .child_by_field_name("function")
+                        .and_then(|f| text(&f, ctx.src))
+                });
+                // Dedup: gán nhiều lần cùng attr trong class → 1 Field.
+                let exists = ctx.symbols.iter().any(|s| {
+                    s.kind == SymbolKind::Field && s.scope_id == class_id && s.name == fname
+                });
+                if !exists {
+                    let id = ctx.next_id;
+                    ctx.next_id += 1;
+                    ctx.symbols.push(Symbol {
+                        id,
+                        name: fname,
+                        kind: SymbolKind::Field,
+                        scope: ScopeLevel::ObjectField,
+                        scope_id: class_id,
+                        type_ref: 0,
+                        type_name,
+                        file: ctx.file.to_string(),
+                        line: attr.start_position().row as u32 + 1,
+                        end_line: attr.end_position().row as u32 + 1,
+                        signature: None,
+                        doc: None,
+                        annotations: Vec::new(),
+                        language: ctx.language.to_string(),
+                        impl_trait: None,
+                        sig_key: None,
+                    });
+                }
+            }
+        }
+        // KHÔNG return — RHS vẫn cần đi qua pass chain (calls).
+    }
+
     if let Some(&(_, skind)) = spec.decls.iter().find(|(s, _)| *s == k) {
+        // Refine kind theo nội dung node (VD Go: `type_spec` chứa `interface_type`
+        // → Interface thay vì Class).
+        let skind = spec
+            .hooks
+            .refine_kind_fn
+            .and_then(|f| f(node))
+            .unwrap_or(skind);
         if let Some(id) = push_symbol(ctx, node, spec, skind, k) {
             let is_class = spec.class_kinds.contains(&k);
             let is_scope = is_class || spec.func_kinds.contains(&k);
@@ -254,6 +579,9 @@ fn push_symbol(
     } else {
         node.child_by_field_name("name")
             .or_else(|| name_from_declarator(node))
+            // Pattern identifier (Rust `db: Database`, `let cache = ..`) —
+            // TRƯỚC name_type_fallback để không lấy nhầm tên từ field `type`.
+            .or_else(|| node.child_by_field_name("pattern"))
             .or_else(|| {
                 if spec.name_type_fallback {
                     node.child_by_field_name("type")
@@ -267,7 +595,7 @@ fn push_symbol(
                 // Hàm anonymous gán qua biến/property thì mượn tên theo ngữ cảnh
                 // (JS `var a = function(){}`, Py `f = lambda: ...`).
                 if spec.func_kinds.contains(&node_kind) || spec.class_kinds.contains(&node_kind) {
-                    spec.anonymous_name_fn.and_then(|f| f(node))
+                    spec.hooks.anonymous_name_fn.and_then(|f| f(node))
                 } else {
                     first_identifier(node)
                 }
@@ -326,17 +654,43 @@ fn push_symbol(
                 .and_then(|t| text(&t, ctx.src))
         }
         SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum | SymbolKind::Module => {
-            spec.class_type_name.and_then(|f| f(node, ctx.src))
+            spec.hooks.class_type_name.and_then(|f| f(node, ctx.src))
         }
         _ => None,
+    };
+    let impl_trait = if matches!(kind, SymbolKind::Class | SymbolKind::Interface) {
+        spec.hooks.impl_trait_fn.and_then(|f| f(node, ctx.src))
+    } else {
+        None
+    };
+    // Method nhận receiver base type (Go method-set matching).
+    let type_name = if kind == SymbolKind::Method && type_name.is_none() {
+        spec.hooks
+            .receiver_fn
+            .and_then(|f| f(node, ctx.src))
+            .or(type_name)
+    } else {
+        type_name
+    };
+    let sig_key = if matches!(kind, SymbolKind::Method | SymbolKind::Function) {
+        spec.hooks.sig_key_fn.and_then(|f| f(node, ctx.src))
+    } else {
+        None
     };
 
     let line = name_node.start_position().row as u32 + 1;
     let end_line = node
-        .child_by_field_name(spec.body_field)
+        .child_by_field_name(spec.markers.body_field)
         .map(|b| b.end_position().row as u32 + 1)
         .unwrap_or_else(|| node.end_position().row as u32 + 1);
-    let signature = extract_signature(node, ctx.src, spec.body_field);
+    // Typedef/macro: signature = text định nghĩa (hook ƯU TIÊN — declarator
+    // chứa phần fn-ptr mà field `type` bỏ sót; extract_signature fallback).
+    let signature = (if kind == SymbolKind::Constant {
+        spec.hooks.typedef_sig_fn.and_then(|f| f(node, ctx.src))
+    } else {
+        None
+    })
+    .or_else(|| extract_signature(node, ctx.src, spec.markers.body_field));
     let annotations = extract_annotations(node, ctx.src, spec.annotation_kinds);
 
     ctx.symbols.push(Symbol {
@@ -354,6 +708,8 @@ fn push_symbol(
         doc: None,
         annotations,
         language: ctx.language.to_string(),
+        impl_trait,
+        sig_key,
     });
     Some(id)
 }
@@ -564,7 +920,7 @@ fn func_id_of<'a>(
     let name_node = node
         .child_by_field_name("name")
         .or_else(|| name_from_declarator(node))
-        .or_else(|| spec.anonymous_name_fn.and_then(|f| f(node)))
+        .or_else(|| spec.hooks.anonymous_name_fn.and_then(|f| f(node)))
         .or_else(|| first_identifier(node))?;
     let name = text(&name_node, src)?;
     let line = name_node.start_position().row as u32 + 1;
@@ -594,7 +950,7 @@ pub fn build_chain(
         chain: vec![func_id],
         calls: Vec::new(),
     };
-    if let Some(body) = node.child_by_field_name(spec.body_field) {
+    if let Some(body) = node.child_by_field_name(spec.markers.body_field) {
         walk_chain(&mut ctx, &body, 0, 0, None);
     } else {
         walk_chain(&mut ctx, node, 0, 0, None);
@@ -622,6 +978,30 @@ fn walk_chain(
     }
     let k = node.kind();
 
+    // 0. Concurrency semantics: `go f()` / `defer f()` — marker đặt TRƯỚC call
+    // để edge đọc được ngữ cảnh async/deferred (call bên trong emit bình thường).
+    if ctx.spec.markers.go_stmt_kinds.contains(&k) {
+        chain_push(ctx, codegraph_core::MARKER_GO);
+        for ch in named_children(node) {
+            walk_chain(ctx, &ch, depth + 1, in_loop, None);
+        }
+        return;
+    }
+    if ctx.spec.markers.defer_kinds.contains(&k) {
+        chain_push(ctx, codegraph_core::MARKER_DEFER);
+        for ch in named_children(node) {
+            walk_chain(ctx, &ch, depth + 1, in_loop, None);
+        }
+        return;
+    }
+    if ctx.spec.markers.await_kinds.contains(&k) {
+        chain_push(ctx, codegraph_core::MARKER_AWAIT);
+        for ch in named_children(node) {
+            walk_chain(ctx, &ch, depth + 1, in_loop, None);
+        }
+        return;
+    }
+
     // 1. Call sites.
     if let Some(rule) = ctx.spec.calls.iter().find(|r| r.kind == k) {
         chain_push(ctx, MARKER_CALL_ENTER);
@@ -634,9 +1014,9 @@ fn walk_chain(
     }
 
     // 2. If / ternary.
-    if ctx.spec.if_kinds.contains(&k) {
+    if ctx.spec.markers.if_kinds.contains(&k) {
         chain_push(ctx, MARKER_IF_TRUE);
-        let cond_node = node.child_by_field_name(ctx.spec.if_cond_field);
+        let cond_node = node.child_by_field_name(ctx.spec.markers.if_cond_field);
         let cond_text = cond_node
             .and_then(|c| text(&c, ctx.src))
             .unwrap_or_else(|| condition.clone().unwrap_or_default());
@@ -655,15 +1035,15 @@ fn walk_chain(
             walk_chain(ctx, &cn, depth + 1, in_loop, if_cond.clone());
         }
         let cons = node
-            .child_by_field_name(ctx.spec.if_cons_field)
+            .child_by_field_name(ctx.spec.markers.if_cons_field)
             .or_else(|| first_blockish(node, ctx.spec));
         if let Some(cons) = cons {
             walk_chain(ctx, &cons, depth + 1, in_loop, if_cond.clone());
             let alt = node
-                .child_by_field_name(ctx.spec.if_alt_field)
+                .child_by_field_name(ctx.spec.markers.if_alt_field)
                 .or_else(|| alternative_after_else(node, ctx.spec));
             if let Some(alt) = alt {
-                if ctx.spec.elif_kinds.contains(&alt.kind()) {
+                if ctx.spec.markers.elif_kinds.contains(&alt.kind()) {
                     walk_alternative(ctx, &alt, depth, in_loop, if_cond);
                 } else {
                     chain_push(ctx, MARKER_IF_FALSE);
@@ -682,7 +1062,7 @@ fn walk_chain(
     }
 
     // 3. Loops.
-    if ctx.spec.loop_kinds.contains(&k) {
+    if ctx.spec.markers.loop_kinds.contains(&k) {
         chain_push(ctx, MARKER_LOOP);
         // Condition của loop (while/for/do): emit calls trong condition + giữ
         // text làm metadata — trước đây loop mất cả calls lẫn text.
@@ -709,7 +1089,7 @@ fn walk_chain(
                 walk_chain(ctx, &cn, depth + 1, in_loop + 1, loop_cond.clone());
             }
         }
-        if let Some(body) = node.child_by_field_name(ctx.spec.body_field) {
+        if let Some(body) = node.child_by_field_name(ctx.spec.markers.body_field) {
             walk_chain(ctx, &body, depth + 1, in_loop + 1, loop_cond.clone());
         } else {
             walk_block(ctx, node, depth + 1, in_loop + 1, loop_cond.clone());
@@ -724,7 +1104,7 @@ fn walk_chain(
     }
 
     // 4. Switch.
-    if ctx.spec.switch_kinds.contains(&k) {
+    if ctx.spec.markers.switch_kinds.contains(&k) {
         // SWITCH_START: emit before discriminant, will hold discriminant text as label.
         chain_push(ctx, MARKER_SWITCH_START);
         // Discriminant: find the expression after "match" keyword, before match_block.
@@ -759,7 +1139,7 @@ fn walk_chain(
     }
 
     // 5. Return.
-    if ctx.spec.return_kinds.contains(&k) {
+    if ctx.spec.markers.return_kinds.contains(&k) {
         chain_push(ctx, MARKER_RETURN);
         for ch in named_children(node) {
             walk_chain(ctx, &ch, depth + 1, in_loop, condition.clone());
@@ -786,15 +1166,15 @@ fn walk_chain(
     }
 
     // 6. Break / continue / throw.
-    if ctx.spec.break_kinds.contains(&k) {
+    if ctx.spec.markers.break_kinds.contains(&k) {
         chain_push(ctx, MARKER_BREAK);
         return;
     }
-    if ctx.spec.continue_kinds.contains(&k) {
+    if ctx.spec.markers.continue_kinds.contains(&k) {
         chain_push(ctx, MARKER_CONTINUE);
         return;
     }
-    if ctx.spec.throw_kinds.contains(&k) {
+    if ctx.spec.markers.throw_kinds.contains(&k) {
         chain_push(ctx, MARKER_THROW);
         // Nhãn exception type ngay tại THROW (`throw ValueError(...)` →
         // `throw ValueError`) — interpreter dùng để match catch handler.
@@ -814,16 +1194,16 @@ fn walk_chain(
     //    TRY_START, pop tại TRY_END) và khi bắt THROW nhảy tới CATCH_START khớp type
     //    (nhãn `except <Type>`/`catch <Type>` gắn tại CATCH_START; handler không type
     //    khớp mọi exception).
-    if ctx.spec.try_kinds.contains(&k) {
+    if ctx.spec.markers.try_kinds.contains(&k) {
         chain_push(ctx, MARKER_TRY_START);
-        if let Some(body) = node.child_by_field_name(ctx.spec.body_field) {
+        if let Some(body) = node.child_by_field_name(ctx.spec.markers.body_field) {
             walk_chain(ctx, &body, depth + 1, in_loop, condition.clone());
         } else {
             walk_block(ctx, node, depth + 1, in_loop, condition.clone());
         }
         chain_push(ctx, MARKER_TRY_END);
         for ch in named_children(node) {
-            if ctx.spec.except_kinds.contains(&ch.kind()) {
+            if ctx.spec.markers.except_kinds.contains(&ch.kind()) {
                 chain_push(ctx, MARKER_CATCH_START);
                 // Nhãn handler: `except ValueError:` / `catch (IOException e)` → type.
                 let label = except_label(&ch, ctx.src)
@@ -835,12 +1215,12 @@ fn walk_chain(
             }
         }
         for ch in named_children(node) {
-            if ctx.spec.try_else_kinds.contains(&ch.kind()) {
+            if ctx.spec.markers.try_else_kinds.contains(&ch.kind()) {
                 walk_clause(ctx, &ch, depth + 1, in_loop, condition.clone());
             }
         }
         for ch in named_children(node) {
-            if ctx.spec.finally_kinds.contains(&ch.kind()) {
+            if ctx.spec.markers.finally_kinds.contains(&ch.kind()) {
                 walk_clause(ctx, &ch, depth + 1, in_loop, condition.clone());
             }
         }
@@ -908,9 +1288,9 @@ fn walk_alternative(
     in_loop: u32,
     condition: Option<String>,
 ) {
-    if ctx.spec.elif_kinds.contains(&alt.kind()) {
+    if ctx.spec.markers.elif_kinds.contains(&alt.kind()) {
         chain_push(ctx, MARKER_IF_TRUE);
-        let cond_node = alt.child_by_field_name(ctx.spec.if_cond_field);
+        let cond_node = alt.child_by_field_name(ctx.spec.markers.if_cond_field);
         let cond_text = cond_node
             .and_then(|c| text(&c, ctx.src))
             .unwrap_or_else(|| condition.clone().unwrap_or_default());
@@ -925,10 +1305,10 @@ fn walk_alternative(
         if let Some(cn) = cond_node {
             walk_chain(ctx, &cn, depth + 1, in_loop, elif_cond.clone());
         }
-        if let Some(cons) = alt.child_by_field_name(ctx.spec.if_cons_field) {
+        if let Some(cons) = alt.child_by_field_name(ctx.spec.markers.if_cons_field) {
             walk_chain(ctx, &cons, depth + 1, in_loop, elif_cond.clone());
         }
-        if let Some(next) = alt.child_by_field_name(ctx.spec.if_alt_field) {
+        if let Some(next) = alt.child_by_field_name(ctx.spec.markers.if_alt_field) {
             walk_alternative(ctx, &next, depth, in_loop, negate_cond(elif_cond));
         }
         chain_push(ctx, MARKER_BRANCH_END);
@@ -973,7 +1353,7 @@ fn walk_clause(
     in_loop: u32,
     condition: Option<String>,
 ) {
-    if let Some(b) = node.child_by_field_name(ctx.spec.body_field) {
+    if let Some(b) = node.child_by_field_name(ctx.spec.markers.body_field) {
         walk_chain(ctx, &b, depth, in_loop, condition);
     } else {
         walk_block(ctx, node, depth, in_loop, condition);
@@ -996,17 +1376,17 @@ fn negate_cond(cond: Option<String>) -> Option<String> {
 /// expression trần là child. Bỏ qua child có field (`for x in xs` — Python/JS
 /// `left`/`right` fielded, không phải condition).
 fn loop_condition_node<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Option<Node<'a>> {
-    if let Some(cn) = node.child_by_field_name(spec.if_cond_field) {
+    if let Some(cn) = node.child_by_field_name(spec.markers.if_cond_field) {
         return Some(cn);
     }
-    let body = node.child_by_field_name(spec.body_field);
+    let body = node.child_by_field_name(spec.markers.body_field);
     for i in 0..node.child_count() {
         let Some(ch) = node.child(i) else { continue };
         if !ch.is_named() || Some(ch) == body || node.field_name_for_child(i as u32).is_some() {
             continue;
         }
         // Go `for_clause` bọc init/cond/post — field nằm trên child.
-        if let Some(cn) = ch.child_by_field_name(spec.if_cond_field) {
+        if let Some(cn) = ch.child_by_field_name(spec.markers.if_cond_field) {
             return Some(cn);
         }
         // Go dạng `for cond {}`: child expression trần.
@@ -1028,13 +1408,13 @@ fn loop_condition_node<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Option<N
 fn first_blockish<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Option<Node<'a>> {
     named_children(node)
         .into_iter()
-        .find(|c| spec.if_block_kinds.contains(&c.kind()))
+        .find(|c| spec.markers.if_block_kinds.contains(&c.kind()))
 }
 
 /// Alternative fallback: blockish node đứng sau keyword `else` (Swift có node
 /// `else` tên riêng; các ngôn ngữ khác dùng field alternative).
 fn alternative_after_else<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Option<Node<'a>> {
-    if spec.if_block_kinds.is_empty() {
+    if spec.markers.if_block_kinds.is_empty() {
         return None;
     }
     let children = named_children(node);
@@ -1042,20 +1422,21 @@ fn alternative_after_else<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Optio
     children
         .iter()
         .skip(else_pos + 1)
-        .find(|c| spec.if_block_kinds.contains(&c.kind()))
+        .find(|c| spec.markers.if_block_kinds.contains(&c.kind()))
         .copied()
 }
 
 /// Gom case children của switch node (hỗ trợ wrapper như Java `switch_block`).
 fn switch_cases<'a>(node: &Node<'a>, spec: &'static LangSpec) -> Vec<Node<'a>> {
     let is_case = |n: &Node| {
-        spec.switch_case_kinds.contains(&n.kind()) || spec.switch_default_kinds.contains(&n.kind())
+        spec.markers.switch_case_kinds.contains(&n.kind())
+            || spec.markers.switch_default_kinds.contains(&n.kind())
     };
     let mut out = Vec::new();
     for ch in named_children(node) {
         if is_case(&ch) {
             out.push(ch);
-        } else if spec.switch_block_kinds.contains(&ch.kind()) {
+        } else if spec.markers.switch_block_kinds.contains(&ch.kind()) {
             for cc in named_children(&ch) {
                 if is_case(&cc) {
                     out.push(cc);
@@ -1109,6 +1490,9 @@ fn emit_case_label(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition: Opt
         target_method: None,
         into_var: None,
         is_new_var: false,
+        receiver_text: None,
+        resolved_via: codegraph_core::ResolutionKind::default(),
+        candidates: Vec::new(),
     });
 }
 
@@ -1199,6 +1583,9 @@ fn emit_branch_label(ctx: &mut ChainCtx, label: &str) {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        receiver_text: None,
+        resolved_via: codegraph_core::ResolutionKind::default(),
+        candidates: Vec::new(),
     });
 }
 
@@ -1263,6 +1650,9 @@ fn emit_call(
         .target_fn
         .map(|f| f(node, ctx.src))
         .unwrap_or((None, None));
+    // Receiver text: khi callee là `recv.method(...)` — hint cho resolve phase
+    // quyết định dynamic dispatch (trait/interface/function pointer).
+    let receiver_text = receiver_of_callee(&callee, ctx.src);
     ctx.calls.push(CallRecord {
         caller_id: ctx.func_id,
         call_name: name,
@@ -1277,7 +1667,23 @@ fn emit_call(
         target_method,
         into_var: None,
         is_new_var: false,
+        receiver_text,
+        resolved_via: codegraph_core::ResolutionKind::default(),
+        candidates: Vec::new(),
     });
+}
+
+/// Text receiver của callee dạng `recv.method()` — node con trước dấu chấm.
+/// `field_expression` (Rust/C/Java/Go/TS...) có field `object`; grammar khác
+/// fallback về named child đầu tiên. Trả `None` cho call thuần (`plain_fn()`).
+fn receiver_of_callee<'a>(callee: &Node<'a>, src: &'a [u8]) -> Option<String> {
+    if callee.kind() != "field_expression" && callee.kind() != "attribute" {
+        return None;
+    }
+    let obj = callee
+        .child_by_field_name("object")
+        .or_else(|| named_children(callee).into_iter().next())?;
+    text(&obj, src).filter(|t| !t.is_empty())
 }
 
 // ==================== Helpers ====================
@@ -1408,7 +1814,7 @@ fn is_conversion_declarator(n: &Node) -> bool {
 /// trung gian của phép gán (expression_list/assignment_statement/variable_list —
 /// Go/Lua bọc value) — không vào object/block để khỏi ăn nhầm hàm lồng sâu.
 fn decl_value_is_func(node: &Node, spec: &LangSpec) -> bool {
-    if spec.value_func_kinds.is_empty() {
+    if spec.hooks.value_func_kinds.is_empty() {
         return false;
     }
     decl_value_is_func_at(node, spec, 0)
@@ -1419,7 +1825,7 @@ fn decl_value_is_func_at(node: &Node, spec: &LangSpec, depth: u32) -> bool {
         return false;
     }
     named_children(node).into_iter().any(|ch| {
-        spec.value_func_kinds.contains(&ch.kind())
+        spec.hooks.value_func_kinds.contains(&ch.kind())
             || (matches!(
                 ch.kind(),
                 "expression_list" | "assignment_statement" | "variable_list"

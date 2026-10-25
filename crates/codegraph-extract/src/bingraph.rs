@@ -859,6 +859,8 @@ impl BinaryGraph {
                 args: rec.map(|r| r.arg_exprs.clone()).unwrap_or_default(),
                 into_var: rec.and_then(|r| r.into_var.clone()),
                 is_new_var: rec.map(|r| r.is_new_var).unwrap_or(false),
+                resolved_via: codegraph_core::ResolutionKind::default(),
+                candidate_names: Vec::new(),
             });
         }
         Ok(FlowResult {
@@ -915,6 +917,8 @@ mod tests {
             doc: None,
             annotations,
             language: "binary".to_string(),
+            impl_trait: None,
+            sig_key: None,
         }
     }
 
@@ -985,6 +989,7 @@ mod tests {
                     target_method: None,
                     into_var: None,
                     is_new_var: false,
+                    ..Default::default()
                 },
                 CallRecord {
                     caller_id: sid(1),
@@ -1000,8 +1005,11 @@ mod tests {
                     target_method: None,
                     into_var: None,
                     is_new_var: false,
+                    ..Default::default()
                 },
             ],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         }
     }
 

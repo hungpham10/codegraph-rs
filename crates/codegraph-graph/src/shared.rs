@@ -341,6 +341,8 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "ts".into(),
+            impl_trait: None,
+            sig_key: None,
         }
     }
 
@@ -355,6 +357,8 @@ mod tests {
             symbols,
             chains: std::collections::HashMap::from([(SYMBOL_BASE, chain)]),
             calls: Vec::<CallRecord>::new(),
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         }
     }
 

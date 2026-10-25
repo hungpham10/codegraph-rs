@@ -1,5 +1,6 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
+use codegraph_graph::{FileDeps, ImportAlias};
 use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
@@ -31,13 +32,8 @@ pub static SPEC: LangSpec = LangSpec {
     ],
     func_kinds: &["function_definition", "lambda"],
     class_kinds: &["class_definition"],
-    param_kinds: &[],
-    annotation_kinds: &[],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: Some(anonymous_name_node),
-    value_func_kinds: &[],
+    param_container_kinds: &["parameters"],
+    field_from_self_attr: true,
     calls: &[CallRule {
         kind: "call",
         callee_field: "function",
@@ -45,28 +41,182 @@ pub static SPEC: LangSpec = LangSpec {
         name_fn: None,
         target_fn: None,
     }],
-    class_type_name: None,
-    if_kinds: &["if_statement"],
-    elif_kinds: &["elif_clause"],
-    if_block_kinds: &[],
-    loop_kinds: &["for_statement", "while_statement"],
-    switch_kinds: &["match_statement"],
-    // Match cases nằm trong `block [body]` của match_statement.
-    switch_block_kinds: &["block"],
-    switch_case_kinds: &["case_clause"],
-    switch_default_kinds: &[],
-    return_kinds: &["return_statement"],
-    break_kinds: &["break_statement"],
-    continue_kinds: &["continue_statement"],
-    throw_kinds: &["raise_statement"],
-    try_kinds: &["try_statement"],
-    except_kinds: &["except_clause"],
-    try_else_kinds: &["else_clause"],
-    finally_kinds: &["finally_clause"],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec {
+        anonymous_name_fn: Some(anonymous_name_node),
+        impl_trait_fn: Some(py_superclasses),
+        file_deps_fn: Some(py_file_deps),
+        fn_ptr_assign_fn: Some(py_fn_value_assign),
+        ..HookSpec::none()
+    },
+    markers: MarkerSpec {
+        if_kinds: &["if_statement"],
+        elif_kinds: &["elif_clause"],
+        loop_kinds: &["for_statement", "while_statement"],
+        switch_kinds: &["match_statement"],
+        switch_block_kinds: &["block"],
+        switch_case_kinds: &["case_clause"],
+        return_kinds: &["return_statement"],
+        break_kinds: &["break_statement"],
+        continue_kinds: &["continue_statement"],
+        throw_kinds: &["raise_statement"],
+        try_kinds: &["try_statement"],
+        except_kinds: &["except_clause"],
+        try_else_kinds: &["else_clause"],
+        finally_kinds: &["finally_clause"],
+        await_kinds: &["await"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 crate::lang_parser!(PythonParser, SPEC);
+
+/// Base classes của class (`class File(Writer, close)` → "Writer,close") —
+/// đóng vai impl_trait: fan-out dynamic dispatch qua machinery impl_index
+/// (giống C++ base class: method của base + override ở subclass).
+fn py_superclasses(node: &Node, src: &[u8]) -> Option<String> {
+    if node.kind() != "class_definition" {
+        return None;
+    }
+    let supers = node.child_by_field_name("superclasses")?;
+    let mut names: Vec<String> = Vec::new();
+    let mut stack = vec![supers];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" => {
+                if let Some(t) = text(&n, src) {
+                    names.push(t);
+                }
+            }
+            "attribute" => {
+                if let Some(t) = text(&n, src) {
+                    names.push(t); // module.Class — giữ nguyên, split ',' sau
+                }
+            }
+            _ => {
+                let mut cursor = n.walk();
+                for ch in n.children(&mut cursor) {
+                    stack.push(ch);
+                }
+            }
+        }
+    }
+    names.dedup();
+    (!names.is_empty()).then(|| names.join(","))
+}
+
+/// Imports của file → FileDeps:
+/// - `import numpy as np` → alias "np", path "numpy"
+/// - `import os.path` → alias "path", path "os.path"
+/// - `from orders.models import Order, get_order as fetch`
+///   → alias "Order"/"fetch", path "orders.models.Order"/"orders.models.get_order"
+///
+/// Function-value assignment (Python):
+/// - `handler = process` — identifier = identifier thuần
+/// - `self.handler = process` — attribute object="self" (member fn assignment;
+///   call `self.handler()` có call_name "self.handler" khớp key).
+///
+/// `x = lambda ...` — target vô danh, skip.
+fn py_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "assignment" {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    let var = match left.kind() {
+        "identifier" => text(&left, src)?,
+        // `self.handler = fn` — attribute với object "self".
+        "attribute" => {
+            let obj = left.child_by_field_name("object")?;
+            if text(&obj, src).as_deref() != Some("self") {
+                return None;
+            }
+            text(&left, src)?
+        }
+        _ => return None,
+    };
+    if right.kind() != "identifier" {
+        return None;
+    }
+    let target = text(&right, src)?;
+    Some((var, target))
+}
+
+fn py_file_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
+    let mut imports: Vec<ImportAlias> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "import_statement" => {
+                let mut cursor = n.walk();
+                for ch in n.children(&mut cursor) {
+                    match ch.kind() {
+                        "dotted_name" => {
+                            let path = text(&ch, src).unwrap_or_default();
+                            let alias = path.rsplit('.').next().unwrap_or("").to_string();
+                            if !alias.is_empty() {
+                                imports.push(ImportAlias { alias, path });
+                            }
+                        }
+                        "aliased_import" => {
+                            let raw = text(&ch, src).unwrap_or_default();
+                            if let Some((p, a)) = raw.split_once(" as ") {
+                                imports.push(ImportAlias {
+                                    alias: a.trim().to_string(),
+                                    path: p.trim().to_string(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "import_from_statement" => {
+                let module_node = n.child_by_field_name("module_name");
+                let module = module_node
+                    .as_ref()
+                    .and_then(|m| text(m, src))
+                    .unwrap_or_default();
+                let mut cursor = n.walk();
+                for ch in n.children(&mut cursor) {
+                    // Bỏ node module_name — chỉ xử lý các name được import.
+                    if module_node.is_some_and(|m| m.id() == ch.id()) {
+                        continue;
+                    }
+                    match ch.kind() {
+                        "dotted_name" => {
+                            let name = text(&ch, src).unwrap_or_default();
+                            imports.push(ImportAlias {
+                                alias: name.clone(),
+                                path: format!("{module}.{name}"),
+                            });
+                        }
+                        "aliased_import" => {
+                            let raw = text(&ch, src).unwrap_or_default();
+                            if let Some((p, a)) = raw.split_once(" as ") {
+                                imports.push(ImportAlias {
+                                    alias: a.trim().to_string(),
+                                    path: format!("{}.{}", module, p.trim()),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {
+                let mut cursor = n.walk();
+                for ch in n.children(&mut cursor) {
+                    stack.push(ch);
+                }
+            }
+        }
+    }
+    if imports.is_empty() {
+        None
+    } else {
+        Some(FileDeps {
+            package: None,
+            imports,
+        })
+    }
+}

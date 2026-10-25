@@ -425,6 +425,7 @@ class Service {
         c,
         [
             "[TRY_START]",
+            "[AWAIT]",
             "[CALL_ENTER]",
             "this.repo.find",
             "[CALL_EXIT]",
@@ -1394,9 +1395,16 @@ fn f() {
     );
     // with the fix: into_var is now on the OUTERMOST call (map_err), not innermost (read)
     // this is correct because map_err produces the final value that gets assigned
+    // Macro invocation (cg_t!/cg_d!) giờ là call thật — edge macro → caller.
     assert_eq!(
         c,
         [
+            "[CALL_ENTER]",
+            "cg_t! → __t",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "cg_t! → __t_load",
+            "[CALL_EXIT]",
             "[CALL_ENTER]",
             "self.storage.read().await.load_all_symbols().await.map_err → symbols",
             "[CALL_ENTER]",
@@ -1405,6 +1413,9 @@ fn f() {
             "self.storage.read",
             "[CALL_EXIT]",
             "[CALL_EXIT]",
+            "[CALL_EXIT]",
+            "[CALL_ENTER]",
+            "cg_d!",
             "[CALL_EXIT]",
             "[CALL_ENTER]",
             "self.storage.read().await.load_all_files().await.map_err → self.files",
