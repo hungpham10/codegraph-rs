@@ -66,6 +66,8 @@ mod tests {
             symbols: vec![],
             chains: Default::default(),
             calls: vec![],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         };
         let entry = SourceEntry::with_stat("bin/ls", Some(1_000_000), Some(12345));
         let p = cache_path(&root, std::path::Path::new("/bin/ls"), &entry);

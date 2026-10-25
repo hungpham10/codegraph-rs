@@ -1,8 +1,65 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{text, CallRule, LangSpec};
 use codegraph_core::SymbolKind;
+use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_c::LANGUAGE.into()
+}
+
+/// Gán function pointer cho indirect-call resolution:
+/// - `zend_compile_file = compile_file;` (assignment_expression)
+/// - `zend_op_array *(*f)(...) = compile_file;` (init_declarator)
+///
+/// Chỉ nhận LHS/var là identifier thuần và RHS/value là identifier thuần
+/// (địa chỉ hàm; `&f` cũng qua identifier con).
+pub(crate) fn c_fn_ptr_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
+    match node.kind() {
+        "assignment_expression" => {
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            if left.kind() != "identifier" {
+                return None;
+            }
+            let var = text(&left, src)?;
+            let target = identifier_text(&right, src)?;
+            Some((var, target))
+        }
+        "init_declarator" => {
+            let declarator = node.child_by_field_name("declarator")?;
+            let value = node.child_by_field_name("value")?;
+            // `(*f)(...)` → pointer_declarator → function_declarator →
+            // pointer_declarator → identifier. Lấy identifier *cuối* của
+            // declarator (tên biến, không phải kiểu).
+            let var = last_identifier(&declarator, src)?;
+            let target = identifier_text(&value, src)?;
+            Some((var, target))
+        }
+        _ => None,
+    }
+}
+
+/// Text identifier khi node là identifier thuần. `&f` (address-of) cố tình bỏ —
+/// không có type info để phân biệt fn-ptr var với biến thường (tránh false positive).
+fn identifier_text(node: &Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => text(node, src),
+        _ => None,
+    }
+}
+
+/// Identifier cuối cùng trong declarator (tên biến — kiểu nằm trước).
+fn last_identifier(node: &Node, src: &[u8]) -> Option<String> {
+    if node.kind() == "identifier" {
+        return text(node, src);
+    }
+    let mut cursor = node.walk();
+    let mut found = None;
+    for ch in node.children(&mut cursor) {
+        if let Some(t) = last_identifier(&ch, src) {
+            found = Some(t); // giữ con CUỐI cùng có identifier
+        }
+    }
+    found
 }
 
 pub static SPEC: LangSpec = LangSpec {
@@ -37,6 +94,12 @@ pub static SPEC: LangSpec = LangSpec {
     }],
     class_type_name: None,
     impl_trait_fn: None,
+    refine_kind_fn: None,
+    fn_ptr_assign_fn: Some(c_fn_ptr_assign),
+    receiver_fn: None,
+    file_deps_fn: None,
+    go_stmt_kinds: &[],
+    defer_kinds: &[],
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],

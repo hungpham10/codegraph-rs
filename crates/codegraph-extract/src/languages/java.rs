@@ -108,7 +108,13 @@ pub static SPEC: LangSpec = LangSpec {
         },
     ],
     class_type_name: None,
-    impl_trait_fn: None,
+    impl_trait_fn: Some(java_interfaces),
+    refine_kind_fn: None,
+    fn_ptr_assign_fn: None,
+    receiver_fn: None,
+    file_deps_fn: None,
+    go_stmt_kinds: &[],
+    defer_kinds: &[],
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],
@@ -137,3 +143,21 @@ pub static SPEC: LangSpec = LangSpec {
 };
 
 crate::lang_parser!(JavaParser, SPEC);
+
+/// Danh sách interface mà class implements (`interfaces` field của
+/// class_declaration — type_list "Payment, Serializable"). Nhiều interface
+/// nối bằng ',' — `build_impl_index` split khi build fan-out index.
+fn java_interfaces(node: &Node, src: &[u8]) -> Option<String> {
+    if !matches!(node.kind(), "class_declaration" | "record_declaration") {
+        return None;
+    }
+    let tl = node.child_by_field_name("interfaces")?;
+    // Field text mang cả keyword: "implements Payment, Serializable".
+    let raw = text(&tl, src)?.replacen("implements", "", 1);
+    let names: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!names.is_empty()).then(|| names.join(","))
+}

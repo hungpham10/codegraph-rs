@@ -50,6 +50,12 @@ pub static SPEC: LangSpec = LangSpec {
     }],
     class_type_name: None,
     impl_trait_fn: None,
+    refine_kind_fn: None,
+    fn_ptr_assign_fn: None,
+    receiver_fn: None,
+    file_deps_fn: None,
+    go_stmt_kinds: &[],
+    defer_kinds: &[],
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     // Swift if/for không có consequence/body field — body là node `statements` trần.

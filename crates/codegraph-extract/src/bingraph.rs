@@ -1007,6 +1007,8 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         }
     }
 

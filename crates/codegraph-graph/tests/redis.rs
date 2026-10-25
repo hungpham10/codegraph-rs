@@ -54,6 +54,8 @@ fn result(
         symbols,
         chains,
         calls,
+        fn_ptr_assigns: Vec::new(),
+        file_deps: None,
     }
 }
 

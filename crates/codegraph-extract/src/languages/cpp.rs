@@ -1,8 +1,49 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{text, CallRule, LangSpec};
 use codegraph_core::SymbolKind;
+use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_cpp::LANGUAGE.into()
+}
+
+/// Base class của class/struct có inheritance (`base_class_clause`:
+/// `class D : public B1, private B2` → "B1,B2"). Base đóng vai interface cho
+/// dynamic dispatch: method `virtual` của base + override ở derived.
+fn cpp_base_classes(node: &Node, src: &[u8]) -> Option<String> {
+    if !matches!(node.kind(), "class_specifier" | "struct_specifier") {
+        return None;
+    }
+    let base = node
+        .children(&mut node.walk())
+        .find(|c| c.kind() == "base_class_clause")?;
+    let mut names: Vec<String> = Vec::new();
+    let mut stack = vec![base];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "type_identifier" | "qualified_identifier" => {
+                if let Some(t) = text(&n, src) {
+                    // Template: `Base<T>` → "Base".
+                    let name = t.split('<').next().unwrap_or("").trim().to_string();
+                    if !name.is_empty()
+                        && !matches!(
+                            name.as_str(),
+                            "virtual" | "public" | "private" | "protected"
+                        )
+                    {
+                        names.push(name);
+                    }
+                }
+            }
+            _ => {
+                let mut cursor = n.walk();
+                for ch in n.children(&mut cursor) {
+                    stack.push(ch);
+                }
+            }
+        }
+    }
+    names.dedup();
+    (!names.is_empty()).then(|| names.join(","))
 }
 
 pub static SPEC: LangSpec = LangSpec {
@@ -38,7 +79,13 @@ pub static SPEC: LangSpec = LangSpec {
         target_fn: None,
     }],
     class_type_name: None,
-    impl_trait_fn: None,
+    impl_trait_fn: Some(cpp_base_classes),
+    refine_kind_fn: None,
+    fn_ptr_assign_fn: Some(crate::languages::c::c_fn_ptr_assign),
+    receiver_fn: None,
+    file_deps_fn: None,
+    go_stmt_kinds: &[],
+    defer_kinds: &[],
     if_kinds: &["if_statement"],
     elif_kinds: &[],
     if_block_kinds: &[],

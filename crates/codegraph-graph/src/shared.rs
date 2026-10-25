@@ -356,6 +356,8 @@ mod tests {
             symbols,
             chains: std::collections::HashMap::from([(SYMBOL_BASE, chain)]),
             calls: Vec::<CallRecord>::new(),
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         }
     }
 

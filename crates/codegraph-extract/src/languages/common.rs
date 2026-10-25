@@ -21,7 +21,7 @@ use codegraph_core::{
     MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
     MARKER_TRY_END, MARKER_TRY_START, SYMBOL_BASE,
 };
-use codegraph_graph::ParseResult;
+use codegraph_graph::{FileDeps, FnPtrAssign, ParseResult};
 use std::collections::HashMap;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -34,6 +34,12 @@ pub type TargetFn = fn(&Node, &[u8]) -> (Option<String>, Option<String>);
 
 /// Post-process class symbol: `(class node, src) -> type_name` (VD TS heritage).
 pub type ClassTypeFn = fn(&Node, &[u8]) -> Option<String>;
+
+/// Gán function pointer: `(node, src) -> (var, target)`.
+pub type FnPtrAssignFn = fn(&Node, &[u8]) -> Option<(String, String)>;
+
+/// File deps (package/imports): root node -> FileDeps.
+pub type FileDepsFn = fn(&Node, &[u8]) -> Option<FileDeps>;
 
 /// Tìm name node cho hàm anonymous theo ngữ cảnh gán (`var a = function(){}`,
 /// `f = lambda: ...`) — node trả về làm cả name lẫn line để 2 pass khớp nhau.
@@ -74,6 +80,24 @@ pub struct LangSpec {
     /// Trait/interface mà impl block hiện thực: `(class node, src) -> trait name`
     /// (Rust `impl Display for Foo` → `"Display"`).
     pub impl_trait_fn: Option<ClassTypeFn>,
+    /// Refine SymbolKind theo nội dung node (Go: `type_spec` có body
+    /// `interface_type` → Interface). Trả `None` để giữ kind từ `decls`.
+    pub refine_kind_fn: Option<fn(&Node) -> Option<SymbolKind>>,
+    /// Nhận gán function pointer `(node, src) -> (var, target)` — C/C++
+    /// `p = f;` / `void (*p)(int) = f;`, Go `handler := process`. Quét
+    /// full-tree, không phụ thuộc chain.
+    pub fn_ptr_assign_fn: Option<FnPtrAssignFn>,
+    /// Receiver base type của method (Go: `func (f *File) Write` -> `"File"`),
+    /// nguyên liệu method-set matching cho implicit interface — gán vào
+    /// `Symbol.type_name` của method.
+    pub receiver_fn: Option<ClassTypeFn>,
+    /// Package + imports cua file (Go package_clause/import_declaration) —
+    /// goi 1 lan tren root node.
+    pub file_deps_fn: Option<FileDepsFn>,
+    /// Node kinds launch goroutine (`go_statement`) — marker GO trong chain.
+    pub go_stmt_kinds: &'static [&'static str],
+    /// Node kinds defer call (`defer_statement`) — marker DEFER trong chain.
+    pub defer_kinds: &'static [&'static str],
     /// Cho phép dùng field `type` làm tên khi thiếu name/declarator (VD Rust
     /// `impl Foo` — tên nằm ở `type`). Bật cho ngôn ngữ không có node kind
     /// xung đột (C# `variable_declaration{type}` phải để false).
@@ -185,7 +209,34 @@ pub fn run_spec(
         symbols,
         chains,
         calls,
+        fn_ptr_assigns: collect_fn_ptr_assigns(&root, src, spec),
+        file_deps: spec.file_deps_fn.and_then(|f| f(&root, src)),
     })
+}
+
+/// Quét full-tree thu gán function pointer (`spec.fn_ptr_assign_fn`) — gồm cả
+/// assignment ở scope toàn cục (`zend_compile_file = compile_file;`) mà pass
+/// chain (chỉ đi vào function body) không thấy.
+fn collect_fn_ptr_assigns(root: &Node, src: &[u8], spec: &LangSpec) -> Vec<FnPtrAssign> {
+    let Some(f) = spec.fn_ptr_assign_fn else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if let Some((var, target)) = f(&n, src) {
+            out.push(FnPtrAssign {
+                var,
+                target,
+                line: n.start_position().row as u32 + 1,
+            });
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    out
 }
 
 fn parse_tree(spec: &'static LangSpec, source: &str) -> Result<Tree> {
@@ -213,6 +264,9 @@ struct SymbolCtx<'a> {
 fn collect_symbols(node: &Node, ctx: &mut SymbolCtx, spec: &'static LangSpec) {
     let k = node.kind();
     if let Some(&(_, skind)) = spec.decls.iter().find(|(s, _)| *s == k) {
+        // Refine kind theo nội dung node (VD Go: `type_spec` chứa `interface_type`
+        // → Interface thay vì Class).
+        let skind = spec.refine_kind_fn.and_then(|f| f(node)).unwrap_or(skind);
         if let Some(id) = push_symbol(ctx, node, spec, skind, k) {
             let is_class = spec.class_kinds.contains(&k);
             let is_scope = is_class || spec.func_kinds.contains(&k);
@@ -337,6 +391,14 @@ fn push_symbol(
         spec.impl_trait_fn.and_then(|f| f(node, ctx.src))
     } else {
         None
+    };
+    // Method nhận receiver base type (Go method-set matching).
+    let type_name = if kind == SymbolKind::Method && type_name.is_none() {
+        spec.receiver_fn
+            .and_then(|f| f(node, ctx.src))
+            .or(type_name)
+    } else {
+        type_name
     };
 
     let line = name_node.start_position().row as u32 + 1;
@@ -630,6 +692,23 @@ fn walk_chain(
         return;
     }
     let k = node.kind();
+
+    // 0. Concurrency semantics: `go f()` / `defer f()` — marker đặt TRƯỚC call
+    // để edge đọc được ngữ cảnh async/deferred (call bên trong emit bình thường).
+    if ctx.spec.go_stmt_kinds.contains(&k) {
+        chain_push(ctx, codegraph_core::MARKER_GO);
+        for ch in named_children(node) {
+            walk_chain(ctx, &ch, depth + 1, in_loop, None);
+        }
+        return;
+    }
+    if ctx.spec.defer_kinds.contains(&k) {
+        chain_push(ctx, codegraph_core::MARKER_DEFER);
+        for ch in named_children(node) {
+            walk_chain(ctx, &ch, depth + 1, in_loop, None);
+        }
+        return;
+    }
 
     // 1. Call sites.
     if let Some(rule) = ctx.spec.calls.iter().find(|r| r.kind == k) {

@@ -44,6 +44,8 @@ async fn callers_timeout_resume_dispatch() {
             symbols: vec![symbol(a, "caller"), symbol(b, "callee")],
             chains: HashMap::from([(a, vec![a, b])]),
             calls: vec![],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         }],
         None,
     )

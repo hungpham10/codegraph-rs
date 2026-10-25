@@ -63,6 +63,8 @@ async fn seed_index(path: &str) -> (u64, u64, u64) {
             is_new_var: false,
             ..Default::default()
         }],
+        fn_ptr_assigns: Vec::new(),
+        file_deps: None,
     };
     idx.ingest(&[r], None).await.unwrap();
     (caller, callee, helper)
@@ -295,6 +297,8 @@ async fn seed_many(db: &str, count: usize) {
             symbols: vec![sym(id, &name)],
             chains: HashMap::new(),
             calls: vec![],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         });
     }
     idx.ingest(&results, None).await.unwrap();
@@ -325,6 +329,8 @@ async fn seed_annotations(db: &str, count: usize) {
             symbols: vec![s],
             chains: HashMap::new(),
             calls: vec![],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         });
     }
     idx.ingest(&results, None).await.unwrap();
@@ -361,6 +367,8 @@ async fn seed_references(db: &str, count: usize) {
                 is_new_var: false,
                 ..Default::default()
             }],
+            fn_ptr_assigns: Vec::new(),
+            file_deps: None,
         });
     }
     idx.ingest(&results, None).await.unwrap();

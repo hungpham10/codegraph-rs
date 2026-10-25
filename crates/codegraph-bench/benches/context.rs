@@ -54,6 +54,8 @@ fn fixture(fan_in: usize) -> ParseResult {
         symbols,
         chains,
         calls: Vec::new(),
+        fn_ptr_assigns: Vec::new(),
+        file_deps: None,
     }
 }
 

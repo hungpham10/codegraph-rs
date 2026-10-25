@@ -89,6 +89,7 @@ impl Orchestrator {
         // GraphIndex). `[bingraph]` tắt → giữ hành vi cũ (đẩy vào code index).
         #[cfg(feature = "binary")]
         let mut bin_stats: Vec<ParseResult> = Vec::new();
+
         #[cfg(feature = "binary")]
         {
             let (bin, bin_skipped) = codegraph_binary::collect_binaries(root, &config.binary);
@@ -125,14 +126,17 @@ impl Orchestrator {
             .as_ref()
             .map(|bar| Arc::new(IngestBar(bar.clone())) as Arc<dyn IngestProgress>);
         index.ingest(&parsed, ingest_progress).await?;
+
         // Finish the progress bar on success.
         if let Some(bar) = progress {
             bar.finish_with_message("Indexing complete");
         }
+
         #[allow(unused_mut)]
         let mut all_for_stats = parsed;
         #[cfg(feature = "binary")]
         all_for_stats.extend(bin_stats);
+
         Ok(stats_of(&all_for_stats, skipped))
     }
 
@@ -162,6 +166,7 @@ impl Orchestrator {
             .collect();
         let mut parsed = Vec::new();
         let mut skipped = 0u64;
+
         for r in results {
             match r {
                 Ok(Some(p)) => parsed.push(p),

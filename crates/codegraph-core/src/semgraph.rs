@@ -42,11 +42,15 @@ pub enum Marker {
     TryStart = 22,
     TryEnd = 23,
     CatchStart = 24,
+    /// Go `go f()` — call bất đồng bộ.
+    Go = 25,
+    /// Go `defer f()` — call hoãn đến khi return.
+    Defer = 26,
 }
 
 impl Marker {
     /// All variant values (các hằng MARKER_*).
-    pub const ALL: [Marker; 20] = [
+    pub const ALL: [Marker; 22] = [
         Marker::Loop,
         Marker::RecCall,
         Marker::IfTrue,
@@ -67,6 +71,8 @@ impl Marker {
         Marker::TryStart,
         Marker::TryEnd,
         Marker::CatchStart,
+        Marker::Go,
+        Marker::Defer,
     ];
 
     /// Giá trị u64 tương ứng (cho tương thích với chain cũ).
@@ -99,6 +105,8 @@ impl Marker {
             22 => Some(Marker::TryStart),
             23 => Some(Marker::TryEnd),
             24 => Some(Marker::CatchStart),
+            25 => Some(Marker::Go),
+            26 => Some(Marker::Defer),
             _ => None,
         }
     }
@@ -126,6 +134,8 @@ impl Marker {
             Marker::TryStart => "TRY_START",
             Marker::TryEnd => "TRY_END",
             Marker::CatchStart => "CATCH_START",
+            Marker::Go => "GO",
+            Marker::Defer => "DEFER",
         }
     }
 
@@ -153,6 +163,8 @@ impl Marker {
             "try_start" => Some(Marker::TryStart),
             "try_end" => Some(Marker::TryEnd),
             "catch_start" => Some(Marker::CatchStart),
+            "go" => Some(Marker::Go),
+            "defer" => Some(Marker::Defer),
             _ => None,
         }
     }
@@ -190,6 +202,8 @@ pub const MARKER_STMT_END: u64 = 21;
 pub const MARKER_TRY_START: u64 = 22;
 pub const MARKER_TRY_END: u64 = 23;
 pub const MARKER_CATCH_START: u64 = 24;
+pub const MARKER_GO: u64 = 25;
+pub const MARKER_DEFER: u64 = 26;
 
 /// Helper để đọc chain sang danh sách marker — tiện cho code đọc.
 #[allow(dead_code)]
@@ -332,6 +346,8 @@ pub enum EffectType {
     FileRead,
     FileWrite,
     Log,
+    /// Go `panic(...)` / `log.Fatal*` / `os.Exit` — chấm dứt luồng (error edge).
+    Panic,
 }
 
 impl EffectType {
@@ -347,6 +363,7 @@ impl EffectType {
             Self::FileRead => "file_read",
             Self::FileWrite => "file_write",
             Self::Log => "log",
+            Self::Panic => "panic",
         }
     }
 
@@ -364,6 +381,7 @@ impl EffectType {
             "file_read" => Self::FileRead,
             "file_write" => Self::FileWrite,
             "log" => Self::Log,
+            "panic" => Self::Panic,
             _ => return None,
         })
     }
@@ -455,6 +473,9 @@ pub enum ResolutionKind {
     HierarchyFanOut,
     /// Dynamic: method thuộc trait/interface nhưng không có impl trong repo.
     UnresolvedDynamic,
+    /// Dynamic: call qua biến function pointer được track qua assign-site
+    /// (`p = f;` / `void (*p)(int) = f;`) — C/C++ callback pattern.
+    PointerAssign,
 }
 
 /// Call record thô — persist để render flow khi call không resolve được.
@@ -695,6 +716,7 @@ impl From<Marker> for TraceAction {
             Marker::Loop | Marker::LoopBack => Self::Loop,
             Marker::Break | Marker::Continue | Marker::StmtEnd => Self::Statement,
             Marker::TryStart | Marker::TryEnd | Marker::CatchStart => Self::Statement,
+            Marker::Go | Marker::Defer => Self::Statement,
         }
     }
 }

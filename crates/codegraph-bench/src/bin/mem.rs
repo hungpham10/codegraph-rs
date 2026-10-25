@@ -386,6 +386,8 @@ fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_gr
         symbols,
         chains,
         calls,
+        fn_ptr_assigns: Vec::new(),
+        file_deps: None,
     }
 }
 
