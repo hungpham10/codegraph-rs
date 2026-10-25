@@ -7,7 +7,11 @@ use codegraph_extract::languages::c::CParser;
 use codegraph_extract::languages::cpp::CppParser;
 use codegraph_extract::languages::go::GoParser;
 use codegraph_extract::languages::java::JavaParser;
+use codegraph_extract::languages::lua::LuaParser;
+use codegraph_extract::languages::php::PhpParser;
 use codegraph_extract::languages::python::PythonParser;
+use codegraph_extract::languages::ruby::RubyParser;
+use codegraph_extract::languages::scala::ScalaParser;
 use codegraph_extract::LangParser;
 
 #[test]
@@ -758,4 +762,193 @@ function run(db: Database, limit?: number): void {
         .symbols
         .iter()
         .any(|s| s.name == "handle" && s.kind == SymbolKind::Method && s.scope_id == iface.id));
+}
+
+#[test]
+fn php_supers_sig_use_deps() {
+    let src = r#"
+<?php
+namespace App;
+
+use App\Models\User;
+use App\Models\Order as O;
+
+class CardPayment extends BasePayment implements Payment, JsonSerializable {
+    public function pay(int $amount, string $currency): void {}
+}
+"#;
+    let parsed = PhpParser.parse_file("P.php", src).unwrap();
+    for s in &parsed.symbols {
+        eprintln!("PHPDBG {} {:?} line={}", s.name, s.kind, s.line);
+    }
+
+    let cls = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "CardPayment")
+        .unwrap();
+    let supers = cls.impl_trait.as_deref().unwrap();
+    assert!(supers.starts_with("BasePayment"), "supers: {supers}");
+    assert!(supers.contains("Payment"), "supers: {supers}");
+
+    let _pay = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "pay")
+        .expect("pay missing");
+
+    let deps = parsed.file_deps.expect("use deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![("O", "App\\Models\\Order"), ("User", "App\\Models\\User")]
+    );
+}
+
+#[test]
+fn ruby_params_superclass_require() {
+    let src = r#"
+require 'net/http'
+require_relative 'orders/helper'
+
+class FileRepo < BaseRepo
+  def save(record, force: false)
+    persist(record)
+  end
+
+  def fetch(*ids)
+  end
+end
+"#;
+    let parsed = RubyParser.parse_file("r.rb", src).unwrap();
+
+    // Params: save(record, force: false) + fetch(*ids).
+    for name in ["record", "force", "ids"] {
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Parameter && s.name == name),
+            "param {name} missing"
+        );
+    }
+
+    // Superclass → impl_trait (fan-out).
+    let cls = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "FileRepo")
+        .unwrap();
+    assert_eq!(cls.impl_trait.as_deref(), Some("BaseRepo"));
+
+    // require deps.
+    let deps = parsed.file_deps.expect("require deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![("helper", "orders/helper"), ("http", "net/http")]
+    );
+}
+
+#[test]
+fn lua_params_require_fn_value() {
+    let src = r#"
+local json = require('dkjson')
+local utils = require('utils')
+
+local M = {}
+
+function M.run(db, opts)
+    handler = process
+    handler(db)
+    return db
+end
+
+return M
+"#;
+    let parsed = LuaParser.parse_file("m.lua", src).unwrap();
+
+    // Params.
+    for name in ["db", "opts"] {
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Parameter && s.name == name),
+            "param {name} missing"
+        );
+    }
+
+    // require deps.
+    let deps = parsed.file_deps.expect("require deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(pairs, vec![("json", "dkjson"), ("utils", "utils")]);
+
+    // Fn-value.
+    assert!(parsed
+        .fn_ptr_assigns
+        .iter()
+        .any(|a| a.var == "handler" && a.target == "process"));
+}
+
+#[test]
+fn scala_supers_sig_imports() {
+    let src = r#"
+package orders
+
+import scala.collection.mutable
+import orders.repo.{BaseRepo, UserRepo => UR}
+
+class CardRepo extends BaseRepo with Logging {
+  def pay(amount: Int, currency: String): Unit = {}
+}
+"#;
+    let parsed = ScalaParser.parse_file("S.scala", src).unwrap();
+
+    // Supers: extends B with T.
+    let cls = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "CardRepo")
+        .unwrap();
+    let supers = cls.impl_trait.as_deref().expect("supers missing");
+    eprintln!("SCALADBG supers={supers}");
+    assert!(supers.contains("BaseRepo"), "supers: {supers}");
+    assert!(supers.contains("Logging"), "supers: {supers}");
+
+    // Sig key.
+    let pay = parsed.symbols.iter().find(|s| s.name == "pay").unwrap();
+    assert_eq!(pay.sig_key.as_deref(), Some("(Int,String)(Unit)"));
+
+    // Imports: đơn + selector + alias.
+    let deps = parsed.file_deps.expect("imports missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("BaseRepo", "orders.repo.BaseRepo"),
+            ("UR", "orders.repo.UserRepo"),
+            ("mutable", "scala.collection.mutable"),
+        ]
+    );
 }

@@ -1,5 +1,6 @@
 use crate::languages::common::{text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
+use codegraph_graph::{FileDeps, ImportAlias};
 use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
@@ -39,6 +40,7 @@ pub static SPEC: LangSpec = LangSpec {
     ],
     func_kinds: &["method", "singleton_method"],
     class_kinds: &["class", "module"],
+    param_container_kinds: &["method_parameters"],
     calls: &[
         CallRule {
             kind: "call",
@@ -57,6 +59,8 @@ pub static SPEC: LangSpec = LangSpec {
     ],
     hooks: HookSpec {
         class_type_name: Some(class_type_name),
+        impl_trait_fn: Some(ruby_superclass),
+        file_deps_fn: Some(ruby_require_deps),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -73,4 +77,81 @@ pub static SPEC: LangSpec = LangSpec {
     },
     ..LangSpec::dflt()
 };
+/// String literal đầu tiên trong argument list của `require` — helper tách
+/// riêng để tránh borrow scope của cursor.
+fn ruby_require_path<'a>(args: &Node<'a>, src: &'a [u8]) -> Option<String> {
+    let mut cursor = args.walk();
+    let mut found = None;
+    for ch in args.children(&mut cursor) {
+        if ch.kind() == "string" {
+            if let Some(t) = text(&ch, src) {
+                found = Some(
+                    t.trim_matches(|c| c == '\'' || c == '"')
+                        .trim_start_matches("./")
+                        .to_string(),
+                );
+            }
+            break;
+        }
+    }
+    found
+}
+
 crate::lang_parser!(RubyParser, SPEC);
+
+/// Superclass `class Foo < Bar` → "Bar" — inheritance fan-out (giống type_name
+/// nhưng đi vào impl_index; `Object`/`Struct::new`-style bỏ qua).
+fn ruby_superclass(node: &Node, src: &[u8]) -> Option<String> {
+    if node.kind() != "class" {
+        return None;
+    }
+    let sc = node.child_by_field_name("superclass")?;
+    let raw = text(&sc, src)?;
+    let name = raw.trim_start_matches('<').trim();
+    // Loại dynamic superclass (`< Struct.new(:x)` / `< Base.new`).
+    if name.is_empty() || name.contains('(') || name.contains(".new") {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// `require 'x'` / `require_relative 'x'` → FileDeps (alias = segment cuối).
+fn ruby_require_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
+    let mut imports: Vec<ImportAlias> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        let is_require = n.kind() == "call"
+            && n.child_by_field_name("method")
+                .and_then(|m| text(&m, src))
+                .is_some_and(|mtxt| mtxt == "require" || mtxt == "require_relative");
+        if is_require {
+            // argument đầu là string literal.
+            if n.kind() == "call" {
+                if let Some(args) = n.child_by_field_name("arguments") {
+                    if let Some(path) = ruby_require_path(&args, src) {
+                        if let Some(seg) = path.rsplit('/').next() {
+                            if !seg.is_empty() {
+                                imports.push(ImportAlias {
+                                    alias: seg.to_string(),
+                                    path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    if imports.is_empty() {
+        None
+    } else {
+        Some(FileDeps {
+            package: None,
+            imports,
+        })
+    }
+}

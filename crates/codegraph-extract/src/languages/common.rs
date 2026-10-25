@@ -368,9 +368,11 @@ fn collect_symbols(node: &Node, ctx: &mut SymbolCtx, spec: &'static LangSpec) {
                 let (name_node, type_node) = match ch.kind() {
                     "identifier" => (Some(ch), None),
                     // Python: typed/default param; TS: required/optional param
-                    // (name ở field `pattern`, type ở field `type`).
+                    // (name ở field `pattern`, type ở field `type`); Ruby:
+                    // optional/keyword param (identifier con đầu); Scala:
+                    // parameter (field name + type).
                     "typed_parameter" | "default_parameter" | "required_parameter"
-                    | "optional_parameter" => {
+                    | "optional_parameter" | "keyword_parameter" | "parameter" => {
                         let name = ch
                             .child_by_field_name("name")
                             .or_else(|| ch.child_by_field_name("pattern"))
@@ -390,8 +392,8 @@ fn collect_symbols(node: &Node, ctx: &mut SymbolCtx, spec: &'static LangSpec) {
                             });
                         (name, ch.child_by_field_name("type"))
                     }
-                    "rest_pattern" => {
-                        // JS `...args` — identifier con duy nhất.
+                    "rest_pattern" | "splat_parameter" => {
+                        // JS `...args` / Ruby `*args` — identifier con duy nhất.
                         let mut cursor = ch.walk();
                         let found = ch.children(&mut cursor).find(|g| g.kind() == "identifier");
                         (found, None)
