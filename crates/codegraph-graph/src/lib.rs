@@ -386,6 +386,10 @@ pub struct GraphIndex {
     /// dispatch. Build từ `Symbol.impl_trait` khi ingest; in-memory (blob call
     /// record đã persist candidates nên reopen không cần index này).
     impl_index: HashMap<String, Vec<u64>>,
+    /// Fan-out edges đảo chiều: callee (dynamic target) → callers — nguồn cho
+    /// `callers()`/`impact` xuyên `dyn Trait`/interface/fn-ptr (chain radix
+    /// không thấy vì fan-out không ghi đè chain slot).
+    dyn_callers: HashMap<u64, Vec<u64>>,
     /// Function-pointer variable (lowercase) → các target function đã gán
     /// (`p = f;` qua assign-site tracking). In-memory như `impl_index`.
     fn_ptr_index: HashMap<String, Vec<u64>>,
@@ -1067,6 +1071,7 @@ impl GraphIndex {
             fn_ptr_index: HashMap::new(),
             go_impls: HashMap::new(),
             file_imports: HashMap::new(),
+            dyn_callers: HashMap::new(),
             edge_count: 0,
             files: Vec::new(),
             next_id: SYMBOL_BASE,
@@ -1208,6 +1213,24 @@ impl GraphIndex {
         self.link_impls_globally();
         self.build_impl_index();
         self.build_go_method_sets();
+        // dyn_callers từ call records persist (candidates đã lưu trong blob).
+        let all_records = self
+            .storage
+            .read()
+            .await
+            .all_call_records()
+            .await
+            .map_err(serr)?;
+        self.build_dyn_callers_from(all_records.iter().map(|(caller, bytes)| {
+            let cands = serde_json::from_slice::<Vec<CallRecord>>(bytes)
+                .map(|recs| {
+                    recs.into_iter()
+                        .flat_map(|r| r.candidates)
+                        .collect::<Vec<u64>>()
+                })
+                .unwrap_or_default();
+            (*caller, (ResolutionKind::Exact, cands))
+        }));
 
         // Edge count — đếm thẳng từ chains (không materialize EdgeMeta:
         // metadata đã nằm trong call records persist, `flow()` đọc từ đó).
@@ -1540,6 +1563,7 @@ impl GraphIndex {
         self.fn_ptr_index.clear();
         self.go_impls.clear();
         self.file_imports.clear();
+        self.dyn_callers.clear();
         self.edge_count = 0;
         self.files.clear();
         self.name_records.clear();
@@ -1617,6 +1641,7 @@ impl GraphIndex {
         self.build_go_method_sets();
         let mut call_meta: HashMap<(u64, usize), (ResolutionKind, Vec<u64>)> = HashMap::new();
         self.resolve_calls(&all_calls, &mut call_meta);
+        self.build_dyn_callers_from(call_meta.iter().map(|((c, _), v)| (*c, (v.0, v.1.clone()))));
 
         // ── Phase 3: call records + call-name index + edge count ──
         self.build_call_indexes(&all_calls, &call_meta, p).await?;
@@ -1828,6 +1853,22 @@ impl GraphIndex {
                 .find(|(f, l, e, _)| f == &sym.file && sym.line >= *l && sym.line <= *e)
             {
                 self.impl_index.entry(tr.clone()).or_default().push(sym.id);
+            }
+        }
+    }
+
+    /// Build `dyn_callers` từ call meta — gọi sau `resolve_calls` (ingest)
+    /// hoặc scan call records (rebuild).
+    fn build_dyn_callers_from(
+        &mut self,
+        entries: impl Iterator<Item = (u64, (ResolutionKind, Vec<u64>))>,
+    ) {
+        for (caller, (_, cands)) in entries {
+            for callee in cands {
+                let list = self.dyn_callers.entry(callee).or_default();
+                if !list.contains(&caller) {
+                    list.push(caller);
+                }
             }
         }
     }
@@ -2058,7 +2099,13 @@ impl GraphIndex {
                 // `h.handle`). Bare call `handle` với ứng viên Function tĩnh
                 // thì resolve tĩnh thắng (free function trùng tên trait method
                 // là trùng hợp tên, không phải dispatch).
-                let is_method_dispatch = call.call_name.contains('.');
+                // Method dispatch thật: receiver tồn tại (`r.ping()`,
+                // `self.storage.read().await.set_file_deps(..)`) — call_name có
+                // thể bị rút còn bare (`set_file_deps`) nhưng receiver_text
+                // vẫn giữ dấu chấm. Call_name chứa '.' chỉ là fallback cho
+                // record thiếu receiver.
+                let is_method_dispatch =
+                    call.receiver_text.is_some() || call.call_name.contains('.');
                 let all_dynamic = candidates.iter().all(|&id| {
                     self.symbols
                         .get(&id)
@@ -2731,6 +2778,11 @@ impl GraphIndex {
                     });
                 }
                 state.pending = page.record_ids;
+                // Fan-out edges (dynamic dispatch) không nằm trong chain —
+                // engine radix không thấy; merge callers qua dyn-trait.
+                if let Some(dyn_list) = self.dyn_callers.get(&current) {
+                    state.pending.extend(dyn_list.iter().map(|&c| c as usize));
+                }
                 state.pending_pos = 0;
                 state.search_complete = true;
                 continue;
@@ -6008,6 +6060,102 @@ mod tests {
             run.scope_id, def_id,
             "run phải được re-parent về Worker def"
         );
+    }
+
+    fn self_scope_is_class(idx: &GraphIndex, scope_id: u64) -> bool {
+        idx.symbol_by_id(scope_id)
+            .is_some_and(|p| p.kind == SymbolKind::Class)
+    }
+
+    #[tokio::test]
+    async fn callers_finds_dyn_trait_dispatch() {
+        // Call qua trait object (`r.handle()`) — fan-out không ghi đè chain
+        // slot, nhưng callers() của từng impl PHẢI thấy caller.
+        let mut idx = GraphIndex::in_memory();
+        let (caller, trait_id, m1, m2) = (
+            SYMBOL_BASE,
+            SYMBOL_BASE + 1,
+            SYMBOL_BASE + 2,
+            SYMBOL_BASE + 3,
+        );
+        let r = result(
+            "t.rs",
+            vec![
+                dsym(caller, "caller", SymbolKind::Function, 0, None, 50),
+                dsym(trait_id, "Handler", SymbolKind::Interface, 0, None, 1),
+                dsym(
+                    SYMBOL_BASE + 4,
+                    "handle",
+                    SymbolKind::Method,
+                    trait_id,
+                    None,
+                    2,
+                ),
+                dsym(
+                    SYMBOL_BASE + 5,
+                    "ImplA",
+                    SymbolKind::Class,
+                    0,
+                    Some("Handler"),
+                    10,
+                ),
+                dsym(m1, "handle", SymbolKind::Method, SYMBOL_BASE + 5, None, 11),
+                dsym(
+                    SYMBOL_BASE + 7,
+                    "ImplB",
+                    SymbolKind::Class,
+                    0,
+                    Some("Handler"),
+                    30,
+                ),
+                dsym(m2, "handle", SymbolKind::Method, SYMBOL_BASE + 7, None, 31),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "r.handle".to_string(),
+                position: 1,
+                line: 51,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                receiver_text: Some("r".to_string()),
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[r], None).await.unwrap();
+
+        // Fan-out đã ghi nhận (2 candidates).
+        let flow = idx.flow(caller).await.unwrap();
+        assert_eq!(flow.calls[0].resolved_via, ResolutionKind::HierarchyFanOut);
+        // callers() của MỖI impl thấy caller — trước đây trả rỗng. Id dùng
+        // GLOBAL (ingest remap): lấy Method "handle" từ registry.
+        // Chỉ 2 impl method là fan-out target (trait decl bị loại theo thiết
+        // kế — interface method không phải target gọi được).
+        let handle_ids: Vec<u64> = idx
+            .symbols
+            .values()
+            .filter(|s| {
+                s.kind == SymbolKind::Method
+                    && s.name == "handle"
+                    && self_scope_is_class(&idx, s.scope_id)
+            })
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(handle_ids.len(), 2);
+        for m in handle_ids {
+            let cs = idx.callers(m, 1).await.unwrap();
+            let ids: Vec<u64> = cs.iter().map(|s| s.id).collect();
+            assert!(
+                ids.contains(&caller),
+                "callers({m}) missing dyn caller: {ids:?}"
+            );
+        }
     }
 
     #[tokio::test]
