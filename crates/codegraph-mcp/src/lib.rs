@@ -275,6 +275,21 @@ impl CodegraphServer {
         let format = self.session.format().await;
         // Document tools — lazy doc graph (SharedDocGraph), không cần session
         // ready. Open giờ rẻ: `DocumentGraph::open` không materialize nodes.
+        // ── Effect-rule config (cần root, không cần index ready) ──
+        if name == "codegraph_config_effects" {
+            let root = self
+                .session
+                .root()
+                .await
+                .ok_or_else(|| McpError::invalid_params("session root unavailable", None))?;
+            return tools::dispatch_config_effects(&root, &args)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+                .map(|text| ToolOutput::Text {
+                    text,
+                    source_bytes: 0,
+                });
+        }
+
         if name.starts_with("codegraph_graphdoc_") {
             let doc_graph = self.doc_graph.clone();
             return match name {

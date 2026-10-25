@@ -208,6 +208,17 @@ fn tool_defs() -> Vec<ToolDef> {
             "Full re-index of the workspace into .codegraph/db.sqlite. Requires the workspace to be initialized (run codegraph_init first).",
             json!({ "type": "object", "properties": {} }),
         ),
+        tool(
+            "codegraph_config_effects",
+            "Read/write project effect rules in .codegraph/config.toml `[[effect_rules]]` — declare what a call/macro DOES (semantic classification), e.g. treat a macro like an exception. Rules are checked FIRST (before the built-in defaults, first-match-wins) at extraction time: each rule maps a call-name matcher to an effect. op: 'list' returns current rules (index order = removal index); 'add' appends {matcher: 'contains'|'prefix'|'exact', text, effect} — effect is snake_case (panic, sql_query, sql_write, cache_read, cache_write, http_call, event_emit, file_read, file_write, log, none); 'remove' deletes by index. Rules take effect from the NEXT codegraph_index (the re-index re-classifies call records); the current thread applies them immediately. Example: {op:'add', matcher:'contains', text:'CHECK', effect:'panic'} makes every CHECK_* macro invocation classify as an exception-like terminal call.",
+            json!({ "type": "object", "properties": {
+                "op": { "type": "string", "enum": ["list", "add", "remove"] },
+                "matcher": { "type": "string", "enum": ["contains", "prefix", "exact"] },
+                "text": { "type": "string" },
+                "effect": { "type": "string" },
+                "index": { "type": "integer" }
+            }, "required": ["op"] }),
+        ),
         // ── Shared symbol search (code + binary datasets gộp trong một call) ──
         tool(
             "codegraph_search_symbol",
@@ -1849,6 +1860,56 @@ pub async fn dispatch_doc_ingest_dir(
         summary["errors"] = json!(failed.iter().take(10).collect::<Vec<_>>());
     }
     emit_value("", summary)
+}
+
+/// codegraph_config_effects: đọc/ghi `[[effect_rules]]` cho root hiện tại.
+pub fn dispatch_config_effects(
+    root: &camino::Utf8Path,
+    args: &serde_json::Value,
+) -> codegraph_core::Result<String> {
+    use codegraph_extract::config;
+    let op = args
+        .get("op")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| codegraph_core::Error::Invalid("op is required".into()))?;
+    match op {
+        "list" => {
+            let rules = config::list_effect_rules(root);
+            if rules.is_empty() {
+                return Ok("No effect rules configured.".into());
+            }
+            let lines: Vec<String> = rules
+                .iter()
+                .enumerate()
+                .map(|(i, r)| format!("[{i}] {} {:?} → {}", r.matcher, r.text, r.effect))
+                .collect();
+            Ok(lines.join("\n"))
+        }
+        "add" => {
+            let matcher = args.get("matcher").and_then(|v| v.as_str()).unwrap_or("");
+            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let effect = args.get("effect").and_then(|v| v.as_str()).unwrap_or("");
+            config::add_effect_rule(root, matcher, text, effect)
+                .map_err(codegraph_core::Error::Invalid)?;
+            Ok(format!(
+                "Added effect rule: {matcher} {text:?} → {effect}. Applies from the next codegraph_index."
+            ))
+        }
+        "remove" => {
+            let idx =
+                args.get("index").and_then(|v| v.as_u64()).ok_or_else(|| {
+                    codegraph_core::Error::Invalid("remove requires `index`".into())
+                })? as usize;
+            match config::remove_effect_rule(root, idx) {
+                Ok(true) => Ok(format!("Removed effect rule [{idx}].")),
+                Ok(false) => Ok(format!("No rule at index {idx}.")),
+                Err(e) => Err(codegraph_core::Error::Invalid(e)),
+            }
+        }
+        other => Err(codegraph_core::Error::Invalid(format!(
+            "unknown op {other:?} — list|add|remove"
+        ))),
+    }
 }
 
 pub async fn dispatch_doc_remove(
