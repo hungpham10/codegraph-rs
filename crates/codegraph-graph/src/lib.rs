@@ -1163,6 +1163,52 @@ impl GraphIndex {
             }
         }
 
+        // ── Dynamic-dispatch indexes — rebuild từ persist ──
+        // file_imports/fn_ptr_index từ blob (sg_file_deps/sg_fn_ptr_assigns);
+        // impl_index/go_impls derive từ symbols; link_impls_globally chạy lại
+        // vì sg_symbols lưu state TRƯỚC linking.
+        self.file_imports.clear();
+        for (path, bytes) in self
+            .storage
+            .read()
+            .await
+            .all_file_deps()
+            .await
+            .map_err(serr)?
+        {
+            if let Ok(deps) = serde_json::from_slice::<FileDeps>(&bytes) {
+                self.file_imports.insert(path, deps.imports);
+            }
+        }
+        self.fn_ptr_index.clear();
+        for (_, bytes) in self
+            .storage
+            .read()
+            .await
+            .all_fn_ptr_assigns()
+            .await
+            .map_err(serr)?
+        {
+            if let Ok(assigns) = serde_json::from_slice::<Vec<FnPtrAssign>>(&bytes) {
+                for a in assigns {
+                    let targets = self
+                        .name_index
+                        .get(&a.target.to_lowercase())
+                        .cloned()
+                        .unwrap_or_default();
+                    self.fn_ptr_index
+                        .entry(a.var.to_lowercase())
+                        .or_default()
+                        .extend(targets);
+                }
+            }
+        }
+        self.impl_index.clear();
+        self.go_impls.clear();
+        self.link_impls_globally();
+        self.build_impl_index();
+        self.build_go_method_sets();
+
         // Edge count — đếm thẳng từ chains (không materialize EdgeMeta:
         // metadata đã nằm trong call records persist, `flow()` đọc từ đó).
         // Không cần `all_call_records` ở đây (đó là JSON deserialize ~80ms).
@@ -1593,6 +1639,28 @@ impl GraphIndex {
                 .await
                 .map_err(serr)?;
             self.files.push(f);
+            // Persist ĐẦU VÀO của dynamic index — MCP restart phải rebuild
+            // được từ storage, không mất resolution quality.
+            if let Some(deps) = &result.file_deps
+                && let Ok(bytes) = serde_json::to_vec(deps)
+            {
+                self.storage
+                    .write()
+                    .await
+                    .set_file_deps(&result.path, &bytes)
+                    .await
+                    .map_err(serr)?;
+            }
+            if !result.fn_ptr_assigns.is_empty()
+                && let Ok(bytes) = serde_json::to_vec(&result.fn_ptr_assigns)
+            {
+                self.storage
+                    .write()
+                    .await
+                    .set_fn_ptr_assigns(&result.path, &bytes)
+                    .await
+                    .map_err(serr)?;
+            }
             if let Some(p) = p {
                 p.advance(1);
             }

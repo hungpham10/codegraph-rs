@@ -385,3 +385,94 @@ async fn external_qualified_call_not_linked_to_local_variable() {
     assert_eq!(cees[0].name, "selectDepartment");
     assert_eq!(cees[0].file, "UserController.java");
 }
+
+/// Dynamic indexes (file_imports/fn_ptr_index/impl_index/go_impls) PHẢI sống
+/// sau reopen — MCP restart không được mất resolution quality.
+#[tokio::test]
+async fn dynamic_indexes_survive_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = format!("sqlite://{}", dir.path().join("dyn.db").to_string_lossy());
+
+    // Ingest: Go-style import alias + fn ptr assign + dynamic call.
+    let mut r = result(
+        "main.go",
+        vec![
+            sym("main.go", "sink", SYMBOL_BASE),
+            sym("corp/api/orders/handler.go", "Get", SYMBOL_BASE + 1),
+            sym("main.go", "compile_file", SYMBOL_BASE + 2),
+            sym("main.go", "dtrace_compile_file", SYMBOL_BASE + 3),
+            sym("main.go", "call_site", SYMBOL_BASE + 4),
+        ],
+        HashMap::from([
+            (SYMBOL_BASE, vec![SYMBOL_BASE, 0]),
+            (SYMBOL_BASE + 4, vec![SYMBOL_BASE + 4, 0]),
+        ]),
+        vec![
+            CallRecord {
+                caller_id: SYMBOL_BASE,
+                call_name: "orders.Get".to_string(),
+                position: 1,
+                line: 1,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            },
+            CallRecord {
+                caller_id: SYMBOL_BASE + 4,
+                call_name: "zend_compile_file".to_string(),
+                position: 1,
+                line: 2,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            },
+        ],
+    );
+    r.file_deps = Some(codegraph_graph::FileDeps {
+        package: Some("main".to_string()),
+        imports: vec![codegraph_graph::ImportAlias {
+            alias: "orders".to_string(),
+            path: "corp/api/orders".to_string(),
+        }],
+    });
+    r.fn_ptr_assigns = vec![codegraph_graph::FnPtrAssign {
+        var: "zend_compile_file".to_string(),
+        target: "compile_file".to_string(),
+        line: 5,
+    }];
+    {
+        let mut idx = GraphIndex::open(&path).await.unwrap();
+        idx.ingest(&[r], None).await.unwrap();
+    }
+
+    // Reopen — dynamic indexes rebuild từ persist.
+    let idx = GraphIndex::open(&path).await.unwrap();
+
+    // Import alias: orders.Get → Get.
+    let flow = idx.flow(SYMBOL_BASE).await.unwrap();
+    assert_eq!(flow.calls[0].to_id, Some(SYMBOL_BASE + 1));
+    assert_eq!(
+        flow.calls[0].resolved_via,
+        codegraph_core::ResolutionKind::Alias
+    );
+
+    // Fn ptr assign: zend_compile_file → compile_file (PointerAssign).
+    let flow2 = idx.flow(SYMBOL_BASE + 4).await.unwrap();
+    assert_eq!(
+        flow2.calls[0].resolved_via,
+        codegraph_core::ResolutionKind::PointerAssign
+    );
+    assert_eq!(flow2.calls[0].candidate_names, vec!["compile_file"]);
+}

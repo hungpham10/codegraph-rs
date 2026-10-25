@@ -73,6 +73,12 @@ pub struct LangSpec {
     pub class_kinds: &'static [&'static str],
     /// Parameter node kinds — scope Parameter, scope_id = function chứa.
     pub param_kinds: &'static [&'static str],
+    /// Container node chứa parameter (Python `parameters`) — walker special-
+    /// case: identifier / typed_parameter / default_parameter con → Parameter.
+    pub param_container_kinds: &'static [&'static str],
+    /// `self.attr = <expr>` trong method → Field symbol (type từ RHS) —
+    /// Python/Ruby convention.
+    pub field_from_self_attr: bool,
     /// Annotation node kinds (VD Java `annotation`/`marker_annotation`).
     pub annotation_kinds: &'static [&'static str],
     /// Call rules.
@@ -103,6 +109,8 @@ impl LangSpec {
             func_kinds: &[],
             class_kinds: &[],
             param_kinds: &[],
+            param_container_kinds: &[],
+            field_from_self_attr: false,
             annotation_kinds: &[],
             calls: &[],
             name_type_fallback: false,
@@ -352,6 +360,140 @@ struct SymbolCtx<'a> {
 
 fn collect_symbols(node: &Node, ctx: &mut SymbolCtx, spec: &'static LangSpec) {
     let k = node.kind();
+    // Parameter container (Python `parameters`): identifier / typed_parameter /
+    // default_parameter con → Parameter symbol với type (nếu có type hint).
+    if spec.param_container_kinds.contains(&k) {
+        if let Some(&(fid, _)) = ctx.scope_stack.last() {
+            for ch in named_children(node) {
+                let (name_node, type_node) = match ch.kind() {
+                    "identifier" => (Some(ch), None),
+                    "typed_parameter" | "default_parameter" => {
+                        let name = ch.child_by_field_name("name").or_else(|| {
+                            // typed_parameter: identifier con TRỰC TIẾP đầu tiên
+                            // (first_identifier duyệt DFS từ cuối → dính type).
+                            let mut cursor = ch.walk();
+                            let mut found = None;
+                            for g in ch.children(&mut cursor) {
+                                if g.kind() == "identifier" {
+                                    found = Some(g);
+                                    break;
+                                }
+                            }
+                            found
+                        });
+                        (name, ch.child_by_field_name("type"))
+                    }
+                    _ => (None, None),
+                };
+                let Some(name_node) = name_node else {
+                    continue;
+                };
+                let Some(pname) = text(&name_node, ctx.src) else {
+                    continue;
+                };
+                if pname.is_empty() {
+                    continue;
+                }
+                let id = ctx.next_id;
+                ctx.next_id += 1;
+                ctx.symbols.push(Symbol {
+                    id,
+                    name: pname,
+                    kind: SymbolKind::Parameter,
+                    scope: ScopeLevel::Parameter,
+                    scope_id: fid,
+                    type_ref: 0,
+                    type_name: type_node.and_then(|t| text(&t, ctx.src)),
+                    file: ctx.file.to_string(),
+                    line: name_node.start_position().row as u32 + 1,
+                    end_line: name_node.end_position().row as u32 + 1,
+                    signature: None,
+                    doc: None,
+                    annotations: Vec::new(),
+                    language: ctx.language.to_string(),
+                    impl_trait: None,
+                    sig_key: None,
+                });
+            }
+        }
+        // KHÔNG return — default_value có thể chứa call (`x=f()`).
+    }
+
+    // `self.attr = <expr>` trong method → Field (type từ RHS: `Database()`
+    // → "Database", identifier → text) — nguyên liệu instance-attr typing.
+    if spec.field_from_self_attr && k == "assignment" {
+        let left = node.child_by_field_name("left");
+        let is_self_attr = left.is_some_and(|left| {
+            if left.kind() != "attribute" {
+                return false;
+            }
+            let Some(obj) = left.child_by_field_name("object") else {
+                return false;
+            };
+            text(&obj, ctx.src).as_deref() == Some("self")
+                && left
+                    .child_by_field_name("attribute")
+                    .and_then(|a| text(&a, ctx.src))
+                    .is_some()
+        });
+        let attr_info = left
+            .unwrap()
+            .child_by_field_name("attribute")
+            .and_then(|a| text(&a, ctx.src).map(|t| (a, t)));
+        if is_self_attr {
+            let Some((attr, fname)) = attr_info else {
+                return;
+            };
+            // Class scope gần nhất trong stack (method đang đứng trong class).
+            let class_id = ctx
+                .scope_stack
+                .iter()
+                .rev()
+                .find(|(_, is_class)| *is_class)
+                .map(|(id, _)| *id);
+            if let Some(class_id) = class_id {
+                // RHS là call (`Database()`, `np.array()`) → type = callee text;
+                // RHS identifier thuần (`self.db = database`) → None (không có
+                // type info tin cậy).
+                let type_name = node.child_by_field_name("right").and_then(|right| {
+                    if right.kind() != "call" {
+                        return None;
+                    }
+                    right
+                        .child_by_field_name("function")
+                        .and_then(|f| text(&f, ctx.src))
+                });
+                // Dedup: gán nhiều lần cùng attr trong class → 1 Field.
+                let exists = ctx.symbols.iter().any(|s| {
+                    s.kind == SymbolKind::Field && s.scope_id == class_id && s.name == fname
+                });
+                if !exists {
+                    let id = ctx.next_id;
+                    ctx.next_id += 1;
+                    ctx.symbols.push(Symbol {
+                        id,
+                        name: fname,
+                        kind: SymbolKind::Field,
+                        scope: ScopeLevel::ObjectField,
+                        scope_id: class_id,
+                        type_ref: 0,
+                        type_name,
+                        file: ctx.file.to_string(),
+                        line: attr.start_position().row as u32 + 1,
+                        end_line: attr.end_position().row as u32 + 1,
+                        signature: None,
+                        doc: None,
+                        annotations: Vec::new(),
+                        language: ctx.language.to_string(),
+                        impl_trait: None,
+                        sig_key: None,
+                    });
+                }
+            }
+        }
+        // KHÔNG return — RHS vẫn cần đi qua pass chain (calls).
+    }
+
     if let Some(&(_, skind)) = spec.decls.iter().find(|(s, _)| *s == k) {
         // Refine kind theo nội dung node (VD Go: `type_spec` chứa `interface_type`
         // → Interface thay vì Class).

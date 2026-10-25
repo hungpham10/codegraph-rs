@@ -211,6 +211,14 @@ impl SqliteStorage {
                 func INTEGER PRIMARY KEY,
                 records BLOB NOT NULL
             )",
+            "CREATE TABLE IF NOT EXISTS sg_file_deps (
+                path TEXT PRIMARY KEY,
+                deps BLOB NOT NULL
+            )",
+            "CREATE TABLE IF NOT EXISTS sg_fn_ptr_assigns (
+                path TEXT PRIMARY KEY,
+                assigns BLOB NOT NULL
+            )",
             "CREATE TABLE IF NOT EXISTS sg_call_names (
                 name TEXT PRIMARY KEY,
                 sites BLOB NOT NULL
@@ -703,6 +711,53 @@ impl EntityStorage for SqliteStorage {
         Ok(records)
     }
 
+    async fn set_file_deps(&mut self, path: &str, deps: &[u8]) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO sg_file_deps (path, deps) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET deps = excluded.deps",
+        )
+        .bind(path)
+        .bind(deps)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn all_file_deps(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as("SELECT path, deps FROM sg_file_deps")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    async fn set_fn_ptr_assigns(&mut self, path: &str, assigns: &[u8]) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO sg_fn_ptr_assigns (path, assigns) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET assigns = excluded.assigns",
+        )
+        .bind(path)
+        .bind(assigns)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn all_fn_ptr_assigns(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        let rows: Vec<(String, Vec<u8>)> =
+            sqlx::query_as("SELECT path, assigns FROM sg_fn_ptr_assigns")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        Ok(rows)
+    }
+
     async fn all_call_records(&self) -> Result<Vec<(u64, Vec<u8>)>> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         let rows: Vec<(i64, Vec<u8>)> =
@@ -847,6 +902,8 @@ impl EntityStorage for SqliteStorage {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         for stmt in [
             "DELETE FROM sg_symbols",
+            "DELETE FROM sg_file_deps",
+            "DELETE FROM sg_fn_ptr_assigns",
             "DELETE FROM sg_call_records",
             "DELETE FROM sg_call_names",
             "DELETE FROM sg_files",

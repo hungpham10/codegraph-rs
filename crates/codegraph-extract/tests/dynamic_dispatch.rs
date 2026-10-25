@@ -7,6 +7,7 @@ use codegraph_extract::languages::c::CParser;
 use codegraph_extract::languages::cpp::CppParser;
 use codegraph_extract::languages::go::GoParser;
 use codegraph_extract::languages::java::JavaParser;
+use codegraph_extract::languages::python::PythonParser;
 use codegraph_extract::LangParser;
 
 #[test]
@@ -419,4 +420,81 @@ impl Database {
         .find(|s| s.name == "query")
         .expect("query missing");
     assert_eq!(query.sig_key.as_deref(), Some("(self,&str)(u32)"));
+}
+
+#[test]
+fn python_params_self_fields_imports_superclasses() {
+    let src = r#"
+import os
+import numpy as np
+from orders.models import Order, get_order as fetch
+
+class Writer:
+    def write(self, data): pass
+
+class File(Writer):
+    def __init__(self, path: str, mode="r"):
+        self.path = path
+        self.data = np.array()
+
+    def write(self, data: str) -> int:
+        return len(data)
+"#;
+    let parsed = PythonParser.parse_file("f.py", src).unwrap();
+
+    // P1: params — typed + plain + default.
+    for name in ["self", "path", "mode", "data"] {
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Parameter && s.name == name),
+            "param {name} missing"
+        );
+    }
+    let path_param = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "path" && s.kind == SymbolKind::Parameter)
+        .unwrap();
+    assert_eq!(path_param.type_name.as_deref(), Some("str"));
+
+    // P1b: self.attr → Field, type từ RHS class call.
+    let path_field = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "path" && s.kind == SymbolKind::Field)
+        .expect("field self.path missing");
+    assert_eq!(path_field.type_name, None); // RHS là param, không phải class call
+    let data_field = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "data" && s.kind == SymbolKind::Field)
+        .expect("field self.data missing");
+    assert_eq!(data_field.type_name.as_deref(), Some("np.array"));
+    // Field scope vào class File (không phải __init__).
+    let file_id = parsed.symbols.iter().find(|s| s.name == "File").unwrap().id;
+    assert_eq!(data_field.scope_id, file_id);
+
+    // P2: imports.
+    let deps = parsed.file_deps.expect("file deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("Order", "orders.models.Order"),
+            ("fetch", "orders.models.get_order"),
+            ("np", "numpy"),
+            ("os", "os"),
+        ]
+    );
+
+    // P5: inheritance → impl_trait "Writer" (fan-out machinery ăn trực tiếp).
+    let file = parsed.symbols.iter().find(|s| s.name == "File").unwrap();
+    assert_eq!(file.impl_trait.as_deref(), Some("Writer"));
 }

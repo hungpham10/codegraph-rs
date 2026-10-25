@@ -148,6 +148,8 @@ pub(crate) struct MemoryData {
     pub(crate) next_id: u64,
     /// func id → call records (JSON).
     pub(crate) call_records: HashMap<u64, Vec<u8>>,
+    pub(crate) file_deps: HashMap<String, Vec<u8>>,
+    pub(crate) fn_ptr_assigns: HashMap<String, Vec<u8>>,
     /// call name → call sites (JSON).
     pub(crate) call_names: HashMap<String, Vec<u8>>,
     /// path → FileInfo.
@@ -184,6 +186,8 @@ impl InMemoryStorage {
                 // Id bắt đầu từ SYMBOL_BASE (marker reserved 1..=99).
                 next_id: codegraph_core::SYMBOL_BASE,
                 call_records: HashMap::new(),
+                file_deps: HashMap::new(),
+                fn_ptr_assigns: HashMap::new(),
                 call_names: HashMap::new(),
                 files: HashMap::new(),
                 version: 0,
@@ -561,6 +565,46 @@ impl EntityStorage for InMemoryStorage {
         Ok(d.call_records.get(&func).cloned())
     }
 
+    async fn set_file_deps(&mut self, path: &str, deps: &[u8]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.file_deps.insert(path.to_string(), deps.to_vec());
+        Ok(())
+    }
+
+    async fn all_file_deps(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.file_deps
+            .iter()
+            .map(|(p, b)| (p.clone(), b.clone()))
+            .collect())
+    }
+
+    async fn set_fn_ptr_assigns(&mut self, path: &str, assigns: &[u8]) -> Result<()> {
+        let mut d = self
+            .data
+            .write()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        d.fn_ptr_assigns.insert(path.to_string(), assigns.to_vec());
+        Ok(())
+    }
+
+    async fn all_fn_ptr_assigns(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| StorageError::Internal("poison".into()))?;
+        Ok(d.fn_ptr_assigns
+            .iter()
+            .map(|(p, b)| (p.clone(), b.clone()))
+            .collect())
+    }
+
     async fn all_call_records(&self) -> Result<Vec<(u64, Vec<u8>)>> {
         let d = self
             .data
@@ -662,6 +706,8 @@ impl EntityStorage for InMemoryStorage {
             .map_err(|_| StorageError::Internal("poison".into()))?;
         d.symbols.clear();
         d.next_id = codegraph_core::SYMBOL_BASE;
+        d.file_deps.clear();
+        d.fn_ptr_assigns.clear();
         d.call_records.clear();
         d.call_names.clear();
         d.files.clear();
