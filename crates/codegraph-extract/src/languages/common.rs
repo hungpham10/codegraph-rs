@@ -404,6 +404,9 @@ fn push_symbol(
     } else {
         node.child_by_field_name("name")
             .or_else(|| name_from_declarator(node))
+            // Pattern identifier (Rust `db: Database`, `let cache = ..`) —
+            // TRƯỚC name_type_fallback để không lấy nhầm tên từ field `type`.
+            .or_else(|| node.child_by_field_name("pattern"))
             .or_else(|| {
                 if spec.name_type_fallback {
                     node.child_by_field_name("type")

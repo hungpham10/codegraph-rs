@@ -331,3 +331,92 @@ func (w Wrong) Read(s string) string { return "" }
     assert_eq!(key("Good"), "([]byte)(int,error)"); // khác tên param, cùng sig
     assert_eq!(key("Wrong"), "(string)(string)"); // sai signature
 }
+
+#[test]
+fn rust_field_param_symbols_extracted() {
+    let src = r#"
+pub struct Server {
+    pub db: Database,
+}
+
+fn run(db: Database, config: Config) -> u32 {
+    let cache = 1;
+    db.query();
+    cache
+}
+"#;
+    let parsed = codegraph_extract::languages::rust::RustParser
+        .parse_file("s.rs", src)
+        .unwrap();
+    for s in &parsed.symbols {
+        eprintln!(
+            "DBG {} {:?} scope={} type={:?}",
+            s.name, s.kind, s.scope_id, s.type_name
+        );
+    }
+    let field = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "db" && s.kind == SymbolKind::Field);
+    assert!(field.is_some(), "field db missing");
+    assert_eq!(field.unwrap().type_name.as_deref(), Some("Database"));
+    let param = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "config" && s.kind == SymbolKind::Parameter);
+    assert!(param.is_some(), "parameter config missing");
+    assert_eq!(param.unwrap().type_name.as_deref(), Some("Config"));
+    assert!(
+        parsed
+            .symbols
+            .iter()
+            .any(|s| s.name == "cache" && s.kind == SymbolKind::Variable),
+        "let cache missing"
+    );
+    // Không sinh symbol giả mang tên kiểu
+    assert!(!parsed
+        .symbols
+        .iter()
+        .any(|s| s.name == "Database" && s.kind == SymbolKind::Parameter));
+}
+
+#[test]
+fn rust_use_deps_and_sig_key_extracted() {
+    let src = r#"
+use crate::storage::Database;
+use std::collections::HashMap as Map;
+
+pub struct Database;
+
+impl Database {
+    pub fn new() -> Self { Database }
+    pub fn query(&self, sql: &str) -> u32 { 0 }
+}
+"#;
+    let parsed = codegraph_extract::languages::rust::RustParser
+        .parse_file("main.rs", src)
+        .unwrap();
+    let deps = parsed.file_deps.expect("file deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("Database", "crate::storage::Database"),
+            ("Map", "std::collections::HashMap")
+        ]
+    );
+
+    // sig_key: query(&self, sql: &str) -> u32 → "(self,&str)(u32)";
+    // tên param bỏ (`sql` không vào key).
+    let query = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "query")
+        .expect("query missing");
+    assert_eq!(query.sig_key.as_deref(), Some("(self,&str)(u32)"));
+}

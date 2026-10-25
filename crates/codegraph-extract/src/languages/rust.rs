@@ -1,5 +1,7 @@
-use crate::languages::common::{text, CallRule, HookSpec, LangSpec, MarkerSpec};
+use crate::languages::common::{named_children, text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
+use codegraph_graph::{FileDeps, ImportAlias};
+use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_rust::LANGUAGE.into()
@@ -19,6 +21,11 @@ pub static SPEC: LangSpec = LangSpec {
         ("const_item", SymbolKind::Constant),
         ("static_item", SymbolKind::Variable),
         ("type_item", SymbolKind::Class),
+        // Semantic enrichment: field/param/local — type_name từ field `type`
+        // giúp tie-break resolve `db.query()` theo type của `db`.
+        ("field_declaration", SymbolKind::Field),
+        ("parameter", SymbolKind::Parameter),
+        ("let_declaration", SymbolKind::Variable),
     ],
     func_kinds: &["function_item"],
     class_kinds: &[
@@ -41,6 +48,8 @@ pub static SPEC: LangSpec = LangSpec {
     hooks: HookSpec {
         class_type_name: Some(rust_class_type_name),
         impl_trait_fn: Some(rust_impl_trait_name),
+        sig_key_fn: Some(rust_signature_key),
+        file_deps_fn: Some(rust_file_deps),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -73,6 +82,78 @@ fn rust_class_type_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String> 
 }
 
 crate::lang_parser!(RustParser, SPEC);
+
+/// `use` declarations của file — nguyên liệu resolve qualified call
+/// (`Database::new` với `use crate::storage::Database;`).
+/// - `use foo::bar as baz;` → alias "baz", path "foo::bar"
+/// - `use crate::storage::Database;` → alias "Database" (segment cuối)
+fn rust_file_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
+    let mut imports: Vec<ImportAlias> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "use_declaration" {
+            if let Some(arg) = n.child_by_field_name("argument") {
+                let raw = text(&arg, src).unwrap_or_default();
+                let (path, alias) = match raw.split_once(" as ") {
+                    Some((p, a)) => (p.trim().to_string(), a.trim().to_string()),
+                    None => {
+                        let seg = raw.rsplit("::").next().unwrap_or("").trim_end_matches('*');
+                        (raw.clone(), seg.to_string())
+                    }
+                };
+                if !alias.is_empty() && !path.is_empty() {
+                    imports.push(ImportAlias { alias, path });
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    if imports.is_empty() {
+        None
+    } else {
+        Some(FileDeps {
+            package: None,
+            imports,
+        })
+    }
+}
+
+/// Signature key `(params)(return)` cho method/function — trait matching.
+/// `&self`/`&mut self` → "self"; type text giữ nguyên (`&mut [u8]`, `usize`).
+fn rust_signature_key(node: &Node, src: &[u8]) -> Option<String> {
+    if !matches!(node.kind(), "function_item" | "function_signature_item") {
+        return None;
+    }
+    let mut pt: Vec<String> = Vec::new();
+    if let Some(params) = node.child_by_field_name("parameters") {
+        for ch in named_children(&params) {
+            // self param không có field type — chuẩn hóa "self".
+            let txt = match ch.child_by_field_name("type") {
+                Some(t) => text(&t, src).map(|s| s.replace(' ', "")),
+                None => {
+                    if text(&ch, src).map(|s| s.contains("self")).unwrap_or(false) {
+                        Some("self".to_string())
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(t) = txt {
+                pt.push(t);
+            }
+        }
+    }
+    let mut rt: Vec<String> = Vec::new();
+    if let Some(ret) = node.child_by_field_name("return_type") {
+        if let Some(t) = text(&ret, src) {
+            rt.push(t.replace(' ', ""));
+        }
+    }
+    Some(format!("({})({})", pt.join(","), rt.join(",")))
+}
 
 /// Trait name của `impl Trait for Type` — field `trait` của impl_item.
 /// Normalize generic: `Iterator<Item = u8>` → `"Iterator"` (fan-out index key

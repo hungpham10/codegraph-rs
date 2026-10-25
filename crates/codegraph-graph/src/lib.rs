@@ -1564,6 +1564,8 @@ impl GraphIndex {
             }
         }
 
+        self.link_impls_globally();
+
         // ── Phase 2: resolve placeholder 0 trong chains ──
         self.build_impl_index();
         self.build_go_method_sets();
@@ -1831,6 +1833,61 @@ impl GraphIndex {
             }
         }
         self.go_impls = go_impls;
+    }
+
+    /// Rust impl linking Ở MỨC GLOBAL (extractor chỉ thấy cùng file):
+    /// `impl Worker` ở file khác `struct Worker` vẫn được nối — impl symbol
+    /// (Class, type_name = self type, type_ref == 0) tìm def cùng tên trong
+    /// toàn registry, rồi re-parent methods của impl về def.
+    fn link_impls_globally(&mut self) {
+        // def name (lower) → def id — chỉ def thật (type_name None).
+        let mut defs: HashMap<String, u64> = HashMap::new();
+        for sym in self.symbols.values() {
+            if sym.language == "rust"
+                && matches!(sym.kind, SymbolKind::Class | SymbolKind::Enum)
+                && sym.type_name.is_none()
+            {
+                defs.entry(sym.name.to_lowercase()).or_insert(sym.id);
+            }
+        }
+        if defs.is_empty() {
+            return;
+        }
+        // impl (type_name Some, type_ref == 0) → def id.
+        let mut impl_to_def: HashMap<u64, u64> = HashMap::new();
+        for sym in self.symbols.values() {
+            if sym.language != "rust" || sym.kind != SymbolKind::Class || sym.type_ref != 0 {
+                continue;
+            }
+            let Some(self_type) = &sym.type_name else {
+                continue;
+            };
+            // `Store<T>` → "store" (generic base).
+            let base = self_type
+                .split('<')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if base.is_empty() {
+                continue;
+            }
+            if let Some(&def_id) = defs.get(&base) {
+                impl_to_def.insert(sym.id, def_id);
+            }
+        }
+        if impl_to_def.is_empty() {
+            return;
+        }
+        for sym in self.symbols.values_mut() {
+            if let Some(&def_id) = impl_to_def.get(&sym.id) {
+                sym.type_ref = def_id;
+            } else if sym.kind == SymbolKind::Method
+                && let Some(&def_id) = impl_to_def.get(&sym.scope_id)
+            {
+                sym.scope_id = def_id;
+            }
+        }
     }
 
     /// Resolve một call record về real symbol id — trả `None` nếu không được.
@@ -2364,12 +2421,16 @@ impl GraphIndex {
     /// import path (monorepo: import "corp/api/orders" → file chứa "orders").
     /// Stdlib ngoài index → trả rỗng (giữ raw, không fake).
     fn import_alias_candidates(&self, caller_id: u64, call_name: &str) -> Vec<u64> {
-        let Some(dot) = call_name.find('.') else {
+        // Separator theo ngôn ngữ: `var.method` (Go/Java/C) hoặc `Type::method`
+        // (Rust use-path).
+        let (var, method) = if let Some(dot) = call_name.find('.') {
+            (&call_name[..dot], &call_name[dot + 1..])
+        } else if let Some(pos) = call_name.find("::") {
+            (&call_name[..pos], &call_name[pos + 2..])
+        } else {
             return Vec::new();
         };
-        let var = &call_name[..dot];
-        let method = &call_name[dot + 1..];
-        if method.is_empty() || method.contains('.') {
+        if method.is_empty() || method.contains('.') || method.contains("::") {
             return Vec::new();
         }
         let Some(file) = self.symbols.get(&caller_id).map(|s| s.file.as_str()) else {
@@ -2384,12 +2445,23 @@ impl GraphIndex {
                 continue;
             }
             let tail = imp.path.rsplit('/').next().unwrap_or("");
+            let type_tail = imp.path.rsplit("::").next().unwrap_or("");
             if let Some(ids) = self.name_index.get(&method.to_lowercase()) {
                 out.extend(ids.iter().copied().filter(|&id| {
                     self.symbols.get(&id).is_some_and(|s| {
-                        matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
-                            && !tail.is_empty()
-                            && s.file.contains(tail)
+                        if !matches!(s.kind, SymbolKind::Function | SymbolKind::Method) {
+                            return false;
+                        }
+                        if imp.path.contains("::") {
+                            // Rust: `use crate::storage::Database` + call
+                            // `Database::new` → method của class `Database`.
+                            self.symbols
+                                .get(&s.scope_id)
+                                .is_some_and(|p| p.name == type_tail)
+                        } else {
+                            // Go: import path segment khớp directory trong file.
+                            !tail.is_empty() && s.file.contains(tail)
+                        }
                     })
                 }));
             }
@@ -5734,6 +5806,140 @@ mod tests {
         assert_eq!(flow.chain, vec![caller, get_id]);
         assert_eq!(flow.calls[0].to_id, Some(get_id));
         assert_eq!(flow.calls[0].resolved_via, ResolutionKind::Alias);
+    }
+
+    #[tokio::test]
+    async fn rust_use_resolves_qualified_call() {
+        // `use crate::storage::Database;` + call `Database::new()` → method new
+        // của class Database (file chứa class đó).
+        let mut idx = GraphIndex::in_memory();
+        let (caller, db_class, db_new) = (SYMBOL_BASE, SYMBOL_BASE + 1, SYMBOL_BASE + 2);
+        let mut r = result(
+            "src/main.rs",
+            vec![
+                dsym(caller, "main", SymbolKind::Function, 0, None, 10),
+                dsym(db_class, "Database", SymbolKind::Class, 0, None, 1),
+                dsym(db_new, "new", SymbolKind::Method, db_class, None, 2),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "Database::new".to_string(),
+                position: 1,
+                line: 11,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        if let Some(c) = r.symbols.iter_mut().find(|s| s.name == "main") {
+            c.file = "src/main.rs".to_string();
+        }
+        if let Some(db) = r.symbols.iter_mut().find(|s| s.name == "Database") {
+            db.file = "src/storage/database.rs".to_string();
+        }
+        if let Some(nm) = r.symbols.iter_mut().find(|s| s.name == "new") {
+            nm.file = "src/storage/database.rs".to_string();
+        }
+        r.file_deps = Some(crate::FileDeps {
+            package: None,
+            imports: vec![crate::ImportAlias {
+                alias: "Database".to_string(),
+                path: "crate::storage::Database".to_string(),
+            }],
+        });
+        idx.ingest(&[r], None).await.unwrap();
+
+        let flow = idx.flow(caller).await.unwrap();
+        assert_eq!(flow.chain, vec![caller, db_new]);
+        assert_eq!(flow.calls[0].to_id, Some(db_new));
+        assert_eq!(flow.calls[0].resolved_via, ResolutionKind::Alias);
+    }
+
+    #[tokio::test]
+    async fn rust_impl_linking_across_files() {
+        // struct Worker ở worker.rs; impl Worker { fn run } ở worker_impl.rs —
+        // linking global phải nối method về def (extractor per-file không thấy).
+        let mut idx = GraphIndex::in_memory();
+        let (def_id, impl_id, run_id, caller_id) = (
+            SYMBOL_BASE,
+            SYMBOL_BASE + 1,
+            SYMBOL_BASE + 2,
+            SYMBOL_BASE + 3,
+        );
+        let rsym = |id: u64,
+                    name: &str,
+                    kind: SymbolKind,
+                    scope_id: u64,
+                    type_name: Option<&str>,
+                    line: u32| Symbol {
+            id,
+            name: name.to_string(),
+            kind,
+            scope: ScopeLevel::Global,
+            scope_id,
+            type_ref: 0,
+            type_name: type_name.map(String::from),
+            file: String::new(),
+            line,
+            end_line: line,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "rust".to_string(),
+            impl_trait: None,
+            sig_key: None,
+        };
+        let def_file = result(
+            "worker.rs",
+            vec![rsym(def_id, "Worker", SymbolKind::Class, 0, None, 1)],
+            HashMap::new(),
+            vec![],
+        );
+        // impl symbol: type_name = self type "Worker", type_ref = 0 (chưa nối).
+        let mut impl_sym = rsym(impl_id, "Worker", SymbolKind::Class, 0, Some("Worker"), 1);
+        impl_sym.file = "worker_impl.rs".to_string();
+        let mut run_sym = rsym(run_id, "run", SymbolKind::Method, impl_id, None, 2);
+        run_sym.file = "worker_impl.rs".to_string();
+        let mut caller_sym = rsym(caller_id, "caller", SymbolKind::Function, 0, None, 10);
+        caller_sym.file = "worker_impl.rs".to_string();
+        let impl_file = result(
+            "worker_impl.rs",
+            vec![impl_sym, run_sym, caller_sym],
+            HashMap::from([(caller_id, vec![caller_id, 0])]),
+            vec![CallRecord {
+                caller_id,
+                call_name: "run".to_string(),
+                position: 1,
+                line: 11,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[def_file, impl_file], None).await.unwrap();
+
+        // run scope đã re-parent về Worker def → field_declared_type-style
+        // resolution tìm thấy method thuộc class Worker; chain resolve tĩnh.
+        let flow = idx.flow(caller_id).await.unwrap();
+        assert_eq!(flow.chain, vec![caller_id, run_id]);
+        let run = idx.symbol_by_id(run_id).unwrap();
+        assert_eq!(
+            run.scope_id, def_id,
+            "run phải được re-parent về Worker def"
+        );
     }
 
     #[tokio::test]
