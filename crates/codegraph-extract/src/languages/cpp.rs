@@ -75,6 +75,8 @@ pub static SPEC: LangSpec = LangSpec {
     hooks: HookSpec {
         impl_trait_fn: Some(cpp_base_classes),
         fn_ptr_assign_fn: Some(crate::languages::c::c_fn_ptr_assign),
+        sig_key_fn: Some(cpp_signature_key),
+        file_deps_fn: Some(crate::languages::c::c_include_deps),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -99,3 +101,39 @@ pub static SPEC: LangSpec = LangSpec {
     ..LangSpec::dflt()
 };
 crate::lang_parser!(CppParser, SPEC);
+
+/// Signature key `(params)(return)` cho C++ — params từ function_declarator
+/// trong declarator field; return = field `type`. Method inline trong class
+/// (field_declaration với function_declarator) cũng tính.
+fn cpp_signature_key(node: &Node, src: &[u8]) -> Option<String> {
+    let is_fn = node.kind() == "function_definition";
+    // field_declaration (method inline trong class): declarator field TRỰC
+    // TIẾP là function_declarator (1 tầng, không 2).
+    let is_method_decl = node.kind() == "field_declaration"
+        && node
+            .child_by_field_name("declarator")
+            .is_some_and(|d| d.kind() == "function_declarator");
+    if !is_fn && !is_method_decl {
+        return None;
+    }
+    let declarator = node.child_by_field_name("declarator")?;
+    let mut pt: Vec<String> = Vec::new();
+    if let Some(params) = declarator.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        for ch in params.children(&mut cursor) {
+            if ch.kind() == "parameter" {
+                if let Some(t) = ch.child_by_field_name("type") {
+                    if let Some(txt) = text(&t, src) {
+                        pt.push(txt.replace(' ', ""));
+                    }
+                }
+            }
+        }
+    }
+    let rt = node
+        .child_by_field_name("type")
+        .and_then(|t| text(&t, src))
+        .map(|t| t.replace(' ', ""))
+        .unwrap_or_else(|| "void".to_string());
+    Some(format!("({})({})", pt.join(","), rt))
+}

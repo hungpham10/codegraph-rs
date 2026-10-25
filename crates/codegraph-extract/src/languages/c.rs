@@ -1,5 +1,6 @@
 use crate::languages::common::{text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
+use codegraph_graph::{FileDeps, ImportAlias};
 use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
@@ -12,16 +13,73 @@ fn ts_language() -> tree_sitter::Language {
 ///
 /// Chỉ nhận LHS/var là identifier thuần và RHS/value là identifier thuần
 /// (địa chỉ hàm; `&f` cũng qua identifier con).
+/// `#include` graph: `"foo.h"` (quoted) / `<openssl/ssl.h>` (system) →
+/// FileDeps — path nguyên văn, alias = tên file (không extension). Include
+/// graph rebuild miễn phí qua machinery file_imports.
+pub(crate) fn c_include_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
+    let mut imports: Vec<ImportAlias> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "preproc_include" {
+            if let Some(path_node) = n.child_by_field_name("path") {
+                let raw = text(&path_node, src).unwrap_or_default();
+                let path = raw
+                    .trim_matches(|c| c == '"' || c == '<' || c == '>')
+                    .to_string();
+                let alias = path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if !path.is_empty() && !alias.is_empty() {
+                    imports.push(ImportAlias { alias, path });
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    if imports.is_empty() {
+        None
+    } else {
+        Some(FileDeps {
+            package: None,
+            imports,
+        })
+    }
+}
+
 pub(crate) fn c_fn_ptr_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
     match node.kind() {
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
             let right = node.child_by_field_name("right")?;
-            if left.kind() != "identifier" {
-                return None;
-            }
-            let var = text(&left, src)?;
-            let target = identifier_text(&right, src)?;
+            // LHS: identifier thuần, field (`obj.handler` — dotted key), deref
+            // (`*handler` — strip *). Bracket `handlers[i]` skip.
+            let var = match left.kind() {
+                "identifier" => text(&left, src)?,
+                "field_expression" => text(&left, src)?,
+                "pointer_expression" => {
+                    let inner = left.child_by_field_name("argument")?;
+                    if inner.kind() != "identifier" {
+                        return None;
+                    }
+                    text(&inner, src)?
+                }
+                _ => return None,
+            };
+            // RHS: identifier thuần, `&f` (address-of), `&ns::cb` (qualified).
+            let target = match right.kind() {
+                "identifier" => text(&right, src)?,
+                "qualified_identifier" => text(&right, src)?,
+                "pointer_expression" => identifier_text(&right, src)?,
+                _ => return None,
+            };
             Some((var, target))
         }
         "init_declarator" => {
@@ -38,11 +96,16 @@ pub(crate) fn c_fn_ptr_assign(node: &Node, src: &[u8]) -> Option<(String, String
     }
 }
 
-/// Text identifier khi node là identifier thuần. `&f` (address-of) cố tình bỏ —
-/// không có type info để phân biệt fn-ptr var với biến thường (tránh false positive).
+/// Text identifier khi node là identifier thuần hoặc `&f` (address-of —
+/// RHS của fn-ptr assignment; LHS vẫn yêu cầu identifier thuần nên không
+/// có false positive biến thường).
 fn identifier_text(node: &Node, src: &[u8]) -> Option<String> {
     match node.kind() {
         "identifier" => text(node, src),
+        "pointer_expression" => {
+            let inner = node.child_by_field_name("argument")?;
+            (inner.kind() == "identifier").then(|| text(&inner, src))?
+        }
         _ => None,
     }
 }
@@ -88,6 +151,7 @@ pub static SPEC: LangSpec = LangSpec {
     }],
     hooks: HookSpec {
         fn_ptr_assign_fn: Some(c_fn_ptr_assign),
+        file_deps_fn: Some(c_include_deps),
         ..HookSpec::none()
     },
     markers: MarkerSpec {

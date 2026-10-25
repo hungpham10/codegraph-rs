@@ -1064,3 +1064,89 @@ fn await_markers_in_chain() {
         .values()
         .any(|c| c.contains(&codegraph_core::MARKER_AWAIT)));
 }
+
+#[test]
+fn c_includes_and_extended_fn_ptr() {
+    let src = r#"
+#include "foo.h"
+#include <openssl/ssl.h>
+
+void cb(int x) {}
+
+void setup(void) {
+  obj.handler = cb;
+  *handler = cb;
+  handler = &ns_cb;
+}
+"#;
+    let parsed = codegraph_extract::languages::c::CParser
+        .parse_file("s.c", src)
+        .unwrap();
+
+    // C1: include graph.
+    let deps = parsed.file_deps.expect("include deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(pairs, vec![("foo", "foo.h"), ("ssl", "openssl/ssl.h")]);
+
+    // C2: fn-ptr mở rộng — field / deref / address-of.
+    let mut assigns: Vec<(&str, &str)> = parsed
+        .fn_ptr_assigns
+        .iter()
+        .map(|a| (a.var.as_str(), a.target.as_str()))
+        .collect();
+    assigns.sort();
+    assert_eq!(
+        assigns,
+        vec![
+            ("handler", "cb"),
+            ("handler", "ns_cb"),
+            ("obj.handler", "cb")
+        ]
+    );
+}
+
+#[test]
+fn cpp_sig_key_and_virtual_declaration() {
+    let src = r#"
+class Base {
+public:
+  virtual void run();
+};
+class D : public Base {
+public:
+  void run() override;
+  void helper();
+};
+void D::run() {}
+"#;
+    let parsed = codegraph_extract::languages::cpp::CppParser
+        .parse_file("s.cpp", src)
+        .unwrap();
+
+    // C3: sig_key — method inline (field_declaration) + out-of-line definition.
+    let run_inline = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "run" && s.kind == SymbolKind::Method && s.line == 8)
+        .expect("inline run missing");
+    assert_eq!(run_inline.sig_key.as_deref(), Some("()(void)"));
+
+    // C4 dữ liệu nền: signature chứa virtual/override (filter dùng ở graph).
+    let base_run = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "run" && s.line == 4)
+        .expect("base run decl missing");
+    assert!(base_run.signature.as_deref().unwrap().contains("virtual"));
+    let d_run = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "run" && s.line == 8)
+        .unwrap();
+    assert!(d_run.signature.as_deref().unwrap().contains("override"));
+}

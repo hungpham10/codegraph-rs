@@ -2230,6 +2230,21 @@ impl GraphIndex {
             // Java/Rust interface method là abstract → loại decl.
             if tr.kind == SymbolKind::Class {
                 cands.push(decl_id);
+                // Virtual precision: nếu CÓ candidate nào mang keyword
+                // virtual/override (signature chứa keyword — extractor lưu
+                // dòng khai báo), chỉ giữ các candidate đó + base decl —
+                // loại non-virtual cùng tên trong hierarchy.
+                let is_virtual = |id: u64| {
+                    self.symbols.get(&id).is_some_and(|s| {
+                        s.signature
+                            .as_deref()
+                            .is_some_and(|sig| sig.contains("virtual") || sig.contains("override"))
+                    })
+                };
+                let has_virtual = cands.iter().any(|&id| is_virtual(id));
+                if has_virtual {
+                    cands.retain(|&id| is_virtual(id) || id == decl_id);
+                }
             }
         }
         cands.sort_unstable();
@@ -6198,6 +6213,107 @@ mod tests {
         // Trước đây guard `!contains('.')` chặn — giờ resolve PointerAssign.
         assert_eq!(flow.calls[0].resolved_via, ResolutionKind::PointerAssign);
         assert_eq!(flow.calls[0].candidate_names, vec!["process"]);
+    }
+
+    #[tokio::test]
+    async fn cpp_virtual_filter_prefers_override_candidates() {
+        // Base::run (virtual) + D1::run (override) + D2::run (non-virtual cùng
+        // tên) — call b.run() qua base → chỉ virtual candidates (+ base decl).
+        let mut idx = GraphIndex::in_memory();
+        let vsym = |id: u64,
+                    name: &str,
+                    kind: SymbolKind,
+                    scope_id: u64,
+                    impl_trait: Option<&str>,
+                    sig: Option<&str>,
+                    line: u32| Symbol {
+            id,
+            name: name.to_string(),
+            kind,
+            scope: ScopeLevel::Global,
+            scope_id,
+            type_ref: 0,
+            type_name: None,
+            file: "t.cpp".to_string(),
+            line,
+            // Impl block cần range chứa method con (method line = line + 1).
+            end_line: if impl_trait.is_some() { line + 9 } else { line },
+            signature: sig.map(String::from),
+            doc: None,
+            annotations: Vec::new(),
+            language: "cpp".to_string(),
+            impl_trait: impl_trait.map(String::from),
+            sig_key: None,
+        };
+        let (caller, base_id, d1_impl, d1_run, d2_impl, d2_run) = (
+            SYMBOL_BASE,
+            SYMBOL_BASE + 1,
+            SYMBOL_BASE + 2,
+            SYMBOL_BASE + 3,
+            SYMBOL_BASE + 4,
+            SYMBOL_BASE + 5,
+        );
+        let r = result(
+            "t.cpp",
+            vec![
+                vsym(caller, "caller", SymbolKind::Function, 0, None, None, 40),
+                vsym(base_id, "Base", SymbolKind::Class, 0, None, None, 1),
+                vsym(
+                    SYMBOL_BASE + 6,
+                    "run",
+                    SymbolKind::Method,
+                    base_id,
+                    None,
+                    Some("virtual void run();"),
+                    2,
+                ),
+                vsym(d1_impl, "D1", SymbolKind::Class, 0, Some("Base"), None, 5),
+                vsym(
+                    d1_run,
+                    "run",
+                    SymbolKind::Method,
+                    d1_impl,
+                    None,
+                    Some("void run() override;"),
+                    6,
+                ),
+                vsym(d2_impl, "D2", SymbolKind::Class, 0, Some("Base"), None, 10),
+                vsym(
+                    d2_run,
+                    "run",
+                    SymbolKind::Method,
+                    d2_impl,
+                    None,
+                    Some("void run();"),
+                    11,
+                ),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "b.run".to_string(),
+                position: 1,
+                line: 41,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[r], None).await.unwrap();
+
+        let flow = idx.flow(caller).await.unwrap();
+        assert_eq!(flow.calls[0].resolved_via, ResolutionKind::HierarchyFanOut);
+        let mut names = flow.calls[0].candidate_names.clone();
+        names.sort();
+        // D2::run (non-virtual) bị loại — chỉ D1::run (override) + Base::run.
+        assert_eq!(names, vec!["run", "run"]);
+        assert_eq!(idx.stats().edges, 2);
     }
 
     #[tokio::test]
