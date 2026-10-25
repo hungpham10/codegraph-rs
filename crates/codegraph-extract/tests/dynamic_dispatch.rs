@@ -618,3 +618,144 @@ pub fn sink(r: &dyn Repo) {
     names.sort();
     assert_eq!(names, vec!["ping", "ping"]);
 }
+
+#[test]
+fn java_supers_sig_and_file_deps() {
+    let src = r#"
+package orders;
+
+import com.foo.Payment;
+import static com.foo.Util.go;
+
+public class CardPayment extends BasePayment implements Payment, Serializable {
+    public void pay(int amount, String currency) {}
+    public CardPayment(int x) {}
+}
+"#;
+    let parsed = JavaParser.parse_file("C.java", src).unwrap();
+
+    // J2: extends + implements gộp vào impl_trait (superclass trước).
+    let cls = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "CardPayment")
+        .unwrap();
+    assert_eq!(
+        cls.impl_trait.as_deref(),
+        Some("BasePayment,Payment,Serializable")
+    );
+
+    // J3: sig_key — tên param bỏ.
+    let pay = parsed.symbols.iter().find(|s| s.name == "pay").unwrap();
+    assert_eq!(pay.sig_key.as_deref(), Some("(int,String)(void)"));
+    let ctor = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "CardPayment" && s.kind == SymbolKind::Method)
+        .unwrap();
+    assert_eq!(ctor.sig_key.as_deref(), Some("(int)(void)"));
+
+    // J1: imports — static bỏ qua, wildcard bỏ qua.
+    let deps = parsed.file_deps.expect("file deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(pairs, vec![("Payment", "com.foo.Payment")]);
+}
+
+#[test]
+fn js_params_imports_extends_fn_value() {
+    let src = r#"
+import D, { helper as h } from './util.js';
+import * as ns from 'lib';
+
+class Base {
+    render() {}
+}
+class Page extends Base {
+    render() { return 1; }
+}
+
+const handler = process;
+
+function setup(db, ...rest) {
+    handler(db);
+    const { a, b } = obj;
+}
+"#;
+    let parsed = codegraph_extract::languages::javascript::JavaScriptParser
+        .parse_file("p.js", src)
+        .unwrap();
+
+    // JS1: params — db + ...rest.
+    assert!(parsed
+        .symbols
+        .iter()
+        .any(|s| s.kind == SymbolKind::Parameter && s.name == "db"));
+    assert!(parsed
+        .symbols
+        .iter()
+        .any(|s| s.kind == SymbolKind::Parameter && s.name == "rest"));
+
+    // JS2: imports.
+    let deps = parsed.file_deps.expect("file deps missing");
+    let mut pairs: Vec<(&str, &str)> = deps
+        .imports
+        .iter()
+        .map(|i| (i.alias.as_str(), i.path.as_str()))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![("D", "./util.js"), ("h", "./util.js"), ("ns", "lib")]
+    );
+
+    // JS3: extends → impl_trait.
+    let page = parsed.symbols.iter().find(|s| s.name == "Page").unwrap();
+    assert_eq!(page.impl_trait.as_deref(), Some("Base"));
+
+    // JS4: fn-value assignment.
+    assert!(parsed
+        .fn_ptr_assigns
+        .iter()
+        .any(|a| a.var == "handler" && a.target == "process"));
+    // destructuring KHÔNG thành fn-value.
+    assert!(!parsed.fn_ptr_assigns.iter().any(|a| a.var == "a"));
+}
+
+#[test]
+fn ts_typed_params_extracted() {
+    let src = r#"
+interface Handler {
+    handle(req: Request): Promise<void>;
+}
+
+function run(db: Database, limit?: number): void {
+    db.query();
+}
+"#;
+    let parsed = codegraph_extract::languages::typescript::TypeScriptParser
+        .parse_file("t.ts", src)
+        .unwrap();
+    let db = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "db" && s.kind == SymbolKind::Parameter)
+        .expect("ts param db missing");
+    assert_eq!(db.type_name.as_deref(), Some("Database"));
+    let limit = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "limit" && s.kind == SymbolKind::Parameter)
+        .expect("ts optional param missing");
+    assert_eq!(limit.type_name.as_deref(), Some("number"));
+    // interface method (method_signature) scope vào interface.
+    let iface = parsed.symbols.iter().find(|s| s.name == "Handler").unwrap();
+    assert!(parsed
+        .symbols
+        .iter()
+        .any(|s| s.name == "handle" && s.kind == SymbolKind::Method && s.scope_id == iface.id));
+}

@@ -67,6 +67,8 @@ pub static SPEC: LangSpec = LangSpec {
         "enum_declaration",
         "internal_module",
     ],
+    param_container_kinds: &["formal_parameters"],
+    field_from_self_attr: true,
     calls: &[
         CallRule {
             kind: "call_expression",
@@ -87,6 +89,9 @@ pub static SPEC: LangSpec = LangSpec {
         class_type_name: Some(class_type_name),
         anonymous_name_fn: Some(crate::languages::javascript::anonymous_name_node),
         value_func_kinds: &["function_expression", "arrow_function"],
+        impl_trait_fn: Some(crate::languages::javascript::js_extends),
+        file_deps_fn: Some(crate::languages::javascript::js_file_deps),
+        fn_ptr_assign_fn: Some(crate::languages::javascript::js_fn_value_assign),
         ..HookSpec::none()
     },
     markers: MarkerSpec {

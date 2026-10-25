@@ -1,5 +1,7 @@
 use crate::languages::common::{named_children, text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
+use codegraph_graph::{FileDeps, ImportAlias};
+use tree_sitter::Node as TsNode;
 use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
@@ -103,7 +105,9 @@ pub static SPEC: LangSpec = LangSpec {
         },
     ],
     hooks: HookSpec {
-        impl_trait_fn: Some(java_interfaces),
+        impl_trait_fn: Some(java_supers),
+        sig_key_fn: Some(java_signature_key),
+        file_deps_fn: Some(java_file_deps),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -130,20 +134,100 @@ pub static SPEC: LangSpec = LangSpec {
 };
 crate::lang_parser!(JavaParser, SPEC);
 
-/// Danh sách interface mà class implements (`interfaces` field của
-/// class_declaration — type_list "Payment, Serializable"). Nhiều interface
-/// nối bằng ',' — `build_impl_index` split khi build fan-out index.
-fn java_interfaces(node: &Node, src: &[u8]) -> Option<String> {
+/// Supers của class: superclass (extends) + interfaces (implements) — cả hai
+/// vào `impl_trait` (split ',' ở `build_impl_index`). Superclass đứng trước →
+/// inheritance fan-out qua machinery C++-base (method của base + override).
+fn java_supers(node: &Node, src: &[u8]) -> Option<String> {
     if !matches!(node.kind(), "class_declaration" | "record_declaration") {
         return None;
     }
-    let tl = node.child_by_field_name("interfaces")?;
-    // Field text mang cả keyword: "implements Payment, Serializable".
-    let raw = text(&tl, src)?.replacen("implements", "", 1);
-    let names: Vec<&str> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let mut names: Vec<String> = Vec::new();
+    // extends: field `superclass` (type_identifier | scoped type_identifier).
+    if let Some(sc) = node.child_by_field_name("superclass") {
+        // Field text mang cả keyword: "extends BasePayment".
+        if let Some(t) = text(&sc, src) {
+            names.push(t.replacen("extends", "", 1).trim().to_string());
+        }
+    }
+    // implements: field `interfaces` — text mang cả keyword "implements A, B".
+    if let Some(tl) = node.child_by_field_name("interfaces") {
+        if let Some(raw) = text(&tl, src) {
+            for n in raw.replacen("implements", "", 1).split(',') {
+                let n = n.trim();
+                if !n.is_empty() {
+                    names.push(n.to_string());
+                }
+            }
+        }
+    }
+    names.dedup();
     (!names.is_empty()).then(|| names.join(","))
+}
+
+/// Signature key `(params)(return)` cho method/constructor — Go-style.
+/// `pay(int amount) void` → "(int)(void)"; tên param bỏ.
+fn java_signature_key(node: &TsNode, src: &[u8]) -> Option<String> {
+    if !matches!(
+        node.kind(),
+        "method_declaration" | "constructor_declaration"
+    ) {
+        return None;
+    }
+    let mut pt: Vec<String> = Vec::new();
+    if let Some(params) = node.child_by_field_name("parameters") {
+        for ch in named_children(&params) {
+            if let Some(t) = ch.child_by_field_name("type") {
+                if let Some(txt) = text(&t, src) {
+                    pt.push(txt.replace(' ', ""));
+                }
+            }
+        }
+    }
+    let rt = node
+        .child_by_field_name("type")
+        .and_then(|t| text(&t, src))
+        .map(|t| t.replace(' ', ""))
+        .unwrap_or_else(|| "void".to_string());
+    Some(format!("({})({})", pt.join(","), rt))
+}
+
+/// Imports của file → FileDeps:
+/// - `import com.foo.Bar;` → alias "Bar", path "com.foo.Bar"
+/// - `import com.foo.Bar as B;` (hiếm, preview) → alias "B"
+/// - `import com.foo.*;` / `import static ...;` wildcard → bỏ qua.
+fn java_file_deps(root: &TsNode, src: &[u8]) -> Option<FileDeps> {
+    let mut imports: Vec<ImportAlias> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "import_declaration" {
+            let raw = text(&n, src).unwrap_or_default();
+            let stmt = raw.trim().trim_end_matches(';').trim();
+            let stmt = stmt.strip_prefix("import ").unwrap_or(stmt).trim();
+            if stmt.starts_with("static ") || stmt.ends_with(".*") {
+                continue; // static import / wildcard — không có alias đơn
+            }
+            let (path, alias) = match stmt.split_once(" as ") {
+                Some((p, a)) => (p.trim().to_string(), a.trim().to_string()),
+                None => {
+                    let seg = stmt.rsplit('.').next().unwrap_or("").to_string();
+                    (stmt.to_string(), seg)
+                }
+            };
+            if !alias.is_empty() && !path.is_empty() {
+                imports.push(ImportAlias { alias, path });
+            }
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    if imports.is_empty() {
+        None
+    } else {
+        Some(FileDeps {
+            package: None,
+            imports,
+        })
+    }
 }

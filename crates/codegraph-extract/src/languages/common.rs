@@ -367,22 +367,36 @@ fn collect_symbols(node: &Node, ctx: &mut SymbolCtx, spec: &'static LangSpec) {
             for ch in named_children(node) {
                 let (name_node, type_node) = match ch.kind() {
                     "identifier" => (Some(ch), None),
-                    "typed_parameter" | "default_parameter" => {
-                        let name = ch.child_by_field_name("name").or_else(|| {
-                            // typed_parameter: identifier con TRỰC TIẾP đầu tiên
-                            // (first_identifier duyệt DFS từ cuối → dính type).
-                            let mut cursor = ch.walk();
-                            let mut found = None;
-                            for g in ch.children(&mut cursor) {
-                                if g.kind() == "identifier" {
-                                    found = Some(g);
-                                    break;
+                    // Python: typed/default param; TS: required/optional param
+                    // (name ở field `pattern`, type ở field `type`).
+                    "typed_parameter" | "default_parameter" | "required_parameter"
+                    | "optional_parameter" => {
+                        let name = ch
+                            .child_by_field_name("name")
+                            .or_else(|| ch.child_by_field_name("pattern"))
+                            .or_else(|| {
+                                // typed_parameter (Python): identifier con
+                                // TRỰC TIẾP đầu tiên (first_identifier duyệt
+                                // DFS từ cuối → dính type).
+                                let mut cursor = ch.walk();
+                                let mut found = None;
+                                for g in ch.children(&mut cursor) {
+                                    if g.kind() == "identifier" {
+                                        found = Some(g);
+                                        break;
+                                    }
                                 }
-                            }
-                            found
-                        });
+                                found
+                            });
                         (name, ch.child_by_field_name("type"))
                     }
+                    "rest_pattern" => {
+                        // JS `...args` — identifier con duy nhất.
+                        let mut cursor = ch.walk();
+                        let found = ch.children(&mut cursor).find(|g| g.kind() == "identifier");
+                        (found, None)
+                    }
+                    // Destructuring (`{a, b}`, `[x, y]`) — không tên đơn, bỏ.
                     _ => (None, None),
                 };
                 let Some(name_node) = name_node else {
@@ -403,7 +417,16 @@ fn collect_symbols(node: &Node, ctx: &mut SymbolCtx, spec: &'static LangSpec) {
                     scope: ScopeLevel::Parameter,
                     scope_id: fid,
                     type_ref: 0,
-                    type_name: type_node.and_then(|t| text(&t, ctx.src)),
+                    // TS type_annotation text = ": Database" — bỏ ':' + trim.
+                    type_name: type_node
+                        .and_then(|t| text(&t, ctx.src))
+                        .map(|t| {
+                            t.trim_start_matches(':')
+                                .trim()
+                                .trim_end_matches('?')
+                                .to_string()
+                        })
+                        .filter(|t| !t.is_empty()),
                     file: ctx.file.to_string(),
                     line: name_node.start_position().row as u32 + 1,
                     end_line: name_node.end_position().row as u32 + 1,

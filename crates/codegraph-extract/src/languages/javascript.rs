@@ -1,5 +1,6 @@
 use crate::languages::common::{named_children, text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
+use codegraph_graph::{FileDeps, ImportAlias};
 use tree_sitter::Node;
 
 fn ts_language() -> tree_sitter::Language {
@@ -60,6 +61,8 @@ pub static SPEC: LangSpec = LangSpec {
         "method_definition",
     ],
     class_kinds: &["class_declaration", "class"],
+    param_container_kinds: &["formal_parameters"],
+    field_from_self_attr: true,
     calls: &[
         CallRule {
             kind: "call_expression",
@@ -80,6 +83,9 @@ pub static SPEC: LangSpec = LangSpec {
         class_type_name: Some(class_type_name),
         anonymous_name_fn: Some(anonymous_name_node),
         value_func_kinds: &["function_expression", "arrow_function"],
+        impl_trait_fn: Some(js_extends),
+        file_deps_fn: Some(js_file_deps),
+        fn_ptr_assign_fn: Some(js_fn_value_assign),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -107,3 +113,152 @@ pub static SPEC: LangSpec = LangSpec {
     ..LangSpec::dflt()
 };
 crate::lang_parser!(JavaScriptParser, SPEC);
+
+fn first_identifier_text(node: &Node, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut found = None;
+    for ch in node.children(&mut cursor) {
+        if ch.kind() == "identifier" {
+            found = Some(ch);
+            break;
+        }
+    }
+    found.and_then(|n| text(&n, src))
+}
+
+/// Base class của `class D extends B` → "B" — inheritance fan-out qua
+/// machinery C++-base (impl_index key = base name).
+///
+/// JS thuần: class_heritage chứa identifier/member_expression TRỰC TIẾP
+/// (không có node extends_clause như TS — nghĩa là class_type_name cũ cũng
+/// không bao giờ match JS!). TS dùng class_type_name qua extends_clause.
+pub fn js_extends(node: &Node, src: &[u8]) -> Option<String> {
+    if !matches!(node.kind(), "class_declaration" | "class") {
+        return None;
+    }
+    let heritage = node
+        .children(&mut node.walk())
+        .find(|c| c.kind() == "class_heritage")?;
+    let named = named_children(&heritage);
+    // TS: heritage chứa extends_clause/implements_clause — dùng field name.
+    if let Some(first) = named.first() {
+        if matches!(first.kind(), "extends_clause" | "implements_clause") {
+            return first
+                .child_by_field_name("name")
+                .and_then(|n| text(&n, src));
+        }
+    }
+    // JS: extends token là unnamed → named đầu tiên là base.
+    named.first().and_then(|n| text(n, src))
+}
+
+/// Imports của file → FileDeps (ESM):
+/// - `import D from 'mod'` → alias "D", path "mod"
+/// - `import { a, b as c } from 'mod'` → alias "a"/"c", path "mod.a"/"mod.b"
+/// - `import * as ns from 'mod'` → alias "ns"
+/// - `import 'mod'` / `export ... from` → bỏ.
+pub fn js_file_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
+    let mut imports: Vec<ImportAlias> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "import_statement" {
+            let Some(source) = n.child_by_field_name("source") else {
+                continue;
+            };
+            let raw = text(&source, src).unwrap_or_default();
+            let path = raw.trim_matches(|c| c == '\'' || c == '"').to_string();
+            if path.is_empty() {
+                continue;
+            }
+            let mut push = |alias: String| {
+                if !alias.is_empty() {
+                    imports.push(ImportAlias {
+                        alias,
+                        path: path.clone(),
+                    });
+                }
+            };
+            for ch in named_children(&n) {
+                match ch.kind() {
+                    // `import D from 'mod'` — default trong import_clause.
+                    "identifier" => {
+                        if let Some(t) = text(&ch, src) {
+                            push(t);
+                        }
+                    }
+                    // `import * as ns from 'mod'`.
+                    "namespace_import" => {
+                        let t = first_identifier_text(&ch, src);
+                        push(t.unwrap_or_default());
+                    }
+                    "import_clause" => {
+                        let mut cc = ch.walk();
+                        for g in ch.children(&mut cc) {
+                            match g.kind() {
+                                "identifier" => {
+                                    if let Some(t) = text(&g, src) {
+                                        push(t);
+                                    }
+                                }
+                                "namespace_import" => {
+                                    if let Some(t) = first_identifier_text(&g, src) {
+                                        push(t);
+                                    }
+                                }
+                                "named_imports" => {
+                                    let mut gc = g.walk();
+                                    for spec in g.children(&mut gc) {
+                                        if spec.kind() == "import_specifier" {
+                                            let raw = text(&spec, src).unwrap_or_default();
+                                            let alias = match raw.split_once(" as ") {
+                                                Some((_, a)) => a.trim().to_string(),
+                                                None => raw.trim().to_string(),
+                                            };
+                                            push(alias);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for ch in n.children(&mut cursor) {
+            stack.push(ch);
+        }
+    }
+    if imports.is_empty() {
+        None
+    } else {
+        Some(FileDeps {
+            package: None,
+            imports,
+        })
+    }
+}
+
+pub fn js_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
+    match node.kind() {
+        "assignment_expression" => {
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            if left.kind() != "identifier" || right.kind() != "identifier" {
+                return None;
+            }
+            Some((text(&left, src)?, text(&right, src)?))
+        }
+        "variable_declarator" => {
+            let name = node.child_by_field_name("name")?;
+            let value = node.child_by_field_name("value")?;
+            if name.kind() != "identifier" || value.kind() != "identifier" {
+                return None;
+            }
+            Some((text(&name, src)?, text(&value, src)?))
+        }
+        _ => None,
+    }
+}
