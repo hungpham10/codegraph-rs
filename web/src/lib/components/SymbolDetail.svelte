@@ -1,6 +1,14 @@
 <script lang="ts">
 	import { QS } from '#lib/graphql/queries';
-	import type { Symbol, FlowResult, ClassInfo, FunctionScope } from '#lib/graphql/queries';
+	import type {
+	Symbol,
+	FlowResult,
+	ClassInfo,
+	FunctionScope,
+	FullFlowPath,
+	SearchFlowResult,
+	SearchSymbolResult
+} from '#lib/graphql/queries';
 	import { gql, gqlError } from '#lib/graphql/client';
 	import { kindColor, shortPath, EFFECT_LABELS } from '#lib/format';
 	import { renderMarkdown } from '#lib/markdown';
@@ -9,7 +17,143 @@
 
 	let { symbol, onSelect }: { symbol: Symbol; onSelect: (s: Symbol) => void } = $props();
 
-	type Tab = 'graph' | 'flow' | 'context' | 'structure';
+	// Dynamic dispatch badge theo ResolutionKind (backend semgraph).
+	// GraphQL enum trả SCREAMING_SNAKE_CASE.
+	const DYN_BADGES: Record<string, { label: string; cls: string; title: string }> = {
+		HIERARCHY_FAN_OUT: {
+			label: '[dyn]',
+			cls: 'bg-emerald-900/60 text-emerald-300',
+			title: 'Dynamic dispatch — fan-out qua trait/interface/base hierarchy'
+		},
+		POINTER_ASSIGN: {
+			label: '[fn-ptr]',
+			cls: 'bg-sky-900/60 text-sky-300',
+			title: 'Function pointer — qua assign-site tracking'
+		},
+		UNRESOLVED_DYNAMIC: {
+			label: '[unresolved]',
+			cls: 'bg-red-900/60 text-red-300',
+			title: 'Dynamic nhưng không có target trong index (reflection/monkey-patch)'
+		},
+		ALIAS: { label: '[alias]', cls: 'bg-neutral-800 text-neutral-400', title: 'Resolve qua alias' },
+		SHORT_NAME: {
+			label: '[short]',
+			cls: 'bg-neutral-800 text-neutral-400',
+			title: 'Resolve qua short-name fallback'
+		}
+	};
+
+	type Tab = 'graph' | 'flow' | 'context' | 'structure' | 'callsites' | 'pattern' | 'trace';
+
+	// ── Full-flow trace (debug-style paths caller → target) ──
+	let tracePaths = $state<FullFlowPath[]>([]);
+	let traceDepth = $state(5);
+	let traceLoading = $state(false);
+	let traceError = $state<string | null>(null);
+
+	async function loadTrace() {
+		traceLoading = true;
+		traceError = null;
+		try {
+			const d = await gql<{ traceFullFlow: FullFlowPath[] }>(QS.traceFullFlow, {
+				targetId: symbol.id,
+				maxDepth: traceDepth,
+				maxPaths: 50,
+				maxLoopIter: 1
+			});
+			tracePaths = d.traceFullFlow;
+		} catch (e) {
+			traceError = gqlError(e);
+			tracePaths = [];
+		} finally {
+			traceLoading = false;
+		}
+	}
+
+	const ACTION_LABELS: Record<string, string> = {
+		CALL: '→',
+		RETURN: '←',
+		THROW: '!',
+		ASSERT: '!!',
+		BRANCH: '§',
+		LOOP: '↻',
+		STATEMENT: '·'
+	};
+	const ACTION_CLS: Record<string, string> = {
+		CALL: 'text-sky-300',
+		RETURN: 'text-neutral-400',
+		THROW: 'text-red-300',
+		ASSERT: 'text-red-300',
+		BRANCH: 'text-amber-300',
+		LOOP: 'text-emerald-300',
+		STATEMENT: 'text-neutral-600'
+	};
+	const ENDING_CLS: Record<string, string> = {
+		RETURNED: 'text-emerald-300',
+		THREW: 'text-red-300',
+		ASSERTED: 'text-red-300',
+		DEPTH_LIMIT: 'text-amber-300',
+		PATH_LIMIT: 'text-amber-300'
+	};
+
+	// ── Call sites (references theo call name) ──
+	type CallSite = {
+		callerId: string;
+		callName: string;
+		line: number;
+		condition: string | null;
+		isLoopBody: boolean | null;
+		argExprs: string[] | null;
+	};
+	type RefResult = { funcId: string; funcName: string; file: string; callSites: CallSite[] };
+	let refQuery = $state('');
+	let refResults = $state<RefResult[]>([]);
+	let refTotal = $state(0);
+	let refLoading = $state(false);
+	let refError = $state<string | null>(null);
+
+	async function loadReferences(name: string) {
+		if (!name.trim()) return;
+		refLoading = true;
+		refError = null;
+		try {
+			const d = await gql<{ references: { results: RefResult[]; total: number } }>(QS.references, {
+				query: name.trim(),
+				limit: 50
+			});
+			refResults = d.references.results;
+			refTotal = d.references.total;
+		} catch (e) {
+			refError = gqlError(e);
+			refResults = [];
+		} finally {
+			refLoading = false;
+		}
+	}
+
+	// ── Flow-pattern search ──
+	let patQuery = $state('');
+	let patResults = $state<SearchFlowResult[]>([]);
+	let patLoading = $state(false);
+	let patError = $state<string | null>(null);
+
+	async function loadPattern(pattern: string) {
+		if (!pattern.trim()) return;
+		patLoading = true;
+		patError = null;
+		try {
+			const d = await gql<{ searchFlow: { results: SearchFlowResult[]; total: number } }>(
+				QS.searchFlow,
+				{ pattern: pattern.trim(), limit: 50, offset: 0 }
+			);
+			patResults = d.searchFlow.results;
+		} catch (e) {
+			patError = gqlError(e);
+			patResults = [];
+		} finally {
+			patLoading = false;
+		}
+	}
 	let tab = $state<Tab>('graph');
 	let relCollapsed = $state(false);
 
@@ -46,6 +190,10 @@
 		callers = [];
 		callees = [];
 		impact = [];
+		refQuery = symbol.name;
+		refResults = [];
+		refTotal = 0;
+		refError = null;
 		flow = null;
 		context = null;
 		classInfo = null;
@@ -85,6 +233,18 @@
 			impact = im.impact;
 		} catch (e) {
 			diagramErr ??= gqlError(e);
+		}
+	}
+
+	// Tìm symbol theo exact name (dynamic candidate click).
+	async function searchExact(name: string) {
+		try {
+			const d = await gql<{ searchSymbol: SearchSymbolResult }>(QS.searchSymbol, {
+				input: { query: name, mode: 'EXACT', limit: 1 }
+			});
+			if (d.searchSymbol.symbols[0]) onSelect(d.searchSymbol.symbols[0]);
+		} catch {
+			// ignore — chip chỉ là hint
 		}
 	}
 
@@ -178,7 +338,7 @@
 
 	<!-- Tabs -->
 	<div class="flex items-center gap-1 border-b border-neutral-800 px-2 py-1">
-		{#each [['graph', 'Graph'], ['flow', 'Flow'], ['structure', 'Structure'], ['context', 'Context']] as [id, label] (id)}
+		{#each [['graph', 'Graph'], ['flow', 'Flow'], ['structure', 'Structure'], ['context', 'Context'], ['callsites', 'Call sites'], ['pattern', 'Pattern'], ['trace', 'Trace']] as [id, label] (id)}
 			<button
 				class="rounded px-3 py-1 text-xs font-medium {tab === id
 					? 'bg-neutral-800 text-neutral-100'
@@ -187,6 +347,8 @@
 					tab = id as Tab;
 					if (id === 'flow') loadFlow();
 					if (id === 'context') loadContext();
+					if (id === 'callsites' && !refResults.length) void loadReferences(symbol.name);
+					if (id === 'trace' && !tracePaths.length && !traceLoading) void loadTrace();
 				}}
 			>
 				{label}
@@ -299,11 +461,210 @@
 											>{EFFECT_LABELS[c.effect]}</span
 										>
 									{/if}
+									{#if DYN_BADGES[c.resolvedVia]}
+										<span
+											class="rounded px-1 text-[10px] {DYN_BADGES[c.resolvedVia].cls}"
+											title={DYN_BADGES[c.resolvedVia].title}>{DYN_BADGES[c.resolvedVia].label}</span
+										>
+									{/if}
 								</div>
+								{#if c.candidateNames?.length}
+									<div class="ml-10 flex flex-wrap gap-1">
+										{#each c.candidateNames as cand (cand)}
+											<button
+												class="rounded bg-neutral-800/70 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 hover:bg-neutral-700"
+												title="Dynamic candidate — search by name"
+												onclick={() => searchExact(cand)}>{cand}</button
+											>
+										{/each}
+									</div>
+								{/if}
 							{/each}
 						</div>
 					{/if}
 				{/if}
+			</div>
+		{:else if tab === 'callsites'}
+			<div class="flex h-full flex-col">
+				<div class="flex gap-2 border-b border-neutral-800 px-3 py-1.5">
+					<input
+						class="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 font-mono text-xs text-neutral-100 placeholder-neutral-600 focus:border-sky-700 focus:outline-none"
+						placeholder="call name (vd fmt.Println, handler)"
+						bind:value={refQuery}
+						onkeydown={(e) => e.key === 'Enter' && void loadReferences(refQuery)}
+					/>
+					<button
+						class="rounded bg-sky-700 px-3 py-1 text-xs text-white hover:bg-sky-600 disabled:opacity-50"
+						disabled={refLoading}
+						onclick={() => void loadReferences(refQuery)}
+					>
+						{refLoading ? '…' : 'Find'}
+					</button>
+				</div>
+				<div class="thin-scroll min-h-0 flex-1 overflow-auto p-3">
+					{#if refError}
+						<div class="rounded border border-red-900 bg-red-950/40 p-2 text-xs text-red-300"
+							>{refError}</div
+						>
+					{:else if refLoading}
+						<div class="text-xs text-neutral-500">Searching call sites…</div>
+					{:else if !refResults.length}
+						<p class="mb-2 text-[11px] text-neutral-600">
+							Callers theo call name — thấy cả unresolved/library calls (kể cả dynamic:
+							fn-ptr, interface dispatch).
+						</p>
+					{:else}
+						<p class="mb-2 text-[11px] text-neutral-600">{refTotal} function(s) gọi tên này.</p>
+						{#each refResults as r (r.funcId)}
+							<div class="mb-2 rounded border border-neutral-800">
+								<div class="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900/60 px-2 py-1">
+									<button
+										class="font-mono text-xs text-sky-300 hover:underline"
+										onclick={() => void searchExact(r.funcName)}>{r.funcName}</button
+									>
+									<span class="truncate text-[10px] text-neutral-500">{r.file}</span>
+								</div>
+								<div class="flex flex-col">
+									{#each r.callSites as cs, i (i)}
+										<div class="flex items-center gap-2 px-2 py-0.5 font-mono text-[11px]">
+											<span class="w-10 shrink-0 text-neutral-600">L{cs.line}</span>
+											<span class="truncate text-neutral-300">{cs.callName}</span>
+											{#if cs.isLoopBody}
+												<span class="rounded bg-emerald-900/60 px-1 text-[9px] text-emerald-300"
+													>loop</span
+												>
+											{/if}
+											{#if cs.condition}
+												<span class="truncate text-amber-400/80">if {cs.condition}</span>
+											{/if}
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/each}
+					{/if}
+				</div>
+			</div>
+		{:else if tab === 'pattern'}
+			<div class="flex h-full flex-col">
+				<div class="flex gap-2 border-b border-neutral-800 px-3 py-1.5">
+					<input
+						class="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 font-mono text-xs text-neutral-100 placeholder-neutral-600 focus:border-sky-700 focus:outline-none"
+						placeholder="pattern: ids/markers/names phân cách bởi dấu phẩy (vd IF_TRUE, run)"
+						bind:value={patQuery}
+						onkeydown={(e) => e.key === 'Enter' && void loadPattern(patQuery)}
+					/>
+					<button
+						class="rounded bg-sky-700 px-3 py-1 text-xs text-white hover:bg-sky-600 disabled:opacity-50"
+						disabled={patLoading}
+						onclick={() => void loadPattern(patQuery)}
+					>
+						{patLoading ? '…' : 'Search'}
+					</button>
+				</div>
+				<div class="thin-scroll min-h-0 flex-1 overflow-auto p-3">
+					{#if patError}
+						<div class="rounded border border-red-900 bg-red-950/40 p-2 text-xs text-red-300"
+							>{patError}</div
+						>
+					{:else if patLoading}
+						<div class="text-xs text-neutral-500">Searching flow patterns…</div>
+					{:else if !patResults.length}
+						<p class="text-[11px] text-neutral-600">
+							Tìm hàm mà chain chứa pattern (markers: IF_TRUE, LOOP, SWITCH_CASE, RETURN…;
+							tên hàm; hoặc symbol id).
+						</p>
+					{:else}
+						<div class="flex flex-col gap-1">
+							{#each patResults as r (r.functionId)}
+								<button
+									class="flex flex-col rounded px-2 py-1.5 text-left hover:bg-neutral-800/60"
+									onclick={() => void searchExact(r.functionName)}
+								>
+									<div class="flex items-center gap-2">
+										<span class="font-mono text-xs text-neutral-100">{r.functionName}</span>
+										<span class="rounded bg-neutral-800 px-1 text-[10px] text-neutral-400"
+											>{r.matchCount} match</span
+										>
+									</div>
+									<span class="truncate font-mono text-[10px] text-neutral-500"
+										>{r.chain.slice(0, 24).join(' → ')}</span
+									>
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</div>
+		{:else if tab === 'trace'}
+			<div class="flex h-full flex-col">
+				<div class="flex items-center gap-2 border-b border-neutral-800 px-3 py-1.5 text-xs text-neutral-400">
+					<span>caller depth</span>
+					<input
+						type="number"
+						min="1"
+						max="10"
+						class="w-14 rounded border border-neutral-700 bg-neutral-950 px-1.5 py-0.5 text-xs text-neutral-200"
+						bind:value={traceDepth}
+						onchange={() => void loadTrace()}
+					/>
+					<span class="text-neutral-600">
+						{tracePaths.length} path(s) từ callers → {symbol.name}
+					</span>
+				</div>
+				<div class="thin-scroll min-h-0 flex-1 overflow-auto p-3">
+					{#if traceError}
+						<div class="rounded border border-red-900 bg-red-950/40 p-2 text-xs text-red-300"
+							>{traceError}</div
+						>
+					{:else if traceLoading}
+						<div class="text-xs text-neutral-500">Tracing full flow…</div>
+					{:else if !tracePaths.length}
+						<p class="text-[11px] text-neutral-600">
+							Debug-style path: mọi tuyến từ caller xuống {symbol.name} kèm call/return/branch.
+						</p>
+					{:else}
+						<div class="flex flex-col gap-3">
+							{#each tracePaths as path, pi (pi)}
+								<div class="rounded border border-neutral-800">
+									<div class="border-b border-neutral-800 bg-neutral-900/60 px-2 py-1 text-[11px]">
+										<span class="font-mono text-neutral-400">path #{pi + 1}</span>
+										<span class="ml-2 {ENDING_CLS[path.endedWith] ?? 'text-neutral-400'}"
+											>{path.endedWith.toLowerCase()}</span
+										>
+									</div>
+									<div class="flex flex-col py-1">
+										{#each path.steps as st, si (si)}
+											<div
+												class="flex items-center gap-2 px-2 py-0.5 font-mono text-[11px]"
+												style="padding-left: {8 + st.stackDepth * 14}px"
+											>
+												<span class="w-4 shrink-0 {ACTION_CLS[st.action] ?? 'text-neutral-400'}"
+													>{ACTION_LABELS[st.action] ?? '·'}</span
+												>
+												{#if st.action === 'CALL'}
+													<button
+														class="text-sky-300 hover:underline"
+														onclick={() => void searchExact(st.symbolName)}
+														>{st.symbolName}</button
+													>
+												{:else}
+													<span class="text-neutral-300">{st.symbolName}</span>
+												{/if}
+												{#if st.line}
+													<span class="text-neutral-600">L{st.line}</span>
+												{/if}
+												{#if st.condition}
+													<span class="truncate text-amber-400/80">if {st.condition}</span>
+												{/if}
+											</div>
+										{/each}
+									</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</div>
 			</div>
 		{:else if tab === 'structure'}
 			<div class="thin-scroll h-full overflow-auto p-4">

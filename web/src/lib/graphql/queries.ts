@@ -32,6 +32,12 @@ export interface SearchSymbolResult {
 	indexVersion: number;
 }
 
+export interface AnnotationSearchResult {
+	symbols: Symbol[];
+	total: number;
+	hasMore: boolean;
+}
+
 export interface FileInfo {
 	path: string;
 	language: string;
@@ -87,6 +93,8 @@ export interface FlowCall {
 	effect: string;
 	effectDesc: string | null;
 	args: string[];
+	resolvedVia: string;
+	candidateNames: string[];
 }
 
 export interface FlowResult {
@@ -94,6 +102,21 @@ export interface FlowResult {
 	chain: string[];
 	chainDesc: string[];
 	calls: FlowCall[];
+}
+
+export interface FlowStep {
+	symbolId: string;
+	symbolName: string;
+	file: string;
+	line: number;
+	action: string;
+	stackDepth: number;
+	condition: string | null;
+}
+
+export interface FullFlowPath {
+	steps: FlowStep[];
+	endedWith: string;
 }
 
 export interface SearchFlowResult {
@@ -169,6 +192,20 @@ export const QS = {
 
 	uiConfig: `query { uiConfig }`,
 
+	searchByAnnotation: `
+		query SearchByAnnotation($annotation: String!, $kind: SymbolKind, $limit: Int, $offset: Int) {
+			graphcodeSearchByAnnotation(
+				annotation: $annotation
+				kind: $kind
+				limit: $limit
+				offset: $offset
+			) {
+				symbols { ${SYMBOL_FIELDS} }
+				total
+				hasMore
+			}
+		}`,
+
 	searchSymbol: `
 		query Search($input: SearchSymbolInput!) {
 			searchSymbol(input: $input) {
@@ -202,7 +239,28 @@ export const QS = {
 			flow(id: $id) {
 				symbol { ${SYMBOL_FIELDS} }
 				chain chainDesc
-				calls { position toName toId line condition effect effectDesc args }
+				calls { position toName toId line condition effect effectDesc args resolvedVia candidateNames }
+			}
+		}`,
+
+	traceFullFlow: `
+		query Trace($targetId: ID!, $maxDepth: Int, $maxPaths: Int, $maxLoopIter: Int) {
+			traceFullFlow(
+				targetId: $targetId
+				maxDepth: $maxDepth
+				maxPaths: $maxPaths
+				maxLoopIter: $maxLoopIter
+			) {
+				steps {
+					symbolId
+					symbolName
+					file
+					line
+					action
+					stackDepth
+					condition
+				}
+				endedWith
 			}
 		}`,
 
