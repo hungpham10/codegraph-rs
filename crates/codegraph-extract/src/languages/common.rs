@@ -71,6 +71,9 @@ pub struct LangSpec {
     pub calls: &'static [CallRule],
     /// Lấy type_name cho class symbol (TS `extends`/`implements` heritage).
     pub class_type_name: Option<ClassTypeFn>,
+    /// Trait/interface mà impl block hiện thực: `(class node, src) -> trait name`
+    /// (Rust `impl Display for Foo` → `"Display"`).
+    pub impl_trait_fn: Option<ClassTypeFn>,
     /// Cho phép dùng field `type` làm tên khi thiếu name/declarator (VD Rust
     /// `impl Foo` — tên nằm ở `type`). Bật cho ngôn ngữ không có node kind
     /// xung đột (C# `variable_declaration{type}` phải để false).
@@ -330,6 +333,11 @@ fn push_symbol(
         }
         _ => None,
     };
+    let impl_trait = if matches!(kind, SymbolKind::Class | SymbolKind::Interface) {
+        spec.impl_trait_fn.and_then(|f| f(node, ctx.src))
+    } else {
+        None
+    };
 
     let line = name_node.start_position().row as u32 + 1;
     let end_line = node
@@ -354,6 +362,7 @@ fn push_symbol(
         doc: None,
         annotations,
         language: ctx.language.to_string(),
+        impl_trait,
     });
     Some(id)
 }
@@ -1109,6 +1118,9 @@ fn emit_case_label(ctx: &mut ChainCtx, case: &Node, in_loop: u32, condition: Opt
         target_method: None,
         into_var: None,
         is_new_var: false,
+        receiver_text: None,
+        resolved_via: codegraph_core::ResolutionKind::default(),
+        candidates: Vec::new(),
     });
 }
 
@@ -1199,6 +1211,9 @@ fn emit_branch_label(ctx: &mut ChainCtx, label: &str) {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        receiver_text: None,
+        resolved_via: codegraph_core::ResolutionKind::default(),
+        candidates: Vec::new(),
     });
 }
 
@@ -1263,6 +1278,9 @@ fn emit_call(
         .target_fn
         .map(|f| f(node, ctx.src))
         .unwrap_or((None, None));
+    // Receiver text: khi callee là `recv.method(...)` — hint cho resolve phase
+    // quyết định dynamic dispatch (trait/interface/function pointer).
+    let receiver_text = receiver_of_callee(&callee, ctx.src);
     ctx.calls.push(CallRecord {
         caller_id: ctx.func_id,
         call_name: name,
@@ -1277,7 +1295,23 @@ fn emit_call(
         target_method,
         into_var: None,
         is_new_var: false,
+        receiver_text,
+        resolved_via: codegraph_core::ResolutionKind::default(),
+        candidates: Vec::new(),
     });
+}
+
+/// Text receiver của callee dạng `recv.method()` — node con trước dấu chấm.
+/// `field_expression` (Rust/C/Java/Go/TS...) có field `object`; grammar khác
+/// fallback về named child đầu tiên. Trả `None` cho call thuần (`plain_fn()`).
+fn receiver_of_callee<'a>(callee: &Node<'a>, src: &'a [u8]) -> Option<String> {
+    if callee.kind() != "field_expression" && callee.kind() != "attribute" {
+        return None;
+    }
+    let obj = callee
+        .child_by_field_name("object")
+        .or_else(|| named_children(callee).into_iter().next())?;
+    text(&obj, src).filter(|t| !t.is_empty())
 }
 
 // ==================== Helpers ====================

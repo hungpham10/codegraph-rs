@@ -291,6 +291,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
         }
     }
 

@@ -44,6 +44,7 @@ pub static SPEC: LangSpec = LangSpec {
         target_fn: None,
     }],
     class_type_name: Some(rust_class_type_name),
+    impl_trait_fn: Some(rust_impl_trait_name),
     if_kinds: &["if_expression", "if_let_expression"],
     elif_kinds: &[],
     if_block_kinds: &[],
@@ -83,6 +84,20 @@ fn rust_class_type_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String> 
 }
 
 crate::lang_parser!(RustParser, SPEC);
+
+/// Trait name của `impl Trait for Type` — field `trait` của impl_item.
+/// Normalize generic: `Iterator<Item = u8>` → `"Iterator"` (fan-out index key
+/// phải khớp tên trait thuần).
+fn rust_impl_trait_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    if node.kind() != "impl_item" {
+        return None;
+    }
+    let raw = node
+        .child_by_field_name("trait")
+        .and_then(|t| text(&t, src))?;
+    let name = raw.split('<').next()?.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
 
 #[cfg(test)]
 mod tests {
@@ -175,5 +190,70 @@ impl Foo {
             new_method.scope_id, struct_id,
             "method should be scoped to the struct, not the impl"
         );
+    }
+
+    #[test]
+    fn rust_impl_trait_name_extracted_and_normalized() {
+        let src = r#"
+pub trait Handler { fn handle(&self); }
+pub struct A;
+pub struct B;
+impl Handler for A { fn handle(&self) {} }
+impl std::fmt::Display for B { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) } }
+impl A { fn inherent(&self) {} }
+"#;
+        let syms = parse(src);
+
+        let trait_impl = syms
+            .iter()
+            .find(|s| s.impl_trait.as_deref() == Some("Handler"))
+            .expect("impl Handler symbol not found");
+        assert_eq!(trait_impl.name, "A");
+
+        // Qualified trait `std::fmt::Display` — normalize giữ phần sau chấm cuối?
+        // Không: fan-out key khớp tên trait thuần, giữ nguyên text đầy đủ.
+        let display_impl = syms
+            .iter()
+            .find(|s| s.impl_trait.is_some() && s.name == "B")
+            .expect("impl Display symbol not found");
+        assert!(display_impl
+            .impl_trait
+            .as_deref()
+            .unwrap()
+            .contains("Display"));
+
+        // Inherent impl không có trait.
+        let inherent = syms
+            .iter()
+            .find(|s| s.name == "A" && s.kind == SymbolKind::Class)
+            .expect("inherent impl not found");
+        assert_eq!(inherent.impl_trait, None);
+    }
+
+    #[test]
+    fn rust_method_call_records_receiver_text() {
+        let src = r#"
+struct S;
+impl S {
+    fn go(&self, h: &dyn Handler) {
+        h.handle();
+        plain();
+    }
+}
+"#;
+        let parsed = super::RustParser::new().parse_file("test.rs", src).unwrap();
+        let method_call = parsed
+            .calls
+            .iter()
+            .find(|c| c.call_name.ends_with("handle"))
+            .expect("method call not found");
+        assert_eq!(method_call.receiver_text.as_deref(), Some("h"));
+
+        let plain = parsed
+            .calls
+            .iter()
+            .find(|c| c.call_name == "plain")
+            .expect("plain call not found");
+        assert_eq!(plain.receiver_text, None);
     }
 }

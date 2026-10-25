@@ -42,6 +42,7 @@ pub static SPEC: LangSpec = LangSpec {
         target_fn: None,
     }],
     class_type_name: None,
+    impl_trait_fn: None,
     if_kinds: &["if_expression"],
     elif_kinds: &[],
     if_block_kinds: &[],

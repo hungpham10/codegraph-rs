@@ -1078,5 +1078,6 @@ fn row_to_symbol(row: &PgRow) -> Result<Symbol> {
         doc,
         annotations,
         language,
+        impl_trait: None,
     })
 }

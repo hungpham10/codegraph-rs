@@ -29,6 +29,7 @@ fn sym(file: &str, name: &str, id: u64) -> Symbol {
         doc: None,
         annotations: Vec::new(),
         language: "ts".to_string(),
+        impl_trait: None,
     }
 }
 
@@ -69,6 +70,7 @@ async fn index_ingest_reopen_roundtrip() {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        ..Default::default()
     }];
     let r = result(
         "a.ts",
@@ -271,6 +273,7 @@ async fn long_path_and_call_name_survive_roundtrip() {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        ..Default::default()
     }];
     let r = result(
         &long_path,

@@ -243,6 +243,18 @@ fn node_style(
     };
     let mut label = label;
     if let Some(c) = call {
+        // Dynamic dispatch: nhãn `[dyn]` + candidates để người đọc thấy đây là
+        // điểm mù tĩnh và biết các target khả dĩ.
+        if matches!(
+            c.resolved_via,
+            codegraph_core::ResolutionKind::HierarchyFanOut
+                | codegraph_core::ResolutionKind::UnresolvedDynamic
+        ) {
+            label = format!("[dyn] {label}");
+            if !c.candidate_names.is_empty() {
+                label.push_str(&format!(" → {}", c.candidate_names.join(", ")));
+            }
+        }
         if c.line > 0 {
             label.push_str(&format!(" · L{}", c.line));
         }
@@ -741,6 +753,7 @@ mod tests {
                 doc: None,
                 annotations: Vec::new(),
                 language: "typescript".into(),
+                impl_trait: None,
             },
             chain,
             chain_desc: desc.into_iter().map(String::from).collect(),
@@ -779,6 +792,8 @@ mod tests {
             args: Vec::new(),
             into_var: None,
             is_new_var: false,
+            resolved_via: codegraph_core::ResolutionKind::default(),
+            candidate_names: Vec::new(),
         }
     }
 

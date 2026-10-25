@@ -22,6 +22,7 @@ fn sym(id: u64, name: &str) -> Symbol {
         doc: None,
         annotations: Vec::new(),
         language: "typescript".into(),
+        impl_trait: None,
     }
 }
 
@@ -60,6 +61,7 @@ async fn seed_index(path: &str) -> (u64, u64, u64) {
             target_method: None,
             into_var: None,
             is_new_var: false,
+            ..Default::default()
         }],
     };
     idx.ingest(&[r], None).await.unwrap();
@@ -357,6 +359,7 @@ async fn seed_references(db: &str, count: usize) {
                 target_method: None,
                 into_var: None,
                 is_new_var: false,
+                ..Default::default()
             }],
         });
     }

@@ -28,6 +28,7 @@ fn sym(file: &str, name: &str, id: u64) -> Symbol {
         doc: None,
         annotations: Vec::new(),
         language: "ts".to_string(),
+        impl_trait: None,
     }
 }
 
@@ -76,6 +77,7 @@ async fn index_ingest_reopen_roundtrip() {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        ..Default::default()
     }];
     let r = result(
         "a.ts",
@@ -351,6 +353,7 @@ async fn external_qualified_call_not_linked_to_local_variable() {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        ..Default::default()
     }];
     let r = result(
         "UserController.java",

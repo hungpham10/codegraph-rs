@@ -69,9 +69,9 @@ use codegraph_core::{
     MARKER_BRANCH_END, MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CATCH_START,
     MARKER_CONTINUE, MARKER_IF_FALSE, MARKER_IF_TRUE, MARKER_LOOP, MARKER_LOOP_BACK, MARKER_RETURN,
     MARKER_SWITCH_CASE, MARKER_SWITCH_CLOSE, MARKER_SWITCH_END, MARKER_SWITCH_START, MARKER_THROW,
-    MARKER_TRY_END, MARKER_TRY_START, MemberInfo, PathEnding, ResolveResult, SYMBOL_BASE,
-    SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch, TraceAction,
-    is_marker, marker_name,
+    MARKER_TRY_END, MARKER_TRY_START, MemberInfo, PathEnding, ResolutionKind, ResolveResult,
+    SYMBOL_BASE, SearchFlowResult, SemgraphStats, StorageRoute, Symbol, SymbolKind, SymbolMatch,
+    TraceAction, is_marker, marker_name,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -301,6 +301,16 @@ struct CallRef<'a> {
     caller: u64,
 }
 
+/// Kết quả resolve một call placeholder.
+enum CallResolution {
+    /// Không resolve được (behavior cũ: giữ placeholder + raw name).
+    None,
+    /// Resolve tĩnh — ghi đè chain slot bằng id thật.
+    Single(u64, ResolutionKind),
+    /// Dynamic dispatch — fan-out candidates, chain giữ placeholder.
+    FanOut(Vec<u64>, ResolutionKind),
+}
+
 // ==================== GraphIndex ====================
 
 /// Index chính (semgraph-style): registry + 2 engine + inverted indexes.
@@ -336,6 +346,10 @@ pub struct GraphIndex {
     chains_map: HashMap<u64, Vec<u64>>,
     /// call name (lowercase, kèm alias type-qualified) → call sites.
     call_names: HashMap<String, Vec<CallSite>>,
+    /// Trait/interface name (lowercase) → impl method ids — fan-out dynamic
+    /// dispatch. Build từ `Symbol.impl_trait` khi ingest; in-memory (blob call
+    /// record đã persist candidates nên reopen không cần index này).
+    impl_index: HashMap<String, Vec<u64>>,
     /// Số edge `(caller, callee)` — đếm từ chains lúc ingest/rebuild.
     /// Metadata của edge (condition/effect/...) KHÔNG materialize thành map:
     /// đã nằm trong call records persist, `flow()` đọc thẳng từ đó.
@@ -1003,6 +1017,7 @@ impl GraphIndex {
             scope_index: HashMap::new(),
             chains_map: HashMap::new(),
             call_names: HashMap::new(),
+            impl_index: HashMap::new(),
             edge_count: 0,
             files: Vec::new(),
             next_id: SYMBOL_BASE,
@@ -1426,6 +1441,7 @@ impl GraphIndex {
         self.scope_index.clear();
         self.chains_map.clear();
         self.call_names.clear();
+        self.impl_index.clear();
         self.edge_count = 0;
         self.files.clear();
         self.name_records.clear();
@@ -1475,10 +1491,12 @@ impl GraphIndex {
         self.rebuild_scope_index();
 
         // ── Phase 2: resolve placeholder 0 trong chains ──
-        self.resolve_calls(&all_calls);
+        self.build_impl_index();
+        let mut call_meta: HashMap<(u64, usize), (ResolutionKind, Vec<u64>)> = HashMap::new();
+        self.resolve_calls(&all_calls, &mut call_meta);
 
         // ── Phase 3: call records + call-name index + edge count ──
-        self.build_call_indexes(&all_calls, p).await?;
+        self.build_call_indexes(&all_calls, &call_meta, p).await?;
 
         // ── Phase 4: files ──
         if let Some(p) = p {
@@ -1585,7 +1603,15 @@ impl GraphIndex {
     }
 
     /// Thay placeholder `0` trong chain bằng id thật (resolve per-caller).
-    fn resolve_calls(&mut self, calls: &[CallRef<'_>]) {
+    ///
+    /// Metadata resolution (`resolved_via` + `candidates` cho dynamic fan-out)
+    /// gom vào `meta` — không sửa được `CallRecord` vì `CallRef` mượn `&` từ
+    /// `ParseResult`; `build_call_indexes` inject metadata khi persist blob.
+    fn resolve_calls(
+        &mut self,
+        calls: &[CallRef<'_>],
+        meta: &mut HashMap<(u64, usize), (ResolutionKind, Vec<u64>)>,
+    ) {
         let mut caller_calls: HashMap<u64, Vec<&CallRecord>> = HashMap::new();
         for c in calls {
             if c.caller != 0 {
@@ -1604,8 +1630,17 @@ impl GraphIndex {
                     if c.position >= chain.len() || chain[c.position] != 0 {
                         continue;
                     }
-                    if let Some(real) = self.resolve_call_placeholder(c, caller_id) {
-                        resolved.push((c.position, real));
+                    match self.resolve_call_placeholder(c, caller_id) {
+                        CallResolution::None => {}
+                        CallResolution::Single(real, kind) => {
+                            resolved.push((c.position, real));
+                            meta.insert((caller_id, c.position), (kind, Vec::new()));
+                        }
+                        CallResolution::FanOut(cands, kind) => {
+                            // Dynamic dispatch — KHÔNG ghi đè chain slot
+                            // (placeholder 0 giữ raw name hiển thị).
+                            meta.insert((caller_id, c.position), (kind, cands));
+                        }
                     }
                 }
             }
@@ -1617,17 +1652,49 @@ impl GraphIndex {
         }
     }
 
+    /// Index dynamic-dispatch fan-out: trait/interface name → impl methods.
+    /// Nguyên liệu: `Symbol.impl_trait` (Rust `impl Trait for Type`).
+    ///
+    /// Lưu ý: `link_impl_methods_to_def` (extractor) re-parent method của impl
+    /// về struct def, nên KHÔNG thể map method → impl qua `scope_id`. Dùng
+    /// file + line range của impl block để gán method (method nằm trong
+    /// [line..end_line] của đúng một impl block cùng file).
+    fn build_impl_index(&mut self) {
+        // (file, line, end_line, trait_name lower) của các impl block có trait.
+        let mut trait_impls: Vec<(String, u32, u32, String)> = Vec::new();
+        for s in self.symbols.values() {
+            if let Some(tr) = &s.impl_trait {
+                trait_impls.push((s.file.clone(), s.line, s.end_line, tr.to_lowercase()));
+            }
+        }
+        if trait_impls.is_empty() {
+            return;
+        }
+        for sym in self.symbols.values() {
+            if !matches!(sym.kind, SymbolKind::Method | SymbolKind::Function) {
+                continue;
+            }
+            if let Some((_, _, _, tr)) = trait_impls
+                .iter()
+                .find(|(f, l, e, _)| f == &sym.file && sym.line >= *l && sym.line <= *e)
+            {
+                self.impl_index.entry(tr.clone()).or_default().push(sym.id);
+            }
+        }
+    }
+
     /// Resolve một call record về real symbol id — trả `None` nếu không được.
     ///
     /// Ưu tiên: structural hint (TargetClass/TargetMethod — VD Java class
     /// literal) → exact name → short name (phần sau dấu chấm) → best-candidate
-    /// (@Override +10 / has-chain +5 / same-file +3).
-    fn resolve_call_placeholder(&self, call: &CallRecord, caller_id: u64) -> Option<u64> {
+    /// (@Override +10 / has-chain +5 / same-file +3) → hierarchy fan-out
+    /// (dynamic dispatch — chỉ khi mọi đường tĩnh thất bại).
+    fn resolve_call_placeholder(&self, call: &CallRecord, caller_id: u64) -> CallResolution {
         // 1. Try class/method target hints (used mainly for Java).
         if let (Some(tc), Some(tm)) = (&call.target_class, &call.target_method)
             && let Some(id) = self.lookup_method_of_class(tc, tm)
         {
-            return Some(id);
+            return CallResolution::Single(id, ResolutionKind::Exact);
         }
 
         // 2. Direct name lookup (full qualified name).
@@ -1639,10 +1706,14 @@ impl GraphIndex {
 
         // 3. Independent lookup paths: alias ("var.method" → "TypeName.method")
         //    AND short name fallback — merge results instead of sequential fallback.
+        let mut via_alias = false;
         if candidates.is_empty() {
             // 3a. Go/Import alias: resolve "var.method" via field type to "TypeName.method".
             if let Some(qualified) = self.alias_qualified_name(caller_id, &call.call_name) {
                 let alias_ids = self.name_index.get(&qualified).cloned().unwrap_or_default();
+                if !alias_ids.is_empty() {
+                    via_alias = true;
+                }
                 candidates.extend(alias_ids);
             }
 
@@ -1655,12 +1726,11 @@ impl GraphIndex {
                 .to_lowercase();
             if !short.is_empty() {
                 let short_ids = self.name_index.get(&short).cloned().unwrap_or_default();
+                if !short_ids.is_empty() {
+                    via_alias = true;
+                }
                 candidates.extend(short_ids);
             }
-        }
-
-        if candidates.is_empty() {
-            return None;
         }
 
         // 4. Filter to Function/Method kinds AND exclude the caller itself.
@@ -1675,10 +1745,117 @@ impl GraphIndex {
                     .is_some_and(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
         });
 
-        if candidates.is_empty() {
-            return None;
+        if !candidates.is_empty() {
+            // Dynamic dispatch ưu tiên best-guess: nếu candidates chứa method
+            // KHAI BÁO trong trait/interface (không phải impl), đây gần như chắc
+            // chắn là dispatch động — chọn 1 best guess ở đây chính là bug
+            // "resolve sai một cách có tự tin". Fan-out mọi impl thay vì chọn.
+            let trait_names: Vec<&str> = candidates
+                .iter()
+                .filter_map(|&id| {
+                    let m = self.symbols.get(&id)?;
+                    if !matches!(m.kind, SymbolKind::Method | SymbolKind::Function) {
+                        return None;
+                    }
+                    let tr = self.symbols.get(&m.scope_id)?;
+                    (tr.kind == SymbolKind::Interface).then_some(tr.name.as_str())
+                })
+                .collect();
+            if !trait_names.is_empty() {
+                // Fan-out chỉ áp dụng cho method dispatch (có receiver —
+                // `h.handle`). Bare call `handle` với ứng viên Function tĩnh
+                // thì resolve tĩnh thắng (free function trùng tên trait method
+                // là trùng hợp tên, không phải dispatch).
+                let is_method_dispatch = call.call_name.contains('.');
+                let all_interface = candidates.iter().all(|&id| {
+                    self.symbols
+                        .get(&id)
+                        .and_then(|m| self.symbols.get(&m.scope_id))
+                        .is_some_and(|tr| tr.kind == SymbolKind::Interface)
+                });
+                if is_method_dispatch || all_interface {
+                    return self.collect_fanout(&trait_names, caller_id);
+                }
+            }
+            let kind = if via_alias {
+                ResolutionKind::Alias
+            } else {
+                ResolutionKind::Exact
+            };
+            return CallResolution::Single(
+                self.pick_best_candidate(&candidates, caller_id, &call.call_name),
+                kind,
+            );
         }
-        Some(self.pick_best_candidate(&candidates, caller_id, &call.call_name))
+
+        // 5. Dynamic dispatch fan-out: short name khớp method khai báo trong
+        //    trait/interface → fan-out mọi impl (CHA-style over-approximation).
+        self.hierarchy_fanout(call, caller_id)
+    }
+
+    /// Gom candidates fan-out cho danh sách trait/interface names: mọi impl
+    /// method của trait (qua `impl_index`).
+    ///
+    /// - Có impl → `FanOut(candidates, HierarchyFanOut)`.
+    /// - Trait method nhưng repo không có impl nào → `FanOut([], UnresolvedDynamic)`
+    ///   (flag ranh giới soundiness — reflection/monkey-patch rơi vào đây).
+    fn collect_fanout(&self, trait_names: &[&str], caller_id: u64) -> CallResolution {
+        let mut cands: Vec<u64> = Vec::new();
+        for tr in trait_names {
+            if let Some(ids) = self.impl_index.get(&tr.to_lowercase()) {
+                cands.extend(ids.iter().copied().filter(|&id| id != caller_id));
+            }
+        }
+        cands.sort_unstable();
+        cands.dedup();
+        let kind = if cands.is_empty() {
+            ResolutionKind::UnresolvedDynamic
+        } else {
+            ResolutionKind::HierarchyFanOut
+        };
+        CallResolution::FanOut(cands, kind)
+    }
+
+    /// Fan-out qua trait/interface hierarchy — đường resolve cuối cùng, chỉ chạy
+    /// khi mọi đường tĩnh thất bại. Short name khớp method thuộc `Interface`
+    /// symbol → candidates = mọi impl method cùng tên (`impl_index`).
+    ///
+    /// - Có impl → `FanOut(candidates, HierarchyFanOut)`.
+    /// - Trait method nhưng repo không có impl nào → `FanOut([], UnresolvedDynamic)`
+    ///   (flag ranh giới soundiness — reflection/monkey-patch rơi vào đây).
+    /// - Không khớp trait method nào → `None` (behavior cũ).
+    fn hierarchy_fanout(&self, call: &CallRecord, caller_id: u64) -> CallResolution {
+        let short = call
+            .call_name
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if short.is_empty() {
+            return CallResolution::None;
+        }
+        let Some(method_ids) = self.name_index.get(&short) else {
+            return CallResolution::None;
+        };
+        // Method của trait/interface nào mang tên này?
+        let mut trait_names: Vec<&str> = Vec::new();
+        for &mid in method_ids {
+            let Some(m) = self.symbols.get(&mid) else {
+                continue;
+            };
+            if !matches!(m.kind, SymbolKind::Method | SymbolKind::Function) {
+                continue;
+            }
+            if let Some(tr) = self.symbols.get(&m.scope_id)
+                && tr.kind == SymbolKind::Interface
+            {
+                trait_names.push(&tr.name);
+            }
+        }
+        if trait_names.is_empty() {
+            return CallResolution::None;
+        }
+        self.collect_fanout(&trait_names, caller_id)
     }
 
     /// Tìm method của class theo tên (scope_id == class id).
@@ -1804,6 +1981,7 @@ impl GraphIndex {
     async fn build_call_indexes(
         &mut self,
         calls: &[CallRef<'_>],
+        call_meta: &HashMap<(u64, usize), (ResolutionKind, Vec<u64>)>,
         progress: Option<&dyn IngestProgress>,
     ) -> Result<()> {
         // Chỉ lưu **index** vào `calls` (4 B) thay vì clone `CallRecord`
@@ -1821,6 +1999,10 @@ impl GraphIndex {
             }
 
             // Call-site index: key theo tên thô + alias type-qualified (nếu có).
+            let (resolved_via, candidates) = call_meta
+                .get(&(caller, c.position))
+                .map(|(k, cands)| (*k, cands.len() as u32))
+                .unwrap_or((ResolutionKind::Exact, 0));
             let site = CallSite {
                 caller_id: caller,
                 call_name: c.call_name.clone(),
@@ -1828,6 +2010,8 @@ impl GraphIndex {
                 condition: c.condition.clone(),
                 is_loop_body: c.is_loop_body,
                 arg_exprs: c.arg_exprs.clone(),
+                resolved_via,
+                candidates,
             };
             let raw_key = c.call_name.to_lowercase();
             self.call_names
@@ -1844,6 +2028,7 @@ impl GraphIndex {
         // Đếm edges từ mọi chain — metadata không materialize (đã nằm trong
         // call records persist; `flow()` đọc thẳng từ đó).
         // Vị trí 0 = chính func id (owner) — không phải call.
+        // Dynamic fan-out: mỗi candidate là một edge ẩn trên chain slot 0.
         self.edge_count = self
             .chains_map
             .values()
@@ -1854,16 +2039,35 @@ impl GraphIndex {
                     .filter(|&&e| e != 0 && !is_marker(e))
                     .count() as u64
             })
-            .sum();
+            .sum::<u64>()
+            + call_meta
+                .values()
+                .map(|(_, cands)| cands.len() as u64)
+                .sum::<u64>();
 
-        // Persist call records (gom theo caller).
+        // Persist call records (gom theo caller) — inject metadata resolve
+        // (`resolved_via` + `candidates`) vào bản clone trước khi serialize.
         if let Some(p) = progress
             && !recs_by_caller.is_empty()
         {
             p.phase("save call records", recs_by_caller.len());
         }
         for (caller, idxs) in recs_by_caller {
-            let recs: Vec<&CallRecord> = idxs.iter().map(|&i| calls[i as usize].rec).collect();
+            let recs: Vec<CallRecord> = idxs
+                .iter()
+                .map(|&i| {
+                    let c = calls[i as usize].rec;
+                    match call_meta.get(&(caller, c.position)) {
+                        Some((kind, cands)) => {
+                            let mut r = c.clone();
+                            r.resolved_via = *kind;
+                            r.candidates = cands.clone();
+                            r
+                        }
+                        None => c.clone(),
+                    }
+                })
+                .collect();
             // `rec.caller_id` ghi ra đây là id **local** của file, không phải
             // id global — vô hại: mọi reader (`flow`, `bingraph`) lấy caller id
             // từ **key** của blob, không đọc field này. Nếu sau này cần id
@@ -2221,6 +2425,12 @@ impl GraphIndex {
                         args: rec.arg_exprs.clone(),
                         into_var: rec.into_var.clone(),
                         is_new_var: rec.is_new_var,
+                        resolved_via: rec.resolved_via,
+                        candidate_names: rec
+                            .candidates
+                            .iter()
+                            .filter_map(|&cid| self.symbols.get(&cid).map(|s| s.name.clone()))
+                            .collect(),
                     });
                 }
                 continue;
@@ -2242,6 +2452,15 @@ impl GraphIndex {
                 args: rec.map(|r| r.arg_exprs.clone()).unwrap_or_default(),
                 into_var: rec.and_then(|r| r.into_var.clone()),
                 is_new_var: rec.map(|r| r.is_new_var).unwrap_or(false),
+                resolved_via: rec.map(|r| r.resolved_via).unwrap_or_default(),
+                candidate_names: rec
+                    .map(|r| {
+                        r.candidates
+                            .iter()
+                            .filter_map(|&cid| self.symbols.get(&cid).map(|s| s.name.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
         }
 
@@ -4130,6 +4349,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "test".to_string(),
+            impl_trait: None,
         }
     }
 
@@ -4453,6 +4673,7 @@ mod tests {
                 target_method: None,
                 into_var: None,
                 is_new_var: false,
+                ..Default::default()
             },
             CallRecord {
                 caller_id: SYMBOL_BASE,
@@ -4468,6 +4689,7 @@ mod tests {
                 target_method: None,
                 into_var: None,
                 is_new_var: false,
+                ..Default::default()
             },
         ];
         let r = result(
@@ -4493,6 +4715,225 @@ mod tests {
         assert_eq!(cees.len(), 2);
     }
 
+    // ── Dynamic dispatch: trait/interface fan-out ──
+
+    /// Symbol với kind/scope/impl_trait tùy ý — cho test dynamic dispatch.
+    /// `line` quan trọng: `build_impl_index` gán method vào trait impl theo
+    /// line range của impl block (giống extractor re-parent method về def).
+    #[allow(clippy::too_many_arguments)]
+    fn dsym(
+        id: u64,
+        name: &str,
+        kind: SymbolKind,
+        scope_id: u64,
+        impl_trait: Option<&str>,
+        line: u32,
+    ) -> Symbol {
+        Symbol {
+            id,
+            name: name.to_string(),
+            kind,
+            scope: ScopeLevel::Global,
+            scope_id,
+            type_ref: 0,
+            type_name: None,
+            file: "t.rs".to_string(),
+            line,
+            // Impl block cần range chứa method con (method line = line + 1).
+            end_line: if impl_trait.is_some() { line + 9 } else { line },
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "rust".to_string(),
+            impl_trait: impl_trait.map(String::from),
+        }
+    }
+
+    #[tokio::test]
+    async fn dyn_trait_call_fans_out_to_impls() {
+        let mut idx = GraphIndex::in_memory();
+        let (caller, trait_id, m1, m2) = (
+            SYMBOL_BASE,
+            SYMBOL_BASE + 1,
+            SYMBOL_BASE + 2,
+            SYMBOL_BASE + 3,
+        );
+        let r = result(
+            "t.rs",
+            vec![
+                dsym(caller, "caller", SymbolKind::Function, 0, None, 50),
+                // trait Handler { fn handle(&self); }
+                dsym(trait_id, "Handler", SymbolKind::Interface, 0, None, 1),
+                dsym(
+                    SYMBOL_BASE + 4,
+                    "handle",
+                    SymbolKind::Method,
+                    trait_id,
+                    None,
+                    2,
+                ),
+                // impl Handler for A { fn handle ... } / impl Handler for B {...}
+                dsym(
+                    SYMBOL_BASE + 5,
+                    "ImplA",
+                    SymbolKind::Class,
+                    0,
+                    Some("Handler"),
+                    10,
+                ),
+                dsym(m1, "handle", SymbolKind::Method, SYMBOL_BASE + 5, None, 11),
+                dsym(
+                    SYMBOL_BASE + 7,
+                    "ImplB",
+                    SymbolKind::Class,
+                    0,
+                    Some("Handler"),
+                    30,
+                ),
+                dsym(m2, "handle", SymbolKind::Method, SYMBOL_BASE + 7, None, 31),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "h.handle".to_string(),
+                position: 1,
+                line: 51,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                receiver_text: Some("h".to_string()),
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[r], None).await.unwrap();
+
+        // Chain giữ placeholder + raw name (không ghi đè bằng 1 best guess).
+        let flow = idx.flow(caller).await.unwrap();
+        assert_eq!(flow.chain, vec![caller, 0]);
+        assert_eq!(flow.chain_desc[1], "h.handle");
+        let fc = &flow.calls[0];
+        assert_eq!(fc.resolved_via, ResolutionKind::HierarchyFanOut);
+        let mut names = fc.candidate_names.clone();
+        names.sort();
+        assert_eq!(names, vec!["handle", "handle"]);
+
+        // Mỗi candidate là một edge ẩn trên slot 0 → edge_count = 2.
+        assert_eq!(idx.stats().edges, 2);
+    }
+
+    #[tokio::test]
+    async fn trait_method_without_impl_is_unresolved_dynamic() {
+        let mut idx = GraphIndex::in_memory();
+        let (caller, trait_id) = (SYMBOL_BASE, SYMBOL_BASE + 1);
+        let r = result(
+            "t.rs",
+            vec![
+                dsym(caller, "caller", SymbolKind::Function, 0, None, 10),
+                dsym(trait_id, "Missing", SymbolKind::Interface, 0, None, 1),
+                dsym(
+                    SYMBOL_BASE + 2,
+                    "run",
+                    SymbolKind::Method,
+                    trait_id,
+                    None,
+                    2,
+                ),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "x.run".to_string(),
+                position: 1,
+                line: 11,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[r], None).await.unwrap();
+
+        let flow = idx.flow(caller).await.unwrap();
+        assert_eq!(flow.chain, vec![caller, 0]);
+        assert_eq!(flow.calls[0].to_name, "x.run");
+        assert_eq!(
+            flow.calls[0].resolved_via,
+            ResolutionKind::UnresolvedDynamic
+        );
+        assert!(flow.calls[0].candidate_names.is_empty());
+        assert_eq!(idx.stats().edges, 0);
+    }
+
+    #[tokio::test]
+    async fn static_resolution_wins_over_hierarchy_fanout() {
+        let mut idx = GraphIndex::in_memory();
+        let (caller, static_fn, trait_id) = (SYMBOL_BASE, SYMBOL_BASE + 1, SYMBOL_BASE + 2);
+        let r = result(
+            "t.rs",
+            vec![
+                dsym(caller, "caller", SymbolKind::Function, 0, None, 10),
+                // hàm tĩnh trùng tên method của trait.
+                dsym(static_fn, "handle", SymbolKind::Function, 0, None, 5),
+                dsym(trait_id, "Handler", SymbolKind::Interface, 0, None, 1),
+                dsym(
+                    SYMBOL_BASE + 3,
+                    "handle",
+                    SymbolKind::Method,
+                    trait_id,
+                    None,
+                    2,
+                ),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "handle".to_string(),
+                position: 1,
+                line: 11,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[r], None).await.unwrap();
+
+        // Resolve tĩnh thắng — chain slot được ghi đè, không fan-out.
+        let flow = idx.flow(caller).await.unwrap();
+        assert_eq!(flow.chain, vec![caller, static_fn]);
+        assert_eq!(flow.calls[0].to_id, Some(static_fn));
+        assert_eq!(flow.calls[0].resolved_via, ResolutionKind::Exact);
+        assert!(flow.calls[0].candidate_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn serde_old_call_record_blob_defaults() {
+        // Blob cũ (trước khi thêm receiver_text/resolved_via/candidates) phải
+        // deserialize đúng với giá trị default.
+        let json = r#"{"caller_id":1,"call_name":"fmt.Println","position":1,"line":7,
+            "condition":null,"is_loop_body":false,"effect":"log","effect_desc":null,
+            "target_class":null,"target_method":null,"into_var":null,"is_new_var":false}"#;
+        let rec: CallRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(rec.resolved_via, ResolutionKind::Exact);
+        assert_eq!(rec.receiver_text, None);
+        assert!(rec.candidates.is_empty());
+    }
+
     #[tokio::test]
     async fn unresolved_call_keeps_raw_name_in_flow() {
         let mut idx = GraphIndex::in_memory();
@@ -4511,6 +4952,7 @@ mod tests {
             target_method: None,
             into_var: None,
             is_new_var: false,
+            ..Default::default()
         }];
         let r = result(
             "f.ts",
@@ -4597,6 +5039,7 @@ mod tests {
             target_method: None,
             into_var: None,
             is_new_var: false,
+            ..Default::default()
         }];
         let r = result(
             "f.ts",
@@ -4634,6 +5077,7 @@ mod tests {
             target_method: None,
             into_var: None,
             is_new_var: false,
+            ..Default::default()
         };
         let mut idx = GraphIndex::in_memory();
         let first = result(
@@ -5277,6 +5721,7 @@ mod tests {
                 target_method: None,
                 into_var: None,
                 is_new_var: false,
+                ..Default::default()
             },
             CallRecord {
                 caller_id: SYMBOL_BASE,
@@ -5292,6 +5737,7 @@ mod tests {
                 target_method: None,
                 into_var: None,
                 is_new_var: false,
+                ..Default::default()
             },
             // Internal call: class "OrderService" trong repo, method getOrders.
             CallRecord {
@@ -5308,6 +5754,7 @@ mod tests {
                 target_method: None,
                 into_var: None,
                 is_new_var: false,
+                ..Default::default()
             },
         ];
         let mut cls = sym("svc.rs", "OrderService", SYMBOL_BASE + 1);
@@ -5415,6 +5862,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
         };
         let legacy_field = Symbol {
             id: 101,
@@ -5431,6 +5879,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
         };
         let legacy_do_work = Symbol {
             id: 102,
@@ -5447,6 +5896,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
         };
         let service = Symbol {
             id: 103,
@@ -5463,6 +5913,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
         };
         let service_do_work = Symbol {
             id: 104,
@@ -5479,6 +5930,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
         };
         // Tạo router method với scope_id = 200 (không phải class scope)
         // Để field_declared_type tìm trong scope_id=200 sẽ fail → return None.
@@ -5498,6 +5950,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "java".into(),
+            impl_trait: None,
         };
         idx.ingest(
             &[ParseResult {

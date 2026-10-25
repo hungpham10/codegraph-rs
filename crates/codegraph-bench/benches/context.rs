@@ -35,6 +35,7 @@ fn fixture(fan_in: usize) -> ParseResult {
             doc: None,
             annotations: Vec::new(),
             language: "rust".into(),
+            impl_trait: None,
         });
         let chain = if i == 0 {
             vec![id]

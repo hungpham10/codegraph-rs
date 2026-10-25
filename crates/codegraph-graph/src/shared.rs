@@ -341,6 +341,7 @@ mod tests {
             doc: None,
             annotations: Vec::new(),
             language: "ts".into(),
+            impl_trait: None,
         }
     }
 

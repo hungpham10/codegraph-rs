@@ -1061,5 +1061,6 @@ fn row_to_symbol(row: &MySqlRow) -> Result<Symbol> {
         doc,
         annotations,
         language,
+        impl_trait: None,
     })
 }

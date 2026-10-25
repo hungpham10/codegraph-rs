@@ -26,6 +26,7 @@ fn sym(id: u64, name: &str) -> Symbol {
         doc: None,
         annotations: Vec::new(),
         language: "test".to_string(),
+        impl_trait: None,
     }
 }
 
@@ -44,6 +45,7 @@ fn rec(caller_id: u64, pos: usize, name: &str, args: usize) -> CallRecord {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        ..Default::default()
     }
 }
 

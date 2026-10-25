@@ -30,6 +30,7 @@ fn sym(name: &str, id: u64) -> Symbol {
         file: "t.py".to_string(),
         line: 1,
         end_line: 1,
+        impl_trait: None,
         signature: None,
         doc: None,
         annotations: Vec::new(),
@@ -69,6 +70,7 @@ fn call(caller: u64, name: &str, position: usize) -> CallRecord {
         target_method: None,
         into_var: None,
         is_new_var: false,
+        ..Default::default()
     }
 }
 
