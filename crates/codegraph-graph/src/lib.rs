@@ -1877,9 +1877,6 @@ impl GraphIndex {
                     .push(sym.id);
             }
         }
-        for (n, ids) in &by_name {
-            eprintln!("DBG by_name {n}: {ids:?}");
-        }
         let mut links: Vec<(u64, u64)> = Vec::new();
         for ids in by_name.values() {
             for &d in ids {
@@ -3598,10 +3595,6 @@ impl GraphIndex {
                                         }
                                     }
                                     let mut handler_hit = None;
-                                    eprintln!(
-                                        "DBG3 cid={cid} cp={cp_pos} tries={open_tries:?} labels={:?} thrown={thrown_type:?}",
-                                        fr.branch_labels
-                                    );
                                     for &ts in open_tries.iter().rev() {
                                         let te = matching_try_end(&fr.chain, ts)
                                             .unwrap_or(fr.chain.len());

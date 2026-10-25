@@ -148,12 +148,6 @@ func (f *File) Write(p []byte) (int, error) { return len(p), nil }
         .unwrap()
         .id;
     // Interface methods: scope vào interface symbol, không có receiver type.
-    for s in &parsed.symbols {
-        eprintln!(
-            "DBG {} {:?} scope={} type={:?} line={}",
-            s.name, s.kind, s.scope_id, s.type_name, s.line
-        );
-    }
     let iface_write = parsed
         .symbols
         .iter()
@@ -353,12 +347,6 @@ fn run(db: Database, config: Config) -> u32 {
     let parsed = codegraph_extract::languages::rust::RustParser
         .parse_file("s.rs", src)
         .unwrap();
-    for s in &parsed.symbols {
-        eprintln!(
-            "DBG {} {:?} scope={} type={:?}",
-            s.name, s.kind, s.scope_id, s.type_name
-        );
-    }
     let field = parsed
         .symbols
         .iter()
@@ -778,9 +766,6 @@ class CardPayment extends BasePayment implements Payment, JsonSerializable {
 }
 "#;
     let parsed = PhpParser.parse_file("P.php", src).unwrap();
-    for s in &parsed.symbols {
-        eprintln!("PHPDBG {} {:?} line={}", s.name, s.kind, s.line);
-    }
 
     let cls = parsed
         .symbols
@@ -927,7 +912,6 @@ class CardRepo extends BaseRepo with Logging {
         .find(|s| s.name == "CardRepo")
         .unwrap();
     let supers = cls.impl_trait.as_deref().expect("supers missing");
-    eprintln!("SCALADBG supers={supers}");
     assert!(supers.contains("BaseRepo"), "supers: {supers}");
     assert!(supers.contains("Logging"), "supers: {supers}");
 
