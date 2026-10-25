@@ -26,6 +26,10 @@ pub static SPEC: LangSpec = LangSpec {
         ("field_declaration", SymbolKind::Field),
         ("parameter", SymbolKind::Parameter),
         ("let_declaration", SymbolKind::Variable),
+        // Method KHAI BÁO trong trait (như Go method_elem) — scope vào trait
+        // Interface symbol → trigger fan-out thật (không có symbol này,
+        // dynamic dispatch Rust chỉ match impl theo tên, chọn 1 best guess).
+        ("function_signature_item", SymbolKind::Method),
     ],
     func_kinds: &["function_item"],
     class_kinds: &[
@@ -36,13 +40,23 @@ pub static SPEC: LangSpec = LangSpec {
         "mod_item",
     ],
     annotation_kinds: &["attribute"],
-    calls: &[CallRule {
-        kind: "call_expression",
-        callee_field: "function",
-        arguments_field: "arguments",
-        name_fn: None,
-        target_fn: None,
-    }],
+    calls: &[
+        CallRule {
+            kind: "call_expression",
+            callee_field: "function",
+            arguments_field: "arguments",
+            name_fn: None,
+            target_fn: None,
+        },
+        // `println!(...)`, `vec![...]` — macro invocation là call thật.
+        CallRule {
+            kind: "macro_invocation",
+            callee_field: "macro",
+            arguments_field: "tokens",
+            name_fn: Some(rust_macro_call_name),
+            target_fn: None,
+        },
+    ],
     name_type_fallback: true,
     link_impl_methods: true,
     hooks: HookSpec {
@@ -82,6 +96,13 @@ fn rust_class_type_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String> 
 }
 
 crate::lang_parser!(RustParser, SPEC);
+
+/// Tên macro call: `println!` — macro field text + `!`.
+fn rust_macro_call_name(node: &Node, src: &[u8]) -> Option<String> {
+    let mac = node.child_by_field_name("macro")?;
+    let raw = text(&mac, src)?;
+    Some(format!("{raw}!"))
+}
 
 /// `use` declarations của file — nguyên liệu resolve qualified call
 /// (`Database::new` với `use crate::storage::Database;`).

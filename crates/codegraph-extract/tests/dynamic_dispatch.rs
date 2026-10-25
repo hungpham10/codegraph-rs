@@ -498,3 +498,123 @@ class File(Writer):
     let file = parsed.symbols.iter().find(|s| s.name == "File").unwrap();
     assert_eq!(file.impl_trait.as_deref(), Some("Writer"));
 }
+
+#[test]
+fn rust_review_realistic_program() {
+    // Fixture "thật" — dùng để review cấu hình Rust: trait method khai báo,
+    // macro call, closure, async fn, associated const/type.
+    let src = r#"
+pub trait Repo {
+    type Item;
+    const MAX: usize;
+    fn find(&self, id: u32) -> Option<Self::Item>;
+    fn ping(&self);
+}
+
+pub struct Pg;
+
+impl Repo for Pg {
+    type Item = u32;
+    const MAX: usize = 10;
+    fn find(&self, id: u32) -> Option<u32> { Some(id) }
+    fn ping(&self) { println!("ping"); }
+}
+
+pub struct Srv { repo: Pg }
+
+impl Srv {
+    pub async fn handle(&self, id: u32) -> Option<u32> {
+        let cb = || self.repo.ping();
+        cb();
+        vec![1, 2].len();
+        match id {
+            0 => None,
+            _ => { self.repo.find(id) }
+        }
+    }
+}
+"#;
+    let parsed = codegraph_extract::languages::rust::RustParser
+        .parse_file("srv.rs", src)
+        .unwrap();
+    for s in &parsed.symbols {
+        eprintln!(
+            "SYM {:?} {:?} scope={} type={:?} line={}",
+            s.name, s.kind, s.scope_id, s.type_name, s.line
+        );
+    }
+    for c in &parsed.calls {
+        eprintln!(
+            "CALL {:?} recv={:?} line={}",
+            c.call_name, c.receiver_text, c.line
+        );
+    }
+    // trait method khai báo (function_signature_item) có symbol?
+    assert!(
+        parsed.symbols.iter().any(|s| s.name == "find"
+            && s.type_name.is_none()
+            && parsed
+                .symbols
+                .iter()
+                .find(|t| t.id == s.scope_id)
+                .map(|p| p.kind)
+                == Some(SymbolKind::Interface)),
+        "trait-declared method find (Interface scope) missing"
+    );
+    // macro call được bắt?
+    assert!(
+        parsed.calls.iter().any(|c| c.call_name.contains("println")),
+        "macro invocation println! missing from calls"
+    );
+}
+
+#[tokio::test]
+async fn rust_trait_fanout_end_to_end_real_extraction() {
+    use codegraph_graph::{GraphIndex, ParseResult};
+
+    let src = r#"
+pub trait Repo {
+    fn ping(&self);
+}
+pub struct Pg;
+pub struct My;
+
+impl Repo for Pg {
+    fn ping(&self) { println!("pg"); }
+}
+impl Repo for My {
+    fn ping(&self) { println!("my"); }
+}
+
+pub fn sink(r: &dyn Repo) {
+    r.ping();
+}
+"#;
+    let parsed: ParseResult = codegraph_extract::languages::rust::RustParser
+        .parse_file("r.rs", src)
+        .unwrap();
+    let mut idx = GraphIndex::in_memory();
+    idx.ingest(&[parsed], None).await.unwrap();
+
+    // sink's call `r.ping()` phải fan-out cả Pg::ping lẫn My::ping.
+    let sink_id = idx
+        .resolve_by_name_or_id("sink", 0)
+        .unwrap()
+        .symbol
+        .unwrap()
+        .id;
+    let flow = idx.flow(sink_id).await.unwrap();
+    let ping = flow
+        .calls
+        .iter()
+        .find(|c| c.to_name.ends_with("ping"))
+        .expect("ping call missing");
+    assert_eq!(
+        ping.resolved_via,
+        codegraph_core::ResolutionKind::HierarchyFanOut,
+        "fan-out không fire trên extraction thật"
+    );
+    let mut names = ping.candidate_names.clone();
+    names.sort();
+    assert_eq!(names, vec!["ping", "ping"]);
+}
