@@ -1211,6 +1211,7 @@ impl GraphIndex {
         self.impl_index.clear();
         self.go_impls.clear();
         self.link_impls_globally();
+        self.link_cpp_decl_def();
         self.build_impl_index();
         self.build_go_method_sets();
         // dyn_callers từ call records persist (candidates đã lưu trong blob).
@@ -1635,6 +1636,7 @@ impl GraphIndex {
         }
 
         self.link_impls_globally();
+        self.link_cpp_decl_def();
 
         // ── Phase 2: resolve placeholder 0 trong chains ──
         self.build_impl_index();
@@ -1857,6 +1859,75 @@ impl GraphIndex {
         }
     }
 
+    /// C++ declaration–definition linking Ở MỨC GLOBAL: `void Service::run()`
+    /// trong .cpp (definition, có chain) nối với method khai báo trong .hpp
+    /// (declaration, không chain) — re-parent def về scope của decl (class/
+    /// namespace) + reclassify theo kind của decl, để fan-out/flow thấy
+    /// definition. Điều kiện: cùng tên + cùng sig_key (khi cả hai có) + khác
+    /// file + một bên có chain một bên không.
+    fn link_cpp_decl_def(&mut self) {
+        let mut by_name: HashMap<String, Vec<u64>> = HashMap::new();
+        for sym in self.symbols.values() {
+            if sym.language == "cpp"
+                && matches!(sym.kind, SymbolKind::Function | SymbolKind::Method)
+            {
+                by_name
+                    .entry(sym.name.to_lowercase())
+                    .or_default()
+                    .push(sym.id);
+            }
+        }
+        for (n, ids) in &by_name {
+            eprintln!("DBG by_name {n}: {ids:?}");
+        }
+        let mut links: Vec<(u64, u64)> = Vec::new();
+        for ids in by_name.values() {
+            for &d in ids {
+                let Some(def) = self.symbols.get(&d) else {
+                    continue;
+                };
+                if !self.chains_map.contains_key(&d) {
+                    continue; // def phải có body
+                }
+                for &c in ids {
+                    if c == d {
+                        continue;
+                    }
+                    let Some(decl) = self.symbols.get(&c) else {
+                        continue;
+                    };
+                    if self.chains_map.contains_key(&c) {
+                        continue; // decl không có body
+                    }
+                    if decl.file == def.file {
+                        continue;
+                    }
+                    // sig_key khớp khi cả hai có (tránh nối overload khác).
+                    match (&decl.sig_key, &def.sig_key) {
+                        (Some(a), Some(b)) if a != b => continue,
+                        _ => {}
+                    }
+                    links.push((d, c));
+                    break;
+                }
+            }
+        }
+        for (def_id, decl_id) in links {
+            let Some(decl) = self.symbols.get(&decl_id) else {
+                continue;
+            };
+            let (decl_scope, decl_kind) = (decl.scope_id, decl.kind);
+            if let Some(def) = self.symbols.get_mut(&def_id) {
+                def.scope_id = decl_scope;
+                def.kind = decl_kind;
+            }
+            // decl.type_ref → def: class_info/scope query đi tới definition.
+            if let Some(decl) = self.symbols.get_mut(&decl_id) {
+                decl.type_ref = def_id;
+            }
+        }
+    }
+
     /// Build `dyn_callers` từ call meta — gọi sau `resolve_calls` (ingest)
     /// hoặc scan call records (rebuild).
     fn build_dyn_callers_from(
@@ -2020,6 +2091,14 @@ impl GraphIndex {
             .cloned()
             .unwrap_or_default();
 
+        // Namespace-qualified prefix (`orders::run`) — dùng cho preference
+        // lọc candidate bên dưới.
+        let ns_prefix = call
+            .call_name
+            .split_once("::")
+            .map(|(p, _)| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty());
+
         // 3. Independent lookup paths: alias ("var.method" → "TypeName.method")
         //    AND short name fallback — merge results instead of sequential fallback.
         let mut via_alias = false;
@@ -2041,11 +2120,12 @@ impl GraphIndex {
                 candidates.extend(import_ids);
             }
 
-            // 3b. Short name fallback (after last dot).
+            // 3b. Short name fallback (after last dot HOẶC `::` — qualified call
+            // C++ `orders::run` / Rust path không rơi vào import map).
             let short = call
                 .call_name
-                .rsplit('.')
-                .next()
+                .rsplit(['.', ':'])
+                .find(|s| !s.is_empty())
                 .unwrap_or("")
                 .to_lowercase();
             if !short.is_empty() {
@@ -2119,6 +2199,23 @@ impl GraphIndex {
                 if is_method_dispatch || all_dynamic {
                     let short = call.call_name.rsplit('.').next().unwrap_or("");
                     return self.collect_fanout(&trait_hits, short, caller_id);
+                }
+            }
+            // Namespace-qualified (`orders::run`): nếu prefix khớp tổ tiên
+            // namespace hoặc file của MỘT subset candidate → chỉ giữ subset
+            // (tránh `foo::run` nhầm `bar::run`).
+            let mut candidates = candidates;
+            if let Some(prefix) = &ns_prefix
+                && candidates.len() > 1
+            {
+                let preferred: Vec<u64> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&id| self.namespace_matches(id, prefix))
+                    .collect();
+                if !preferred.is_empty() && preferred.len() < candidates.len() {
+                    candidates = preferred;
+                    via_alias = true;
                 }
             }
             let kind = if via_alias {
@@ -2543,6 +2640,25 @@ impl GraphIndex {
             }
         }
         Ok(())
+    }
+
+    /// Candidate có tổ tiên scope là Module (namespace) tên khớp prefix,
+    /// hoặc file chứa prefix (namespace thường trùng directory).
+    fn namespace_matches(&self, id: u64, prefix: &str) -> bool {
+        let mut cur = self.symbols.get(&id);
+        let mut hops = 0;
+        while let Some(sym) = cur
+            && hops < 8
+        {
+            if sym.kind == SymbolKind::Module && sym.name.to_lowercase() == prefix {
+                return true;
+            }
+            cur = self.symbols.get(&sym.scope_id);
+            hops += 1;
+        }
+        self.symbols
+            .get(&id)
+            .is_some_and(|s| s.file.to_lowercase().contains(prefix))
     }
 
     /// Resolve call `var.Method` khi `var` là import alias của file caller:
@@ -6314,6 +6430,204 @@ mod tests {
         // D2::run (non-virtual) bị loại — chỉ D1::run (override) + Base::run.
         assert_eq!(names, vec!["run", "run"]);
         assert_eq!(idx.stats().edges, 2);
+    }
+
+    #[tokio::test]
+    async fn cpp_decl_def_linked_across_files() {
+        // .hpp: class Service { void run(); } (decl, không chain)
+        // .cpp: void Service::run() { work(); } (def, có chain)
+        // → def được re-parent về Service + reclassify Method; decl.type_ref → def.
+        let mut idx = GraphIndex::in_memory();
+        let (svc, decl_id, work_id, def_id, caller_id) = (
+            SYMBOL_BASE,
+            SYMBOL_BASE + 1,
+            SYMBOL_BASE + 2,
+            SYMBOL_BASE + 3,
+            SYMBOL_BASE + 4,
+        );
+        let csym =
+            |id: u64, name: &str, kind: SymbolKind, scope_id: u64, file: &str, line: u32| Symbol {
+                id,
+                name: name.to_string(),
+                kind,
+                scope: ScopeLevel::Global,
+                scope_id,
+                type_ref: 0,
+                type_name: None,
+                file: file.to_string(),
+                line,
+                end_line: line,
+                signature: None,
+                doc: None,
+                annotations: Vec::new(),
+                language: "cpp".to_string(),
+                impl_trait: None,
+                sig_key: Some("()(void)".to_string()),
+            };
+        let hpp = result(
+            "service.hpp",
+            vec![
+                csym(svc, "Service", SymbolKind::Class, 0, "service.hpp", 1),
+                csym(decl_id, "run", SymbolKind::Method, svc, "service.hpp", 2),
+            ],
+            HashMap::new(),
+            vec![],
+        );
+        let cpp = result(
+            "service.cpp",
+            vec![
+                csym(def_id, "run", SymbolKind::Function, 0, "service.cpp", 5),
+                csym(work_id, "work", SymbolKind::Function, 0, "service.cpp", 1),
+                csym(
+                    caller_id,
+                    "caller",
+                    SymbolKind::Function,
+                    0,
+                    "service.cpp",
+                    10,
+                ),
+            ],
+            HashMap::from([
+                (def_id, vec![def_id, work_id]),
+                (caller_id, vec![caller_id, 0]),
+            ]),
+            vec![CallRecord {
+                caller_id,
+                call_name: "svc.run".to_string(),
+                position: 1,
+                line: 11,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[hpp, cpp], None).await.unwrap();
+
+        // Registry remap id theo thứ tự ingest — tra theo tên + chain thay vì id cứng.
+        let (def, decl) = {
+            let runs: Vec<Symbol> = idx
+                .symbols
+                .values()
+                .filter(|s| s.name == "run")
+                .cloned()
+                .collect();
+            let def = runs
+                .iter()
+                .find(|s| idx.chains_map.contains_key(&s.id))
+                .expect("def với chain");
+            let decl = runs
+                .iter()
+                .find(|s| !idx.chains_map.contains_key(&s.id))
+                .expect("decl");
+            (def.clone(), decl.clone())
+        };
+        assert_eq!(def.kind, SymbolKind::Method, "def phải thành Method");
+        assert_eq!(def.scope_id, svc, "def re-parent về Service");
+        assert_eq!(decl.type_ref, def.id, "decl.type_ref phải trỏ def");
+        // Call svc.run resolve về MỘT run method (Service không phải base —
+        // không phải virtual dispatch; điểm test là LINK, không phải fan-out).
+        // pick_best_candidate ưu tiên has-chain → chọn def (có body).
+        let flow = idx.flow(caller_id).await.unwrap();
+        assert_eq!(
+            flow.calls[0].to_id,
+            Some(def.id),
+            "phải chọn def (has-chain)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cpp_qualified_call_prefers_namespace() {
+        // 2 namespace cùng tên hàm `run` (orders/bar) — call `orders::run`
+        // phải ưu tiên candidate trong namespace orders.
+        let mut idx = GraphIndex::in_memory();
+        let (ns_orders, run_orders, ns_bar, run_bar, caller_id) = (
+            SYMBOL_BASE,
+            SYMBOL_BASE + 1,
+            SYMBOL_BASE + 2,
+            SYMBOL_BASE + 3,
+            SYMBOL_BASE + 4,
+        );
+        let csym =
+            |id: u64, name: &str, kind: SymbolKind, scope_id: u64, file: &str, line: u32| Symbol {
+                id,
+                name: name.to_string(),
+                kind,
+                scope: ScopeLevel::Global,
+                scope_id,
+                type_ref: 0,
+                type_name: None,
+                file: file.to_string(),
+                line,
+                end_line: line,
+                signature: None,
+                doc: None,
+                annotations: Vec::new(),
+                language: "cpp".to_string(),
+                impl_trait: None,
+                sig_key: None,
+            };
+        let r = result(
+            "main.cpp",
+            vec![
+                csym(
+                    ns_orders,
+                    "orders",
+                    SymbolKind::Module,
+                    0,
+                    "orders/run.cpp",
+                    1,
+                ),
+                csym(
+                    run_orders,
+                    "run",
+                    SymbolKind::Function,
+                    ns_orders,
+                    "orders/run.cpp",
+                    2,
+                ),
+                csym(ns_bar, "bar", SymbolKind::Module, 0, "bar/run.cpp", 1),
+                csym(
+                    run_bar,
+                    "run",
+                    SymbolKind::Function,
+                    ns_bar,
+                    "bar/run.cpp",
+                    2,
+                ),
+                csym(caller_id, "main", SymbolKind::Function, 0, "main.cpp", 10),
+            ],
+            HashMap::from([(caller_id, vec![caller_id, 0])]),
+            vec![CallRecord {
+                caller_id,
+                call_name: "orders::run".to_string(),
+                position: 1,
+                line: 11,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[r], None).await.unwrap();
+
+        // Trước đây "::" không split được → unresolved. Giờ resolve vào orders.run.
+        let flow = idx.flow(caller_id).await.unwrap();
+        assert_eq!(
+            flow.calls[0].to_id,
+            Some(run_orders),
+            "orders::run phải chọn run trong namespace orders, không phải bar"
+        );
     }
 
     #[tokio::test]
