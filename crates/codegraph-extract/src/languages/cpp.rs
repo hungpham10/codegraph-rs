@@ -58,11 +58,21 @@ pub static SPEC: LangSpec = LangSpec {
         ("enum_specifier", SymbolKind::Enum),
         ("namespace_definition", SymbolKind::Module),
         ("type_definition", SymbolKind::Constant),
+        // Macro `#define CALL(x) x()` / `#define MAX 10` — Constant symbol,
+        // signature = text định nghĩa (xem c_macro_sig). Invocation KHÔNG
+        // resolve thành edge (macro không phải function) — usage tra qua
+        // call-name index (references); hành vi semantic (exception-like…)
+        // khai báo qua config `[[effect_rules]]`.
+        ("preproc_function_def", SymbolKind::Constant),
+        ("preproc_def", SymbolKind::Constant),
         ("declaration", SymbolKind::Variable),
         ("field_declaration", SymbolKind::Field),
         ("parameter_declaration", SymbolKind::Parameter),
+        // Lambda `[](x){...}` — Function symbol, mượn tên biến qua
+        // anonymous_name_fn (`auto f = [](){}` → f); chain riêng cho body.
+        ("lambda_expression", SymbolKind::Function),
     ],
-    func_kinds: &["function_definition"],
+    func_kinds: &["function_definition", "lambda_expression"],
     class_kinds: &["class_specifier", "struct_specifier", "union_specifier"],
     param_kinds: &["parameter_declaration"],
     calls: &[CallRule {
@@ -77,6 +87,9 @@ pub static SPEC: LangSpec = LangSpec {
         fn_ptr_assign_fn: Some(crate::languages::c::c_fn_ptr_assign),
         sig_key_fn: Some(cpp_signature_key),
         file_deps_fn: Some(crate::languages::c::c_include_deps),
+        typedef_sig_fn: Some(crate::languages::c::c_typedef_sig),
+        anonymous_name_fn: Some(cpp_lambda_name),
+        value_func_kinds: &["lambda_expression"],
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -101,6 +114,23 @@ pub static SPEC: LangSpec = LangSpec {
     ..LangSpec::dflt()
 };
 crate::lang_parser!(CppParser, SPEC);
+
+/// `auto f = [](int x){ work(); };` — lambda mượn tên biến (pattern JS/PHP):
+/// declaration → init_declarator có value là lambda_expression → field `name`.
+/// Lambda truyền thẳng (`register([](){})`) không tên.
+fn cpp_lambda_name<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let p = node.parent()?;
+    if p.kind() != "init_declarator" {
+        return None;
+    }
+    let value = p.child_by_field_name("value")?;
+    if value.id() != node.id() {
+        return None;
+    }
+    // C++ init_declarator: tên ở field `declarator` (JS variable_declarator
+    // dùng field `name` — grammar khác nhau).
+    p.child_by_field_name("declarator")
+}
 
 /// Signature key `(params)(return)` cho C++ — params từ function_declarator
 /// trong declarator field; return = field `type`. Method inline trong class

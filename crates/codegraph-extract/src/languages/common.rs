@@ -148,6 +148,9 @@ pub struct HookSpec {
     /// Signature key chuẩn hóa `(param_types)(result_types)` cho
     /// function/method — method-set matching so cả signature.
     pub sig_key_fn: Option<ClassTypeFn>,
+    /// Signature text cho typedef/type_definition (C `typedef int (*cb)(int)`
+    /// — underlying type nằm trong declarator, field `type` chỉ giữ return).
+    pub typedef_sig_fn: Option<ClassTypeFn>,
     /// Package + imports của file (Go package_clause/import_declaration) —
     /// gọi 1 lần trên root node.
     pub file_deps_fn: Option<FileDepsFn>,
@@ -168,6 +171,7 @@ impl HookSpec {
             fn_ptr_assign_fn: None,
             receiver_fn: None,
             sig_key_fn: None,
+            typedef_sig_fn: None,
             file_deps_fn: None,
             anonymous_name_fn: None,
             value_func_kinds: &[],
@@ -679,7 +683,14 @@ fn push_symbol(
         .child_by_field_name(spec.markers.body_field)
         .map(|b| b.end_position().row as u32 + 1)
         .unwrap_or_else(|| node.end_position().row as u32 + 1);
-    let signature = extract_signature(node, ctx.src, spec.markers.body_field);
+    // Typedef/macro: signature = text định nghĩa (hook ƯU TIÊN — declarator
+    // chứa phần fn-ptr mà field `type` bỏ sót; extract_signature fallback).
+    let signature = (if kind == SymbolKind::Constant {
+        spec.hooks.typedef_sig_fn.and_then(|f| f(node, ctx.src))
+    } else {
+        None
+    })
+    .or_else(|| extract_signature(node, ctx.src, spec.markers.body_field));
     let annotations = extract_annotations(node, ctx.src, spec.annotation_kinds);
 
     ctx.symbols.push(Symbol {

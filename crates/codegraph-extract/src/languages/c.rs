@@ -16,6 +16,26 @@ fn ts_language() -> tree_sitter::Language {
 /// `#include` graph: `"foo.h"` (quoted) / `<openssl/ssl.h>` (system) →
 /// FileDeps — path nguyên văn, alias = tên file (không extension). Include
 /// graph rebuild miễn phí qua machinery file_imports.
+/// Signature cho typedef + macro (định nghĩa có sẵn):
+/// - `typedef int (*cb)(int)` → `int (*cb)(int)` (underlying type đầy đủ).
+/// - `#define CALL(x) x()` → `CALL(x) x()` (định nghĩa nguyên văn — macro
+///   không resolve thành call edge; semantic do `[[effect_rules]]` config).
+pub(crate) fn c_typedef_sig(node: &Node, src: &[u8]) -> Option<String> {
+    let raw = text(node, src)?
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_string();
+    let sig = match node.kind() {
+        "type_definition" => raw.trim_start_matches("typedef").trim().to_string(),
+        "preproc_def" | "preproc_function_def" => {
+            raw.trim_start_matches("#define").trim().to_string()
+        }
+        _ => return None,
+    };
+    (!sig.is_empty()).then_some(sig)
+}
+
 pub(crate) fn c_include_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
     let mut imports: Vec<ImportAlias> = Vec::new();
     let mut stack = vec![*root];
@@ -135,6 +155,13 @@ pub static SPEC: LangSpec = LangSpec {
         ("union_specifier", SymbolKind::Class),
         ("enum_specifier", SymbolKind::Enum),
         ("type_definition", SymbolKind::Constant),
+        // Macro `#define CALL(x) x()` / `#define MAX 10` — Constant symbol,
+        // signature = text định nghĩa (xem c_macro_sig). Invocation KHÔNG
+        // resolve thành edge (macro không phải function) — usage tra qua
+        // call-name index (references); hành vi semantic (exception-like…)
+        // khai báo qua config `[[effect_rules]]`.
+        ("preproc_function_def", SymbolKind::Constant),
+        ("preproc_def", SymbolKind::Constant),
         ("declaration", SymbolKind::Variable),
         ("field_declaration", SymbolKind::Field),
         ("parameter_declaration", SymbolKind::Parameter),
@@ -152,6 +179,7 @@ pub static SPEC: LangSpec = LangSpec {
     hooks: HookSpec {
         fn_ptr_assign_fn: Some(c_fn_ptr_assign),
         file_deps_fn: Some(c_include_deps),
+        typedef_sig_fn: Some(c_typedef_sig),
         ..HookSpec::none()
     },
     markers: MarkerSpec {

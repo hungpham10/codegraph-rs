@@ -1150,3 +1150,87 @@ void D::run() {}
         .unwrap();
     assert!(d_run.signature.as_deref().unwrap().contains("override"));
 }
+
+#[test]
+fn cpp_lambda_macro_typedef_batch() {
+    // ── C++: lambda mượn tên biến + chain riêng; macro là Function symbol;
+    //    typedef fn-ptr giữ underlying signature ──
+    let cpp_src = r#"
+#define CALL(x) x()
+#define MAX 10
+
+typedef int (*handler_t)(int);
+
+int work(int x) { return x; }
+
+void setup() {
+    auto f = [](int x) { return work(x); };
+    f(1);
+    CALL(work);
+}
+"#;
+    let parsed = codegraph_extract::languages::cpp::CppParser
+        .parse_file("s.cpp", cpp_src)
+        .unwrap();
+
+    // #5: lambda → Function "f" với chain chứa work.
+    let f = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "f" && s.kind == SymbolKind::Function)
+        .expect("lambda f symbol missing");
+    let chain = parsed.chains.get(&f.id).expect("lambda chain missing");
+    assert!(
+        chain.iter().any(|&e| e == f.id + 1 || e > 0),
+        "lambda chain phải có calls"
+    );
+    // Call work() bên trong lambda ghi vào chain của f (không phải setup).
+    assert!(parsed
+        .calls
+        .iter()
+        .any(|c| c.caller_id == f.id && c.call_name.ends_with("work")));
+
+    // #9 (thiết kế mới): macro = Constant + signature là ĐỊNH NGHĨA nguyên
+    // văn — KHÔNG resolve thành call edge; usage tra qua call-name index.
+    let call_macro = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "CALL")
+        .expect("CALL macro missing");
+    assert_eq!(call_macro.kind, SymbolKind::Constant);
+    assert_eq!(call_macro.signature.as_deref(), Some("CALL(x) x()"));
+    let max_macro = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "MAX")
+        .expect("MAX macro missing");
+    assert_eq!(max_macro.kind, SymbolKind::Constant);
+    assert_eq!(max_macro.signature.as_deref(), Some("MAX 10"));
+
+    // Invocation là call record RAW (không resolve) — usage tracking.
+    assert!(parsed.calls.iter().any(|c| c.call_name == "CALL"));
+
+    // Hành vi semantic do config khai báo ("LLM tự định nghĩa"): rule
+    // Contains "CALL" → Panic (exception-like) — classifier xét trước default.
+    use codegraph_core::{EffectCallPattern, EffectRule, EffectType};
+    let classifier =
+        codegraph_extract::languages::effects::EffectClassifier::with_config(vec![EffectRule {
+            call: EffectCallPattern::Contains {
+                contains: "CALL".to_string(),
+            },
+            effect: EffectType::Panic,
+        }]);
+    let (eff, _) = classifier.classify("CALL");
+    assert_eq!(eff, EffectType::Panic);
+
+    // #4: typedef fn-ptr signature giữ underlying type.
+    let handler_t = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "handler_t")
+        .expect("handler_t missing");
+    assert_eq!(
+        handler_t.signature.as_deref(),
+        Some("int (*handler_t)(int)")
+    );
+}
