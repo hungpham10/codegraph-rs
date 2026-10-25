@@ -31,6 +31,7 @@ fn sym(name: &str, id: u64) -> Symbol {
         line: 1,
         end_line: 1,
         impl_trait: None,
+        sig_key: None,
         signature: None,
         doc: None,
         annotations: Vec::new(),

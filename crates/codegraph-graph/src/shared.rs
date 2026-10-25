@@ -342,6 +342,7 @@ mod tests {
             annotations: Vec::new(),
             language: "ts".into(),
             impl_trait: None,
+            sig_key: None,
         }
     }
 

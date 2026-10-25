@@ -1,4 +1,4 @@
-use crate::languages::common::{text, CallRule, LangSpec};
+use crate::languages::common::{text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
 use tree_sitter::Node;
 
@@ -79,12 +79,6 @@ pub static SPEC: LangSpec = LangSpec {
     func_kinds: &["function_definition"],
     class_kinds: &["struct_specifier", "union_specifier"],
     param_kinds: &["parameter_declaration"],
-    annotation_kinds: &[],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: None,
-    value_func_kinds: &[],
     calls: &[CallRule {
         kind: "call_expression",
         callee_field: "function",
@@ -92,34 +86,21 @@ pub static SPEC: LangSpec = LangSpec {
         name_fn: None,
         target_fn: None,
     }],
-    class_type_name: None,
-    impl_trait_fn: None,
-    refine_kind_fn: None,
-    fn_ptr_assign_fn: Some(c_fn_ptr_assign),
-    receiver_fn: None,
-    file_deps_fn: None,
-    go_stmt_kinds: &[],
-    defer_kinds: &[],
-    if_kinds: &["if_statement"],
-    elif_kinds: &[],
-    if_block_kinds: &[],
-    loop_kinds: &["for_statement", "while_statement", "do_statement"],
-    switch_kinds: &["switch_statement"],
-    switch_block_kinds: &[],
-    switch_case_kinds: &["case_statement"],
-    switch_default_kinds: &["default_statement"],
-    return_kinds: &["return_statement"],
-    break_kinds: &["break_statement"],
-    continue_kinds: &["continue_statement"],
-    throw_kinds: &[],
-    try_kinds: &[],
-    except_kinds: &[],
-    try_else_kinds: &[],
-    finally_kinds: &[],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec {
+        fn_ptr_assign_fn: Some(c_fn_ptr_assign),
+        ..HookSpec::none()
+    },
+    markers: MarkerSpec {
+        if_kinds: &["if_statement"],
+        loop_kinds: &["for_statement", "while_statement", "do_statement"],
+        switch_kinds: &["switch_statement"],
+        switch_case_kinds: &["case_statement"],
+        switch_default_kinds: &["default_statement"],
+        return_kinds: &["return_statement"],
+        break_kinds: &["break_statement"],
+        continue_kinds: &["continue_statement"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 crate::lang_parser!(CParser, SPEC);

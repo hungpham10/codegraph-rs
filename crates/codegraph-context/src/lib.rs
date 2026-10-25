@@ -292,6 +292,7 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
             impl_trait: None,
+            sig_key: None,
         }
     }
 

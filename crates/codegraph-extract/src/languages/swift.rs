@@ -1,4 +1,4 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
 
 fn ts_language() -> tree_sitter::Language {
@@ -34,49 +34,26 @@ pub static SPEC: LangSpec = LangSpec {
     ],
     param_kinds: &["parameter"],
     annotation_kinds: &["attribute"],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: None,
-    value_func_kinds: &[],
     calls: &[CallRule {
-        // Swift call_expression không có callee field — dùng named child đầu tiên
-        // làm callee (verify bằng dump_tree).
         kind: "call_expression",
         callee_field: "",
         arguments_field: "arguments",
         name_fn: None,
         target_fn: None,
     }],
-    class_type_name: None,
-    impl_trait_fn: None,
-    refine_kind_fn: None,
-    fn_ptr_assign_fn: None,
-    receiver_fn: None,
-    file_deps_fn: None,
-    go_stmt_kinds: &[],
-    defer_kinds: &[],
-    if_kinds: &["if_statement"],
-    elif_kinds: &[],
-    // Swift if/for không có consequence/body field — body là node `statements` trần.
-    if_block_kinds: &["statements"],
-    loop_kinds: &["for_statement", "while_statement", "repeat_while_statement"],
-    switch_kinds: &["switch_statement"],
-    switch_block_kinds: &[],
-    switch_case_kinds: &["switch_entry"],
-    switch_default_kinds: &[],
-    return_kinds: &["return_statement"],
-    break_kinds: &["break_statement"],
-    continue_kinds: &["continue_statement"],
-    throw_kinds: &["throw_statement"],
-    try_kinds: &[],
-    except_kinds: &[],
-    try_else_kinds: &[],
-    finally_kinds: &[],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec::none(),
+    markers: MarkerSpec {
+        if_kinds: &["if_statement"],
+        if_block_kinds: &["statements"],
+        loop_kinds: &["for_statement", "while_statement", "repeat_while_statement"],
+        switch_kinds: &["switch_statement"],
+        switch_case_kinds: &["switch_entry"],
+        return_kinds: &["return_statement"],
+        break_kinds: &["break_statement"],
+        continue_kinds: &["continue_statement"],
+        throw_kinds: &["throw_statement"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 crate::lang_parser!(SwiftParser, SPEC);

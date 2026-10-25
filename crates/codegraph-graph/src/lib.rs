@@ -1767,8 +1767,10 @@ impl GraphIndex {
     /// của T. Nguồn: method symbols có `type_name` = receiver base type
     /// (`go_receiver_type`) + method scope vào Interface symbol (language go).
     fn build_go_method_sets(&mut self) {
-        let mut type_methods: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut iface_methods: HashMap<String, Vec<String>> = HashMap::new();
+        // Method set: name (lower) → sig_key — so cả SIGNATURE, không chỉ tên
+        // (`Wrong.Read(string) string` không thỏa `Reader.Read([]byte) (int, error)`).
+        let mut type_methods: HashMap<String, HashMap<String, Option<String>>> = HashMap::new();
+        let mut iface_methods: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
         for sym in self.symbols.values() {
             if sym.language != "go"
                 || !matches!(sym.kind, SymbolKind::Method | SymbolKind::Function)
@@ -1779,7 +1781,7 @@ impl GraphIndex {
                 type_methods
                     .entry(recv.to_lowercase())
                     .or_default()
-                    .insert(sym.name.to_lowercase());
+                    .insert(sym.name.to_lowercase(), sym.sig_key.clone());
             }
             if let Some(tr) = self.symbols.get(&sym.scope_id)
                 && tr.kind == SymbolKind::Interface
@@ -1788,15 +1790,28 @@ impl GraphIndex {
                 iface_methods
                     .entry(tr.name.to_lowercase())
                     .or_default()
-                    .push(sym.name.to_lowercase());
+                    .push((sym.name.to_lowercase(), sym.sig_key.clone()));
             }
         }
-        // Satisfaction: mọi method name của iface nằm trong method set của
-        // type → mọi method CỦA TYPE ĐÓ (receiver type khớp) là candidates.
+        // Satisfaction: MỌI method của iface có (name, sig_key) khớp trong
+        // method set của type. Sig so khi cả hai có key; thiếu key nào →
+        // fallback name-only (lenient — giữ soundness khi extraction thiếu).
+        // Interface 0 method (interface{}) → skip (fan-out nổ, vô nghĩa).
+        let sig_matches = |a: &Option<String>, b: &Option<String>| match (a, b) {
+            (Some(x), Some(y)) => x == y,
+            _ => true,
+        };
         let mut go_impls: HashMap<String, Vec<u64>> = HashMap::new();
         for (iface, needed) in &iface_methods {
+            if needed.is_empty() {
+                continue;
+            }
             for (ty, methods) in &type_methods {
-                if !needed.iter().all(|m| methods.contains(m)) {
+                if !needed.iter().all(|(m, sk)| {
+                    methods
+                        .get(m)
+                        .is_some_and(|type_sk| sig_matches(sk, type_sk))
+                }) {
                     continue;
                 }
                 let implementing: Vec<u64> = self
@@ -4628,6 +4643,7 @@ mod tests {
             annotations: Vec::new(),
             language: "test".to_string(),
             impl_trait: None,
+            sig_key: None,
         }
     }
 
@@ -5026,6 +5042,7 @@ mod tests {
             annotations: Vec::new(),
             language: "rust".to_string(),
             impl_trait: impl_trait.map(String::from),
+            sig_key: None,
         }
     }
 
@@ -5350,6 +5367,7 @@ mod tests {
             annotations: Vec::new(),
             language: "go".to_string(),
             impl_trait: None,
+            sig_key: None,
         };
         let (caller, iface_id) = (SYMBOL_BASE, SYMBOL_BASE + 1);
         let r = result(
@@ -5495,6 +5513,7 @@ mod tests {
             annotations: Vec::new(),
             language: "go".to_string(),
             impl_trait: None,
+            sig_key: None,
         };
         let (caller, iface_id) = (SYMBOL_BASE, SYMBOL_BASE + 1);
         let r = result(
@@ -5568,6 +5587,105 @@ mod tests {
         assert_eq!(flow.calls[0].resolved_via, ResolutionKind::HierarchyFanOut);
         // Chỉ Buf.Write — File không thỏa method set của Writer.
         assert_eq!(flow.calls[0].candidate_names, vec!["Write"]);
+    }
+
+    #[tokio::test]
+    async fn go_method_set_rejects_wrong_signature() {
+        // Reader{Read([]byte)(int,error)}: Good khớp, Wrong.Read(string) string
+        // sai signature → KHÔNG thỏa interface.
+        let mut idx = GraphIndex::in_memory();
+        let gsym = |id: u64,
+                    name: &str,
+                    kind: SymbolKind,
+                    scope_id: u64,
+                    type_name: Option<&str>,
+                    sig: Option<&str>,
+                    line: u32| Symbol {
+            id,
+            name: name.to_string(),
+            kind,
+            scope: ScopeLevel::Global,
+            scope_id,
+            type_ref: 0,
+            type_name: type_name.map(String::from),
+            file: "r.go".to_string(),
+            line,
+            end_line: line,
+            signature: None,
+            doc: None,
+            annotations: Vec::new(),
+            language: "go".to_string(),
+            impl_trait: None,
+            sig_key: sig.map(String::from),
+        };
+        let (caller, iface_id) = (SYMBOL_BASE, SYMBOL_BASE + 1);
+        let r = result(
+            "r.go",
+            vec![
+                gsym(caller, "sink", SymbolKind::Function, 0, None, None, 30),
+                gsym(iface_id, "Reader", SymbolKind::Interface, 0, None, None, 1),
+                gsym(
+                    SYMBOL_BASE + 2,
+                    "Read",
+                    SymbolKind::Method,
+                    iface_id,
+                    None,
+                    Some("([]byte)(int,error)"),
+                    2,
+                ),
+                gsym(SYMBOL_BASE + 3, "Good", SymbolKind::Class, 0, None, None, 5),
+                gsym(
+                    SYMBOL_BASE + 4,
+                    "Read",
+                    SymbolKind::Method,
+                    SYMBOL_BASE + 3,
+                    Some("Good"),
+                    Some("([]byte)(int,error)"),
+                    6,
+                ),
+                gsym(
+                    SYMBOL_BASE + 5,
+                    "Wrong",
+                    SymbolKind::Class,
+                    0,
+                    None,
+                    None,
+                    8,
+                ),
+                gsym(
+                    SYMBOL_BASE + 6,
+                    "Read",
+                    SymbolKind::Method,
+                    SYMBOL_BASE + 5,
+                    Some("Wrong"),
+                    Some("(string)(string)"),
+                    9,
+                ),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "r.Read".to_string(),
+                position: 1,
+                line: 31,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                ..Default::default()
+            }],
+        );
+        idx.ingest(&[r], None).await.unwrap();
+
+        let flow = idx.flow(caller).await.unwrap();
+        assert_eq!(flow.calls[0].resolved_via, ResolutionKind::HierarchyFanOut);
+        // Chỉ Good.Read — Wrong sai signature bị loại.
+        assert_eq!(flow.calls[0].candidate_names, vec!["Read"]);
+        assert_eq!(idx.stats().edges, 1);
     }
 
     #[tokio::test]
@@ -6560,6 +6678,7 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
             impl_trait: None,
+            sig_key: None,
         };
         let legacy_field = Symbol {
             id: 101,
@@ -6577,6 +6696,7 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
             impl_trait: None,
+            sig_key: None,
         };
         let legacy_do_work = Symbol {
             id: 102,
@@ -6594,6 +6714,7 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
             impl_trait: None,
+            sig_key: None,
         };
         let service = Symbol {
             id: 103,
@@ -6611,6 +6732,7 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
             impl_trait: None,
+            sig_key: None,
         };
         let service_do_work = Symbol {
             id: 104,
@@ -6628,6 +6750,7 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
             impl_trait: None,
+            sig_key: None,
         };
         // Tạo router method với scope_id = 200 (không phải class scope)
         // Để field_declared_type tìm trong scope_id=200 sẽ fail → return None.
@@ -6648,6 +6771,7 @@ mod tests {
             annotations: Vec::new(),
             language: "java".into(),
             impl_trait: None,
+            sig_key: None,
         };
         idx.ingest(
             &[ParseResult {

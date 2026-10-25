@@ -441,6 +441,10 @@ pub struct Symbol {
     /// → `"Display"`) — nguyên liệu cho dynamic-dispatch fan-out index.
     #[serde(default)]
     pub impl_trait: Option<String>,
+    /// Signature key chuẩn hóa `(param_types)(result_types)` (bỏ tên param) —
+    /// Go method-set matching so cả signature, không chỉ tên method.
+    #[serde(default)]
+    pub sig_key: Option<String>,
 }
 
 /// Annotation (VD `@Override`, `@Cacheable`).

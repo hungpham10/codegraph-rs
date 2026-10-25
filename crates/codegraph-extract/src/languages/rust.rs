@@ -1,4 +1,4 @@
-use crate::languages::common::{text, CallRule, LangSpec};
+use crate::languages::common::{text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
 
 fn ts_language() -> tree_sitter::Language {
@@ -28,14 +28,7 @@ pub static SPEC: LangSpec = LangSpec {
         "impl_item",
         "mod_item",
     ],
-    param_kinds: &[],
     annotation_kinds: &["attribute"],
-    // `impl Foo` không có name field — tên nằm ở field `type`.
-    name_type_fallback: true,
-    // Rust: impl_item cũng là Class → re-parent methods về struct def cùng tên.
-    link_impl_methods: true,
-    anonymous_name_fn: None,
-    value_func_kinds: &[],
     calls: &[CallRule {
         kind: "call_expression",
         callee_field: "function",
@@ -43,41 +36,31 @@ pub static SPEC: LangSpec = LangSpec {
         name_fn: None,
         target_fn: None,
     }],
-    class_type_name: Some(rust_class_type_name),
-    impl_trait_fn: Some(rust_impl_trait_name),
-    refine_kind_fn: None,
-    fn_ptr_assign_fn: None,
-    receiver_fn: None,
-    file_deps_fn: None,
-    go_stmt_kinds: &[],
-    defer_kinds: &[],
-    if_kinds: &["if_expression", "if_let_expression"],
-    elif_kinds: &[],
-    if_block_kinds: &[],
-    loop_kinds: &[
-        "loop_expression",
-        "while_expression",
-        "while_let_expression",
-        "for_expression",
-    ],
-    switch_kinds: &["match_expression"],
-    switch_block_kinds: &["match_block"],
-    switch_case_kinds: &["match_arm"],
-    switch_default_kinds: &[],
-    return_kinds: &["return_expression"],
-    break_kinds: &["break_expression"],
-    continue_kinds: &["continue_expression"],
-    throw_kinds: &[],
-    try_kinds: &[],
-    except_kinds: &[],
-    try_else_kinds: &[],
-    finally_kinds: &[],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    name_type_fallback: true,
+    link_impl_methods: true,
+    hooks: HookSpec {
+        class_type_name: Some(rust_class_type_name),
+        impl_trait_fn: Some(rust_impl_trait_name),
+        ..HookSpec::none()
+    },
+    markers: MarkerSpec {
+        if_kinds: &["if_expression", "if_let_expression"],
+        loop_kinds: &[
+            "loop_expression",
+            "while_expression",
+            "while_let_expression",
+            "for_expression",
+        ],
+        switch_kinds: &["match_expression"],
+        switch_block_kinds: &["match_block"],
+        switch_case_kinds: &["match_arm"],
+        return_kinds: &["return_expression"],
+        break_kinds: &["break_expression"],
+        continue_kinds: &["continue_expression"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 /// Chỉ `impl Foo` / `impl Trait for Foo` có `type` field (self type) — dùng làm
 /// `type_name` để `link_impl_methods_to_def` nối impl → struct def cùng tên.
 /// Các class-like khác (struct/enum/trait/mod) trả None → không bị coi là impl.

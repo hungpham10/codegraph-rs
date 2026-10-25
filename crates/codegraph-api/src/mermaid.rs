@@ -754,6 +754,7 @@ mod tests {
                 annotations: Vec::new(),
                 language: "typescript".into(),
                 impl_trait: None,
+                sig_key: None,
             },
             chain,
             chain_desc: desc.into_iter().map(String::from).collect(),

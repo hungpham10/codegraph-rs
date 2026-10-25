@@ -931,6 +931,7 @@ mod tests {
             annotations: Vec::new(),
             language: "rust".into(),
             impl_trait: None,
+            sig_key: None,
         };
         s.save_symbol(&sym).await.unwrap();
         let loaded = s.load_symbol(100).await.unwrap();

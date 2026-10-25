@@ -23,6 +23,7 @@ fn sym(id: u64, name: &str) -> Symbol {
         annotations: Vec::new(),
         language: "typescript".into(),
         impl_trait: None,
+        sig_key: None,
     }
 }
 

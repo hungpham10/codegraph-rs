@@ -1,4 +1,4 @@
-use crate::languages::common::{CallRule, LangSpec};
+use crate::languages::common::{CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
 
 fn ts_language() -> tree_sitter::Language {
@@ -28,12 +28,6 @@ pub static SPEC: LangSpec = LangSpec {
         "enum_definition",
     ],
     param_kinds: &["parameter"],
-    annotation_kinds: &[],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: None,
-    value_func_kinds: &[],
     calls: &[CallRule {
         kind: "call_expression",
         callee_field: "function",
@@ -41,34 +35,20 @@ pub static SPEC: LangSpec = LangSpec {
         name_fn: None,
         target_fn: None,
     }],
-    class_type_name: None,
-    impl_trait_fn: None,
-    refine_kind_fn: None,
-    fn_ptr_assign_fn: None,
-    receiver_fn: None,
-    file_deps_fn: None,
-    go_stmt_kinds: &[],
-    defer_kinds: &[],
-    if_kinds: &["if_expression"],
-    elif_kinds: &[],
-    if_block_kinds: &[],
-    loop_kinds: &["for_expression", "while_expression", "do_while_expression"],
-    switch_kinds: &["match_expression"],
-    switch_block_kinds: &["case_block"],
-    switch_case_kinds: &["case_clause"],
-    switch_default_kinds: &[],
-    return_kinds: &["return_expression"],
-    break_kinds: &[],
-    continue_kinds: &[],
-    throw_kinds: &["throw_expression"],
-    try_kinds: &["try_expression"],
-    except_kinds: &["catch_clause"],
-    try_else_kinds: &[],
-    finally_kinds: &["finally_clause"],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec::none(),
+    markers: MarkerSpec {
+        if_kinds: &["if_expression"],
+        loop_kinds: &["for_expression", "while_expression", "do_while_expression"],
+        switch_kinds: &["match_expression"],
+        switch_block_kinds: &["case_block"],
+        switch_case_kinds: &["case_clause"],
+        return_kinds: &["return_expression"],
+        throw_kinds: &["throw_expression"],
+        try_kinds: &["try_expression"],
+        except_kinds: &["catch_clause"],
+        finally_kinds: &["finally_clause"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 crate::lang_parser!(ScalaParser, SPEC);

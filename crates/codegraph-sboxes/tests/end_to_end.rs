@@ -27,6 +27,7 @@ fn sym(id: u64, name: &str) -> Symbol {
         annotations: Vec::new(),
         language: "test".to_string(),
         impl_trait: None,
+        sig_key: None,
     }
 }
 

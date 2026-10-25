@@ -1,4 +1,4 @@
-use crate::languages::common::{text, CallRule, LangSpec};
+use crate::languages::common::{text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
 use tree_sitter::Node;
 
@@ -39,13 +39,6 @@ pub static SPEC: LangSpec = LangSpec {
     ],
     func_kinds: &["method", "singleton_method"],
     class_kinds: &["class", "module"],
-    param_kinds: &[],
-    annotation_kinds: &[],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: None,
-    value_func_kinds: &[],
     calls: &[
         CallRule {
             kind: "call",
@@ -62,34 +55,22 @@ pub static SPEC: LangSpec = LangSpec {
             target_fn: None,
         },
     ],
-    class_type_name: Some(class_type_name),
-    impl_trait_fn: None,
-    refine_kind_fn: None,
-    fn_ptr_assign_fn: None,
-    receiver_fn: None,
-    file_deps_fn: None,
-    go_stmt_kinds: &[],
-    defer_kinds: &[],
-    if_kinds: &["if"],
-    elif_kinds: &["elsif"],
-    if_block_kinds: &[],
-    loop_kinds: &["while", "until", "for"],
-    switch_kinds: &["case"],
-    switch_block_kinds: &[],
-    switch_case_kinds: &["when"],
-    switch_default_kinds: &["else"],
-    return_kinds: &["return"],
-    break_kinds: &["break"],
-    continue_kinds: &["next"],
-    throw_kinds: &[],
-    try_kinds: &[],
-    except_kinds: &[],
-    try_else_kinds: &[],
-    finally_kinds: &[],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec {
+        class_type_name: Some(class_type_name),
+        ..HookSpec::none()
+    },
+    markers: MarkerSpec {
+        if_kinds: &["if"],
+        elif_kinds: &["elsif"],
+        loop_kinds: &["while", "until", "for"],
+        switch_kinds: &["case"],
+        switch_case_kinds: &["when"],
+        switch_default_kinds: &["else"],
+        return_kinds: &["return"],
+        break_kinds: &["break"],
+        continue_kinds: &["next"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 crate::lang_parser!(RubyParser, SPEC);

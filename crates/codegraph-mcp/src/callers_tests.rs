@@ -33,6 +33,7 @@ async fn callers_timeout_resume_dispatch() {
         annotations: vec![],
         language: "rust".into(),
         impl_trait: None,
+        sig_key: None,
     };
     let mut idx = GraphIndex::open(&dsn).await.unwrap();
     idx.ingest(

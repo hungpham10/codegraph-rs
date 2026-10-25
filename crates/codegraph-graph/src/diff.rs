@@ -498,6 +498,7 @@ mod tests {
             annotations: Vec::new(),
             language: "test".to_string(),
             impl_trait: None,
+            sig_key: None,
         }
     }
 

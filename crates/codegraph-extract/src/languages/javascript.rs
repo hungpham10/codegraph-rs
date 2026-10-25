@@ -1,4 +1,4 @@
-use crate::languages::common::{named_children, text, CallRule, LangSpec};
+use crate::languages::common::{named_children, text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
 use tree_sitter::Node;
 
@@ -60,13 +60,6 @@ pub static SPEC: LangSpec = LangSpec {
         "method_definition",
     ],
     class_kinds: &["class_declaration", "class"],
-    param_kinds: &[],
-    annotation_kinds: &[],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: Some(anonymous_name_node),
-    value_func_kinds: &["function_expression", "arrow_function"],
     calls: &[
         CallRule {
             kind: "call_expression",
@@ -83,40 +76,34 @@ pub static SPEC: LangSpec = LangSpec {
             target_fn: None,
         },
     ],
-    class_type_name: Some(class_type_name),
-    impl_trait_fn: None,
-    refine_kind_fn: None,
-    fn_ptr_assign_fn: None,
-    receiver_fn: None,
-    file_deps_fn: None,
-    go_stmt_kinds: &[],
-    defer_kinds: &[],
-    if_kinds: &["if_statement"],
-    elif_kinds: &[],
-    if_block_kinds: &[],
-    loop_kinds: &[
-        "for_statement",
-        "for_in_statement",
-        "for_of_statement",
-        "while_statement",
-        "do_statement",
-    ],
-    switch_kinds: &["switch_statement"],
-    switch_block_kinds: &["switch_body"],
-    switch_case_kinds: &["switch_case"],
-    switch_default_kinds: &["switch_default"],
-    return_kinds: &["return_statement"],
-    break_kinds: &["break_statement"],
-    continue_kinds: &["continue_statement"],
-    throw_kinds: &["throw_statement"],
-    try_kinds: &["try_statement"],
-    except_kinds: &["catch_clause"],
-    try_else_kinds: &[],
-    finally_kinds: &["finally_clause"],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec {
+        class_type_name: Some(class_type_name),
+        anonymous_name_fn: Some(anonymous_name_node),
+        value_func_kinds: &["function_expression", "arrow_function"],
+        ..HookSpec::none()
+    },
+    markers: MarkerSpec {
+        if_kinds: &["if_statement"],
+        loop_kinds: &[
+            "for_statement",
+            "for_in_statement",
+            "for_of_statement",
+            "while_statement",
+            "do_statement",
+        ],
+        switch_kinds: &["switch_statement"],
+        switch_block_kinds: &["switch_body"],
+        switch_case_kinds: &["switch_case"],
+        switch_default_kinds: &["switch_default"],
+        return_kinds: &["return_statement"],
+        break_kinds: &["break_statement"],
+        continue_kinds: &["continue_statement"],
+        throw_kinds: &["throw_statement"],
+        try_kinds: &["try_statement"],
+        except_kinds: &["catch_clause"],
+        finally_kinds: &["finally_clause"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 crate::lang_parser!(JavaScriptParser, SPEC);

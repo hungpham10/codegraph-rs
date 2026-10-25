@@ -1,4 +1,4 @@
-use crate::languages::common::{named_children, text, CallRule, LangSpec};
+use crate::languages::common::{named_children, text, CallRule, HookSpec, LangSpec, MarkerSpec};
 use codegraph_core::SymbolKind;
 use tree_sitter::Node;
 
@@ -86,11 +86,6 @@ pub static SPEC: LangSpec = LangSpec {
     ],
     param_kinds: &["formal_parameter"],
     annotation_kinds: &["annotation", "marker_annotation"],
-    name_type_fallback: false,
-
-    link_impl_methods: false,
-    anonymous_name_fn: None,
-    value_func_kinds: &[],
     calls: &[
         CallRule {
             kind: "method_invocation",
@@ -107,41 +102,32 @@ pub static SPEC: LangSpec = LangSpec {
             target_fn: None,
         },
     ],
-    class_type_name: None,
-    impl_trait_fn: Some(java_interfaces),
-    refine_kind_fn: None,
-    fn_ptr_assign_fn: None,
-    receiver_fn: None,
-    file_deps_fn: None,
-    go_stmt_kinds: &[],
-    defer_kinds: &[],
-    if_kinds: &["if_statement"],
-    elif_kinds: &[],
-    if_block_kinds: &[],
-    loop_kinds: &[
-        "for_statement",
-        "enhanced_for_statement",
-        "while_statement",
-        "do_statement",
-    ],
-    switch_kinds: &["switch_expression", "switch_statement"],
-    switch_block_kinds: &["switch_block"],
-    switch_case_kinds: &["switch_block_statement_group", "switch_rule"],
-    switch_default_kinds: &[],
-    return_kinds: &["return_statement"],
-    break_kinds: &["break_statement"],
-    continue_kinds: &["continue_statement"],
-    throw_kinds: &["throw_statement"],
-    try_kinds: &["try_statement", "try_with_resources_statement"],
-    except_kinds: &["catch_clause"],
-    try_else_kinds: &[],
-    finally_kinds: &["finally_clause"],
-    if_cond_field: "condition",
-    if_cons_field: "consequence",
-    if_alt_field: "alternative",
-    body_field: "body",
+    hooks: HookSpec {
+        impl_trait_fn: Some(java_interfaces),
+        ..HookSpec::none()
+    },
+    markers: MarkerSpec {
+        if_kinds: &["if_statement"],
+        loop_kinds: &[
+            "for_statement",
+            "enhanced_for_statement",
+            "while_statement",
+            "do_statement",
+        ],
+        switch_kinds: &["switch_expression", "switch_statement"],
+        switch_block_kinds: &["switch_block"],
+        switch_case_kinds: &["switch_block_statement_group", "switch_rule"],
+        return_kinds: &["return_statement"],
+        break_kinds: &["break_statement"],
+        continue_kinds: &["continue_statement"],
+        throw_kinds: &["throw_statement"],
+        try_kinds: &["try_statement", "try_with_resources_statement"],
+        except_kinds: &["catch_clause"],
+        finally_kinds: &["finally_clause"],
+        ..MarkerSpec::dflt()
+    },
+    ..LangSpec::dflt()
 };
-
 crate::lang_parser!(JavaParser, SPEC);
 
 /// Danh sách interface mà class implements (`interfaces` field của

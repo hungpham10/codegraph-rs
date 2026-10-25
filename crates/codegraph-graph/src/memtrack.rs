@@ -247,6 +247,7 @@ mod tests {
             annotations: Vec::new(),
             language: "rust".into(),
             impl_trait: None,
+            sig_key: None,
         };
         let mem = symbols_mem(&HashMap::from([(100, sym)]));
         assert_eq!(mem.entries, 1);

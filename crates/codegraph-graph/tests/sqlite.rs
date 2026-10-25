@@ -29,6 +29,7 @@ fn sym(file: &str, name: &str, id: u64) -> Symbol {
         annotations: Vec::new(),
         language: "ts".to_string(),
         impl_trait: None,
+        sig_key: None,
     }
 }
 

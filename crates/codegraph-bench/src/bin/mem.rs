@@ -334,6 +334,7 @@ fn synthetic_parse_result(n: usize, fanout: usize, shape: Shape) -> codegraph_gr
             annotations: Vec::<Annotation>::new(),
             language: "rust".into(),
             impl_trait: None,
+            sig_key: None,
         });
     }
 

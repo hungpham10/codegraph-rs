@@ -292,3 +292,42 @@ fn go_ast_dump() {
     }
     dump(tree.root_node(), src, 0);
 }
+
+#[test]
+fn go_signature_key_normalized_and_param_name_insensitive() {
+    let src = r#"package main
+
+type Reader interface {
+	Read(p []byte) (int, error)
+}
+
+type Good struct{}
+type Wrong struct{}
+
+func (g Good) Read(b []byte) (int, error) { return 0, nil }
+func (w Wrong) Read(s string) string { return "" }
+"#;
+    let parsed = GoParser.parse_file("r.go", src).unwrap();
+    let key = |type_name: &str| {
+        parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "Read" && s.type_name.as_deref() == Some(type_name))
+            .unwrap()
+            .sig_key
+            .clone()
+            .expect("sig_key missing")
+    };
+    // Interface method (method_elem) và impl (method_declaration) cùng hàm.
+    let iface_key = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "Read" && s.type_name.is_none())
+        .unwrap()
+        .sig_key
+        .clone()
+        .expect("iface sig_key missing");
+    assert_eq!(iface_key, "([]byte)(int,error)");
+    assert_eq!(key("Good"), "([]byte)(int,error)"); // khác tên param, cùng sig
+    assert_eq!(key("Wrong"), "(string)(string)"); // sai signature
+}

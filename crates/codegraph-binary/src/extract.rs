@@ -155,6 +155,7 @@ fn do_extract(
             annotations,
             language: "binary".to_string(),
             impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -206,6 +207,7 @@ fn do_extract(
             annotations,
             language: "binary".to_string(),
             impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -250,6 +252,7 @@ fn do_extract(
             }],
             language: "binary".to_string(),
             impl_trait: None,
+            sig_key: None,
         });
     }
 
@@ -275,6 +278,7 @@ fn do_extract(
             annotations: Vec::new(),
             language: "binary".to_string(),
             impl_trait: None,
+            sig_key: None,
         });
     }
 
