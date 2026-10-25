@@ -81,6 +81,30 @@ impl MySqlStorage {
         .await
         .map_err(db_err)?;
         // Stats tổng hợp (codegraph_status đọc O(1) không rebuild) — idempotent.
+
+        // Dynamic-index inputs (file imports + fn-ptr assigns) — idempotent.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sg_file_deps (
+                repo_id BIGINT NOT NULL,
+                path TEXT NOT NULL,
+                deps BLOB NOT NULL,
+                PRIMARY KEY (repo_id, path)
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sg_fn_ptr_assigns (
+                repo_id BIGINT NOT NULL,
+                path TEXT NOT NULL,
+                assigns BLOB NOT NULL,
+                PRIMARY KEY (repo_id, path)
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sg_stats (
                 repo_id BIGINT NOT NULL,
@@ -635,6 +659,64 @@ impl EntityStorage for MySqlStorage {
         Ok(out)
     }
 
+    async fn set_file_deps(&mut self, path: &str, deps: &[u8]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sg_file_deps (repo_id, path, deps) VALUES (?, ?, ?) \
+             ON DUPLICATE KEY UPDATE deps = VALUES(deps)",
+        )
+        .bind(self.repo_id as i64)
+        .bind(path)
+        .bind(deps)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn all_file_deps(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let rows = sqlx::query("SELECT path, deps FROM sg_file_deps WHERE repo_id = ?")
+            .bind(self.repo_id as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let path: String = r.try_get("path").map_err(db_err)?;
+            let deps: Vec<u8> = r.try_get("deps").map_err(db_err)?;
+            out.push((path, deps));
+        }
+        Ok(out)
+    }
+
+    async fn set_fn_ptr_assigns(&mut self, path: &str, assigns: &[u8]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sg_fn_ptr_assigns (repo_id, path, assigns) VALUES (?, ?, ?) \
+             ON DUPLICATE KEY UPDATE assigns = VALUES(assigns)",
+        )
+        .bind(self.repo_id as i64)
+        .bind(path)
+        .bind(assigns)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn all_fn_ptr_assigns(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let rows = sqlx::query("SELECT path, assigns FROM sg_fn_ptr_assigns WHERE repo_id = ?")
+            .bind(self.repo_id as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let path: String = r.try_get("path").map_err(db_err)?;
+            let assigns: Vec<u8> = r.try_get("assigns").map_err(db_err)?;
+            out.push((path, assigns));
+        }
+        Ok(out)
+    }
+
     async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<()> {
         sqlx::query(
             "INSERT INTO sg_call_names (repo_id, name, sites) VALUES (?, ?, ?) \
@@ -781,6 +863,8 @@ impl EntityStorage for MySqlStorage {
             "sg_symbols",
             "sg_embeddings",
             "sg_files",
+            "sg_file_deps",
+            "sg_fn_ptr_assigns",
             "sg_call_records",
             "sg_call_names",
             "rt_nodes",

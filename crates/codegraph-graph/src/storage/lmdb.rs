@@ -177,6 +177,8 @@ const D_COUNTER: &str = "rt_counter";
 const D_SYMBOLS: &str = "sg_symbols";
 const D_NEXT_ID: &str = "sg_next_id";
 const D_CALL_RECORDS: &str = "sg_call_records";
+const D_FILE_DEPS: &str = "sg_file_deps";
+const D_FN_PTR_ASSIGNS: &str = "sg_fn_ptr_assigns";
 const D_CALL_NAMES: &str = "sg_call_names";
 const D_FILES: &str = "sg_files";
 const D_VERSION: &str = "sg_meta";
@@ -289,6 +291,8 @@ pub struct LmdbStorage {
     symbols: Database,
     next_id: Database,
     call_records: Database,
+    file_deps: Database,
+    fn_ptr_assigns: Database,
     call_names: Database,
     files: Database,
     version: Database,
@@ -350,6 +354,12 @@ impl LmdbStorage {
         let call_records = env
             .create_db(Some(D_CALL_RECORDS), DatabaseFlags::empty())
             .map_err(e)?;
+        let file_deps = env
+            .create_db(Some(D_FILE_DEPS), DatabaseFlags::empty())
+            .map_err(e)?;
+        let fn_ptr_assigns = env
+            .create_db(Some(D_FN_PTR_ASSIGNS), DatabaseFlags::empty())
+            .map_err(e)?;
         let call_names = env
             .create_db(Some(D_CALL_NAMES), DatabaseFlags::empty())
             .map_err(e)?;
@@ -382,6 +392,8 @@ impl LmdbStorage {
             symbols,
             next_id,
             call_records,
+            file_deps,
+            fn_ptr_assigns,
             call_names,
             files,
             version,
@@ -842,6 +854,51 @@ impl EntityStorage for LmdbStorage {
         Ok(out)
     }
 
+    async fn set_file_deps(&mut self, path: &str, deps: &[u8]) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.put(self.file_deps, &str_key(path), &deps, WriteFlags::empty())
+            .map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
+    async fn all_file_deps(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        let mut cur = tx.open_ro_cursor(self.file_deps).map_err(e)?;
+        let mut out = Vec::new();
+        for item in cur.iter() {
+            let (k, v) = item.map_err(e)?;
+            let path = std::str::from_utf8(k).map_err(|e| StorageError::Internal(e.to_string()))?;
+            out.push((path.to_string(), v.to_vec()));
+        }
+        Ok(out)
+    }
+
+    async fn set_fn_ptr_assigns(&mut self, path: &str, assigns: &[u8]) -> Result<()> {
+        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        tx.put(
+            self.fn_ptr_assigns,
+            &str_key(path),
+            &assigns,
+            WriteFlags::empty(),
+        )
+        .map_err(e)?;
+        tx.commit().map_err(e)?;
+        Ok(())
+    }
+
+    async fn all_fn_ptr_assigns(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let tx = self.env.begin_ro_txn().map_err(e)?;
+        let mut cur = tx.open_ro_cursor(self.fn_ptr_assigns).map_err(e)?;
+        let mut out = Vec::new();
+        for item in cur.iter() {
+            let (k, v) = item.map_err(e)?;
+            let path = std::str::from_utf8(k).map_err(|e| StorageError::Internal(e.to_string()))?;
+            out.push((path.to_string(), v.to_vec()));
+        }
+        Ok(out)
+    }
+
     async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<()> {
         let mut tx = self.env.begin_rw_txn().map_err(e)?;
         tx.put(
@@ -934,6 +991,8 @@ impl EntityStorage for LmdbStorage {
         for db in [
             self.symbols,
             self.call_records,
+            self.file_deps,
+            self.fn_ptr_assigns,
             self.call_names,
             self.files,
             self.embeddings,

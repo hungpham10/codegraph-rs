@@ -437,6 +437,23 @@ impl EntityStorage for CachedStorage {
         self.inner.all_call_records().await
     }
 
+    // ── File deps + fn-ptr assigns (no cache — nhỏ, dùng một lần khi rebuild) ──
+    async fn set_file_deps(&mut self, path: &str, deps: &[u8]) -> Result<(), StorageError> {
+        self.inner.set_file_deps(path, deps).await
+    }
+
+    async fn all_file_deps(&self) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.inner.all_file_deps().await
+    }
+
+    async fn set_fn_ptr_assigns(&mut self, path: &str, assigns: &[u8]) -> Result<(), StorageError> {
+        self.inner.set_fn_ptr_assigns(path, assigns).await
+    }
+
+    async fn all_fn_ptr_assigns(&self) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.inner.all_fn_ptr_assigns().await
+    }
+
     // ── Call-name index ──
     async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<(), StorageError> {
         self.inner.set_call_name_index(name, sites).await?;

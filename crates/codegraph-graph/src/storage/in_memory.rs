@@ -996,4 +996,24 @@ mod tests {
         assert_eq!(s.load_call_name_index("name").await.unwrap(), None);
         assert_eq!(s.version().await.unwrap(), 0);
     }
+
+    #[tokio::test]
+    async fn file_deps_and_fn_ptr_assigns_roundtrip() {
+        let mut s = InMemoryStorage::default();
+        s.set_file_deps("a.go", b"{\"imports\":[]}").await.unwrap();
+        s.set_fn_ptr_assigns("z.c", b"[{\"var\":\"p\",\"target\":\"f\",\"line\":1}]")
+            .await
+            .unwrap();
+        let deps = s.all_file_deps().await.unwrap();
+        assert_eq!(
+            deps,
+            vec![("a.go".to_string(), b"{\"imports\":[]}".to_vec())]
+        );
+        let assigns = s.all_fn_ptr_assigns().await.unwrap();
+        assert_eq!(assigns.len(), 1);
+        // clear_entities xoá cả hai — ingest mới không rò dữ liệu cũ.
+        s.clear_entities().await.unwrap();
+        assert!(s.all_file_deps().await.unwrap().is_empty());
+        assert!(s.all_fn_ptr_assigns().await.unwrap().is_empty());
+    }
 }
