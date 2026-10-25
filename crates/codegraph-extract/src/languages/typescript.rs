@@ -114,6 +114,7 @@ pub static SPEC: LangSpec = LangSpec {
         try_kinds: &["try_statement"],
         except_kinds: &["catch_clause"],
         finally_kinds: &["finally_clause"],
+        await_kinds: &["await_expression"],
         ..MarkerSpec::dflt()
     },
     ..LangSpec::dflt()

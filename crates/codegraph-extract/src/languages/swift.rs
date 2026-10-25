@@ -62,6 +62,7 @@ pub static SPEC: LangSpec = LangSpec {
         break_kinds: &["break_statement"],
         continue_kinds: &["continue_statement"],
         throw_kinds: &["throw_statement"],
+        await_kinds: &["await_expression"],
         ..MarkerSpec::dflt()
     },
     ..LangSpec::dflt()

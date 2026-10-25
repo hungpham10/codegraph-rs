@@ -46,11 +46,13 @@ pub enum Marker {
     Go = 25,
     /// Go `defer f()` — call hoãn đến khi return.
     Defer = 26,
+    /// Call trong ngữ cảnh await (`await f()`, `await expr`) — async boundary.
+    Await = 27,
 }
 
 impl Marker {
     /// All variant values (các hằng MARKER_*).
-    pub const ALL: [Marker; 22] = [
+    pub const ALL: [Marker; 23] = [
         Marker::Loop,
         Marker::RecCall,
         Marker::IfTrue,
@@ -73,6 +75,7 @@ impl Marker {
         Marker::CatchStart,
         Marker::Go,
         Marker::Defer,
+        Marker::Await,
     ];
 
     /// Giá trị u64 tương ứng (cho tương thích với chain cũ).
@@ -107,6 +110,7 @@ impl Marker {
             24 => Some(Marker::CatchStart),
             25 => Some(Marker::Go),
             26 => Some(Marker::Defer),
+            27 => Some(Marker::Await),
             _ => None,
         }
     }
@@ -136,6 +140,7 @@ impl Marker {
             Marker::CatchStart => "CATCH_START",
             Marker::Go => "GO",
             Marker::Defer => "DEFER",
+            Marker::Await => "AWAIT",
         }
     }
 
@@ -165,6 +170,7 @@ impl Marker {
             "catch_start" => Some(Marker::CatchStart),
             "go" => Some(Marker::Go),
             "defer" => Some(Marker::Defer),
+            "await" => Some(Marker::Await),
             _ => None,
         }
     }
@@ -204,6 +210,7 @@ pub const MARKER_TRY_END: u64 = 23;
 pub const MARKER_CATCH_START: u64 = 24;
 pub const MARKER_GO: u64 = 25;
 pub const MARKER_DEFER: u64 = 26;
+pub const MARKER_AWAIT: u64 = 27;
 
 /// Helper để đọc chain sang danh sách marker — tiện cho code đọc.
 #[allow(dead_code)]
@@ -720,7 +727,7 @@ impl From<Marker> for TraceAction {
             Marker::Loop | Marker::LoopBack => Self::Loop,
             Marker::Break | Marker::Continue | Marker::StmtEnd => Self::Statement,
             Marker::TryStart | Marker::TryEnd | Marker::CatchStart => Self::Statement,
-            Marker::Go | Marker::Defer => Self::Statement,
+            Marker::Go | Marker::Defer | Marker::Await => Self::Statement,
         }
     }
 }

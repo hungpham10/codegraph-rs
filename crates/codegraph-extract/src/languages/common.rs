@@ -182,6 +182,9 @@ pub struct MarkerSpec {
     pub go_stmt_kinds: &'static [&'static str],
     /// Node kinds defer call (`defer_statement`) — marker DEFER trong chain.
     pub defer_kinds: &'static [&'static str],
+    /// Node kinds await (`await`, `await_expression`) — marker AWAIT trong
+    /// chain (async boundary: call bên trong mang ngữ cảnh await).
+    pub await_kinds: &'static [&'static str],
     pub if_kinds: &'static [&'static str],
     pub elif_kinds: &'static [&'static str],
     /// Block-like node kinds — fallback consequence/alternative khi thiếu field
@@ -213,6 +216,7 @@ impl MarkerSpec {
         Self {
             go_stmt_kinds: &[],
             defer_kinds: &[],
+            await_kinds: &[],
             if_kinds: &[],
             elif_kinds: &[],
             if_block_kinds: &[],
@@ -974,6 +978,13 @@ fn walk_chain(
     }
     if ctx.spec.markers.defer_kinds.contains(&k) {
         chain_push(ctx, codegraph_core::MARKER_DEFER);
+        for ch in named_children(node) {
+            walk_chain(ctx, &ch, depth + 1, in_loop, None);
+        }
+        return;
+    }
+    if ctx.spec.markers.await_kinds.contains(&k) {
+        chain_push(ctx, codegraph_core::MARKER_AWAIT);
         for ch in named_children(node) {
             walk_chain(ctx, &ch, depth + 1, in_loop, None);
         }

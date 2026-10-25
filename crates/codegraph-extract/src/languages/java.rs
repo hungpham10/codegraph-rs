@@ -108,6 +108,7 @@ pub static SPEC: LangSpec = LangSpec {
         impl_trait_fn: Some(java_supers),
         sig_key_fn: Some(java_signature_key),
         file_deps_fn: Some(java_file_deps),
+        fn_ptr_assign_fn: Some(java_fn_value_assign),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -195,6 +196,32 @@ fn java_signature_key(node: &TsNode, src: &[u8]) -> Option<String> {
 /// - `import com.foo.Bar;` → alias "Bar", path "com.foo.Bar"
 /// - `import com.foo.Bar as B;` (hiếm, preview) → alias "B"
 /// - `import com.foo.*;` / `import static ...;` wildcard → bỏ qua.
+///
+/// Function-value Java: `Runnable r = this::run;` — variable_declarator với
+/// value là method_reference (`this::run` / `Foo::bar`). Lambda body — skip.
+fn java_fn_value_assign(node: &TsNode, src: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "variable_declarator" {
+        return None;
+    }
+    let name = node.child_by_field_name("name")?;
+    let value = node.child_by_field_name("value")?;
+    if value.kind() != "method_reference" {
+        return None;
+    }
+    // method_reference: `this::run` / `Foo::bar` — identifier CUỐI là tên hàm
+    // (không phụ thuộc field name của grammar).
+    let mut target = None;
+    let mut c = value.walk();
+    for ch in value.children(&mut c) {
+        if ch.kind() == "identifier" {
+            target = Some(ch);
+        }
+    }
+    let target = text(&target?, src)?;
+    let var = text(&name, src)?;
+    Some((var, target))
+}
+
 fn java_file_deps(root: &TsNode, src: &[u8]) -> Option<FileDeps> {
     let mut imports: Vec<ImportAlias> = Vec::new();
     let mut stack = vec![*root];

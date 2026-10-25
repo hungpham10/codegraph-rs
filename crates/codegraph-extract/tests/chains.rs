@@ -425,6 +425,7 @@ class Service {
         c,
         [
             "[TRY_START]",
+            "[AWAIT]",
             "[CALL_ENTER]",
             "this.repo.find",
             "[CALL_EXIT]",

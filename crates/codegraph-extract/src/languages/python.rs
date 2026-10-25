@@ -45,6 +45,7 @@ pub static SPEC: LangSpec = LangSpec {
         anonymous_name_fn: Some(anonymous_name_node),
         impl_trait_fn: Some(py_superclasses),
         file_deps_fn: Some(py_file_deps),
+        fn_ptr_assign_fn: Some(py_fn_value_assign),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -62,6 +63,7 @@ pub static SPEC: LangSpec = LangSpec {
         except_kinds: &["except_clause"],
         try_else_kinds: &["else_clause"],
         finally_kinds: &["finally_clause"],
+        await_kinds: &["await"],
         ..MarkerSpec::dflt()
     },
     ..LangSpec::dflt()
@@ -107,6 +109,38 @@ fn py_superclasses(node: &Node, src: &[u8]) -> Option<String> {
 /// - `import os.path` → alias "path", path "os.path"
 /// - `from orders.models import Order, get_order as fetch`
 ///   → alias "Order"/"fetch", path "orders.models.Order"/"orders.models.get_order"
+///
+/// Function-value assignment (Python):
+/// - `handler = process` — identifier = identifier thuần
+/// - `self.handler = process` — attribute object="self" (member fn assignment;
+///   call `self.handler()` có call_name "self.handler" khớp key).
+///
+/// `x = lambda ...` — target vô danh, skip.
+fn py_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "assignment" {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    let var = match left.kind() {
+        "identifier" => text(&left, src)?,
+        // `self.handler = fn` — attribute với object "self".
+        "attribute" => {
+            let obj = left.child_by_field_name("object")?;
+            if text(&obj, src).as_deref() != Some("self") {
+                return None;
+            }
+            text(&left, src)?
+        }
+        _ => return None,
+    };
+    if right.kind() != "identifier" {
+        return None;
+    }
+    let target = text(&right, src)?;
+    Some((var, target))
+}
+
 fn py_file_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
     let mut imports: Vec<ImportAlias> = Vec::new();
     let mut stack = vec![*root];

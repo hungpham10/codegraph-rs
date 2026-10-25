@@ -2139,11 +2139,10 @@ impl GraphIndex {
             res => return res,
         }
 
-        // 6. Function pointer assign-site (C/C++): `p = f;` tracked qua
-        //    `FnPtrAssign` → call `p(...)` fan-out các target đã gán.
-        if !call.call_name.contains('.')
-            && let Some(targets) = self.fn_ptr_index.get(&call.call_name.to_lowercase())
-        {
+        // 6. Function pointer assign-site: `p = f;` (C/C++/Go/JS...) và member
+        //    fn assignment `obj.handler = fn` — key là text vế trái, lookup
+        //    theo call_name (bare lẫn dotted).
+        if let Some(targets) = self.fn_ptr_index.get(&call.call_name.to_lowercase()) {
             let cands: Vec<u64> = targets
                 .iter()
                 .copied()
@@ -6156,6 +6155,49 @@ mod tests {
                 "callers({m}) missing dyn caller: {ids:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn member_fn_assignment_resolves_dotted_call() {
+        // `obj.handler = process` (member fn assignment) + call
+        // `obj.handler()` (call_name có dot) — guard fn_ptr_index phải mở.
+        let mut idx = GraphIndex::in_memory();
+        let (caller, process) = (SYMBOL_BASE, SYMBOL_BASE + 1);
+        let mut r = result(
+            "j.js",
+            vec![
+                dsym(caller, "setup", SymbolKind::Function, 0, None, 10),
+                dsym(process, "process", SymbolKind::Function, 0, None, 1),
+            ],
+            HashMap::from([(caller, vec![caller, 0])]),
+            vec![CallRecord {
+                caller_id: caller,
+                call_name: "obj.handler".to_string(),
+                position: 1,
+                line: 11,
+                condition: None,
+                is_loop_body: false,
+                effect: EffectType::None,
+                effect_desc: None,
+                target_class: None,
+                target_method: None,
+                into_var: None,
+                is_new_var: false,
+                receiver_text: Some("obj".to_string()),
+                ..Default::default()
+            }],
+        );
+        r.fn_ptr_assigns = vec![FnPtrAssign {
+            var: "obj.handler".to_string(),
+            target: "process".to_string(),
+            line: 5,
+        }];
+        idx.ingest(&[r], None).await.unwrap();
+
+        let flow = idx.flow(caller).await.unwrap();
+        // Trước đây guard `!contains('.')` chặn — giờ resolve PointerAssign.
+        assert_eq!(flow.calls[0].resolved_via, ResolutionKind::PointerAssign);
+        assert_eq!(flow.calls[0].candidate_names, vec!["process"]);
     }
 
     #[tokio::test]

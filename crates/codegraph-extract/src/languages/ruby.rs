@@ -61,6 +61,7 @@ pub static SPEC: LangSpec = LangSpec {
         class_type_name: Some(class_type_name),
         impl_trait_fn: Some(ruby_superclass),
         file_deps_fn: Some(ruby_require_deps),
+        fn_ptr_assign_fn: Some(ruby_fn_value_assign),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -79,6 +80,37 @@ pub static SPEC: LangSpec = LangSpec {
 };
 /// String literal đầu tiên trong argument list của `require` — helper tách
 /// riêng để tránh borrow scope của cursor.
+/// Function-value assignment Ruby: `handler = method(:process)` — RHS là
+/// call `method(...)` với symbol literal. `handler = process` là LỜI GỌI
+/// process() trong Ruby — KHÔNG track (khác Go/JS).
+fn ruby_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "assignment" && node.kind() != "single_assignment" {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    if left.kind() != "identifier" {
+        return None;
+    }
+    let right = node.child_by_field_name("right")?;
+    if right.kind() != "call" {
+        return None;
+    }
+    let m = right.child_by_field_name("method")?;
+    if text(&m, src).as_deref() != Some("method") {
+        return None;
+    }
+    // Argument: symbol literal `:process` — bỏ ':'.
+    let args = right.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let target = args
+        .children(&mut cursor)
+        .find(|c| c.kind() == "simple_symbol")
+        .and_then(|s| text(&s, src))
+        .map(|t| t.trim_start_matches(':').to_string())?;
+    let var = text(&left, src)?;
+    Some((var, target))
+}
+
 fn ruby_require_path<'a>(args: &Node<'a>, src: &'a [u8]) -> Option<String> {
     let mut cursor = args.walk();
     let mut found = None;

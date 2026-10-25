@@ -952,3 +952,115 @@ class CardRepo extends BaseRepo with Logging {
         ]
     );
 }
+
+#[test]
+fn fn_value_and_member_assignment_across_languages() {
+    // ── Python: identifier + self.attr member ──
+    let py = PythonParser
+        .parse_file("p.py", "def process(x): pass\n\ndef setup():\n    handler = process\n    self.handler = process\n    other.x = process\n")
+        .unwrap();
+    let py_vars: Vec<(&str, &str)> = py
+        .fn_ptr_assigns
+        .iter()
+        .map(|a| (a.var.as_str(), a.target.as_str()))
+        .collect();
+    let mut py_sorted = py_vars.clone();
+    py_sorted.sort();
+    assert_eq!(
+        py_sorted,
+        vec![("handler", "process"), ("self.handler", "process")]
+    );
+
+    // ── Ruby: method(:sym) — plain `x = process` là lời gọi, không track ──
+    let rb = RubyParser
+        .parse_file(
+            "r.rb",
+            "def setup\n  handler = method(:process)\n  other = process\nend\n",
+        )
+        .unwrap();
+    let rb_vars: Vec<(&str, &str)> = rb
+        .fn_ptr_assigns
+        .iter()
+        .map(|a| (a.var.as_str(), a.target.as_str()))
+        .collect();
+    assert_eq!(rb_vars, vec![("handler", "process")]);
+
+    // ── Java: method reference ──
+    let jv = codegraph_extract::languages::java::JavaParser
+        .parse_file("J.java", "class A {\n  void setup() {\n    Runnable r = this::run;\n    Supplier<String> s = Foo::bar;\n  }\n}\n")
+        .unwrap();
+    let mut jv_vars: Vec<(&str, &str)> = jv
+        .fn_ptr_assigns
+        .iter()
+        .map(|a| (a.var.as_str(), a.target.as_str()))
+        .collect();
+    jv_vars.sort();
+    assert_eq!(jv_vars, vec![("r", "run"), ("s", "bar")]);
+
+    // ── C#: delegate identifier ──
+    let cs = codegraph_extract::languages::csharp::CSharpParser
+        .parse_file(
+            "C.cs",
+            "class A {\n  void Setup() {\n    Action handler = Process;\n  }\n}\n",
+        )
+        .unwrap();
+    let cs_vars: Vec<(&str, &str)> = cs
+        .fn_ptr_assigns
+        .iter()
+        .map(|a| (a.var.as_str(), a.target.as_str()))
+        .collect();
+    assert_eq!(cs_vars, vec![("handler", "Process")]);
+
+    // ── JS: member assignment (kể cả prototype) ──
+    let js = codegraph_extract::languages::javascript::JavaScriptParser
+        .parse_file(
+            "j.js",
+            "obj.handler = process;\nFoo.prototype.run = runImpl;\nplain = other;\n",
+        )
+        .unwrap();
+    let mut js_vars: Vec<(&str, &str)> = js
+        .fn_ptr_assigns
+        .iter()
+        .map(|a| (a.var.as_str(), a.target.as_str()))
+        .collect();
+    js_vars.sort();
+    assert_eq!(
+        js_vars,
+        vec![
+            ("Foo.prototype.run", "runImpl"),
+            ("obj.handler", "process"),
+            ("plain", "other"),
+        ]
+    );
+
+    // ── Lua: field_expression ──
+    let lua = LuaParser
+        .parse_file("l.lua", "obj.handler = process\nlocal x = 1\n")
+        .unwrap();
+    let lua_vars: Vec<(&str, &str)> = lua
+        .fn_ptr_assigns
+        .iter()
+        .map(|a| (a.var.as_str(), a.target.as_str()))
+        .collect();
+    assert_eq!(lua_vars, vec![("obj.handler", "process")]);
+}
+
+#[test]
+fn await_markers_in_chain() {
+    // Python `await` + JS `await_expression` → MARKER_AWAIT trong chain.
+    let py = PythonParser
+        .parse_file("p.py", "async def f():\n    await g()\n")
+        .unwrap();
+    assert!(py
+        .chains
+        .values()
+        .any(|c| c.contains(&codegraph_core::MARKER_AWAIT)));
+
+    let js = codegraph_extract::languages::javascript::JavaScriptParser
+        .parse_file("j.js", "async function f() { await g(); }\n")
+        .unwrap();
+    assert!(js
+        .chains
+        .values()
+        .any(|c| c.contains(&codegraph_core::MARKER_AWAIT)));
+}

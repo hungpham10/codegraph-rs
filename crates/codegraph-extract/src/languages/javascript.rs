@@ -108,6 +108,7 @@ pub static SPEC: LangSpec = LangSpec {
         try_kinds: &["try_statement"],
         except_kinds: &["catch_clause"],
         finally_kinds: &["finally_clause"],
+        await_kinds: &["await_expression"],
         ..MarkerSpec::dflt()
     },
     ..LangSpec::dflt()
@@ -246,10 +247,17 @@ pub fn js_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
             let right = node.child_by_field_name("right")?;
-            if left.kind() != "identifier" || right.kind() != "identifier" {
+            if right.kind() != "identifier" {
                 return None;
             }
-            Some((text(&left, src)?, text(&right, src)?))
+            match left.kind() {
+                // `handler = process`.
+                "identifier" => Some((text(&left, src)?, text(&right, src)?)),
+                // `obj.handler = fn` / `Foo.prototype.run = fn` — key dotted
+                // (call `obj.handler()` khớp qua guard fn_ptr_index mở).
+                "member_expression" => Some((text(&left, src)?, text(&right, src)?)),
+                _ => None,
+            }
         }
         "variable_declarator" => {
             let name = node.child_by_field_name("name")?;

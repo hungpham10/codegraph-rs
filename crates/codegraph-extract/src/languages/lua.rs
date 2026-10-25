@@ -176,9 +176,18 @@ fn lua_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
             "variable_list" => {
                 let mut c2 = ch.walk();
                 for g in ch.children(&mut c2) {
-                    if let Some(nn) = first_name(&g) {
-                        if let Some(t) = text(&nn, src) {
-                            names.push(t);
+                    // Lua assignment target: kind thật là "variable"/"identifier"
+                    // — text chứa '.' (member fn assignment `obj.handler`) thì
+                    // dùng FULL TEXT; identifier thuần → name; bracket skip.
+                    let t = text(&g, src).unwrap_or_default();
+                    if t.contains('[') || t.contains('(') {
+                        continue;
+                    }
+                    if t.contains('.') {
+                        names.push(t);
+                    } else if let Some(nn) = first_name(&g) {
+                        if let Some(t2) = text(&nn, src) {
+                            names.push(t2);
                         }
                     }
                 }

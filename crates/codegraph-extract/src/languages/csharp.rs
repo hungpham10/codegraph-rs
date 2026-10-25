@@ -63,6 +63,7 @@ pub static SPEC: LangSpec = LangSpec {
         impl_trait_fn: Some(csharp_bases),
         sig_key_fn: Some(csharp_signature_key),
         file_deps_fn: Some(csharp_using_deps),
+        fn_ptr_assign_fn: Some(csharp_fn_value_assign),
         ..HookSpec::none()
     },
     markers: MarkerSpec {
@@ -83,6 +84,7 @@ pub static SPEC: LangSpec = LangSpec {
         try_kinds: &["try_statement"],
         except_kinds: &["catch_clause", "catch_declaration"],
         finally_kinds: &["finally_clause"],
+        await_kinds: &["await_expression"],
         ..MarkerSpec::dflt()
     },
     ..LangSpec::dflt()
@@ -142,6 +144,30 @@ fn csharp_signature_key(node: &Node, src: &[u8]) -> Option<String> {
 /// `using` directives → FileDeps:
 /// - `using App.Repos;` → alias "Repos", path "App.Repos"
 /// - `using Db = App.Data;` → alias "Db", path "App.Data"
+///
+/// Function-value C#: `Action handler = Process;` — variable_declarator
+/// với value identifier thuần. Lambda (`x => ...`) — skip.
+fn csharp_fn_value_assign(node: &Node, src: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "variable_declarator" {
+        return None;
+    }
+    let name = node.child_by_field_name("name")?;
+    if name.kind() != "identifier" {
+        return None;
+    }
+    // C# grammar: value (Process) là identifier UNNAMED (không có field
+    // "value") — lấy identifier con CUỐI khác name.
+    let mut target: Option<Node> = None;
+    let mut cursor = node.walk();
+    for ch in node.children(&mut cursor) {
+        if ch.kind() == "identifier" && ch.id() != name.id() {
+            target = Some(ch);
+        }
+    }
+    let value = target?;
+    Some((text(&name, src)?, text(&value, src)?))
+}
+
 fn csharp_using_deps(root: &Node, src: &[u8]) -> Option<FileDeps> {
     let mut imports: Vec<ImportAlias> = Vec::new();
     let mut stack = vec![*root];
