@@ -243,7 +243,7 @@ pub fn list_effect_rules(root: &Utf8Path) -> Vec<EffectRuleView> {
         for t in arr.iter() {
             let (matcher, text) = t
                 .get("call")
-                .and_then(|c| c.as_table())
+                .and_then(|c| c.as_table_like())
                 .map(|c| {
                     for k in ["contains", "prefix", "exact"] {
                         if let Some(v) = c.get(k).and_then(|v| v.as_str()) {
