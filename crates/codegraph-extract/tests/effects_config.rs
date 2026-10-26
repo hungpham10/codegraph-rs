@@ -549,3 +549,46 @@ int f(int v) {
     assert!(pos(MARKER_BRANCH_END) < pos(MARKER_TRY_END));
     flows::install_current(None);
 }
+
+/// `list_effect_rules` đọc đúng `call` cả khi viết dưới dạng inline table
+/// `call = { exact = "PG_TRY" }` (không chỉ standard table `[effect_rules.call]`).
+#[test]
+fn effect_rule_list_renders_call() {
+    use camino::Utf8Path;
+    use codegraph_extract::config::list_effect_rules;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".codegraph")).unwrap();
+    std::fs::write(
+        dir.path().join(".codegraph").join("config.toml"),
+        r#"
+[[effect_rules]]
+call = { exact = "PG_TRY" }
+marker = "try_start"
+
+[[effect_rules]]
+call = { contains = "ereport" }
+effect = "panic"
+marker = "throw"
+label = "Error"
+"#,
+    )
+    .unwrap();
+
+    let root = Utf8Path::new(dir.path().to_str().expect("temp dir is valid UTF-8"));
+    let rules = list_effect_rules(root);
+    let try_start = rules
+        .iter()
+        .find(|r| r.marker == "try_start")
+        .expect("try_start rule");
+    assert_eq!(try_start.matcher, "exact");
+    assert_eq!(try_start.text, "PG_TRY");
+    let throw = rules
+        .iter()
+        .find(|r| r.marker == "throw")
+        .expect("throw rule");
+    assert_eq!(throw.matcher, "contains");
+    assert_eq!(throw.text, "ereport");
+    assert_eq!(throw.effect, "panic");
+    assert_eq!(throw.label, "Error");
+}
