@@ -2,6 +2,7 @@
 
 pub mod common;
 pub mod effects;
+pub mod flows;
 
 #[cfg(feature = "lang-c")]
 pub mod c;

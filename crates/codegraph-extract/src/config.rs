@@ -3,6 +3,7 @@ use codegraph_source::DiskSource;
 use serde::Deserialize;
 use std::fs;
 
+use crate::languages::flows::FlowClassifier;
 #[cfg(feature = "binary")]
 use codegraph_binary::BinaryConfig;
 use codegraph_core::{EffectCallPattern, EffectRule, EffectType, StorageRoute};
@@ -61,6 +62,9 @@ struct ConfigFile {
     #[serde(default)]
     languages: LanguagesSection,
     /// Project extra effect rules — xét trước bảng default (override).
+    /// Mỗi rule có thể khai báo `effect`, `marker`, hoặc cả hai (≥1 trong hai).
+    /// Key `[[flow_rules]]` đã gộp vào `[[effect_rules]]` — key cũ bị bỏ qua +
+    /// warn trong `load_from`.
     #[serde(default)]
     effect_rules: Vec<EffectRuleRaw>,
     /// Backend storage (mặc định sqlite).
@@ -206,6 +210,9 @@ struct EmbeddingSection {
 // trong .codegraph/config.toml bằng toml_edit (giữ nguyên mọi section khác).
 // Orchestrator install_current lại config MỖI lần index → rule mới áp dụng
 // từ lần index kế tiếp (đồng thời install ngay cho thread hiện tại).
+// Một rule có thể khai báo `effect`, `marker`, hoặc cả hai (≥1 trong hai);
+// effect classifier và flow classifier được build từ cùng list, lọc riêng rẽ
+// theo từng dimension (first-match-wins trên mỗi dimension).
 
 /// Một rule trong file — dạng raw để list trung thực cả rule không hợp lệ.
 #[derive(Debug, Clone)]
@@ -214,6 +221,9 @@ pub struct EffectRuleView {
     pub matcher: String,
     pub text: String,
     pub effect: String,
+    pub marker: String,
+    pub label: String,
+    pub keep_call: String,
 }
 
 fn effect_config_path(root: &Utf8Path) -> Utf8PathBuf {
@@ -248,35 +258,84 @@ pub fn list_effect_rules(root: &Utf8Path) -> Vec<EffectRuleView> {
                 .and_then(|e| e.as_str())
                 .unwrap_or_default()
                 .to_string();
+            let marker = t
+                .get("marker")
+                .and_then(|e| e.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let label = t
+                .get("label")
+                .and_then(|e| e.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let keep_call = t
+                .get("keep_call")
+                .and_then(|e| e.as_bool())
+                .map(|b| b.to_string())
+                .unwrap_or_default();
             out.push(EffectRuleView {
                 matcher,
                 text,
                 effect,
+                marker,
+                label,
+                keep_call,
             });
         }
     }
     out
 }
 
-/// Thêm rule (prepend vị trí cuối) + áp dụng ngay cho thread hiện tại.
-/// Rule config được xét TRƯỚC bảng default (first-match-wins).
-pub fn add_effect_rule(
-    root: &Utf8Path,
-    matcher: &str,
-    text: &str,
-    effect: &str,
-) -> Result<(), String> {
-    if !matches!(matcher, "contains" | "prefix" | "exact") {
+/// Thêm rule (append cuối — index order = thứ tự match) + áp dụng ngay cho
+/// thread hiện tại. Rule config được xét TRƯỚC bảng default (first-match-wins
+/// trên từng dimension).
+pub struct NewEffectRule<'a> {
+    pub matcher: &'a str,
+    pub text: &'a str,
+    pub effect: Option<&'a str>,
+    pub marker: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub keep_call: Option<bool>,
+}
+
+pub fn add_effect_rule(root: &Utf8Path, rule: NewEffectRule<'_>) -> Result<(), String> {
+    if !matches!(rule.matcher, "contains" | "prefix" | "exact") {
         return Err(format!(
-            "matcher phải là contains|prefix|exact, nhận được {matcher:?}"
+            "matcher phải là contains|prefix|exact, nhận được {:?}",
+            rule.matcher
         ));
     }
-    if codegraph_core::EffectType::parse(effect).is_none() {
-        return Err(format!(
-            "effect không hợp lệ {effect:?} — dùng snake_case: panic, sql_query, http_call, …"
-        ));
+    if let Some(eff) = rule.effect {
+        if codegraph_core::EffectType::parse(eff).is_none() {
+            return Err(format!(
+                "effect không hợp lệ {:?} — dùng snake_case: panic, sql_query, http_call, …",
+                eff
+            ));
+        }
     }
-    if text.trim().is_empty() {
+    if let Some(mk) = rule.marker {
+        if codegraph_core::FlowMarker::parse(mk).is_none() {
+            return Err(format!(
+                "marker không hợp lệ {:?} — dùng snake_case: try_start, try_end, catch_start, throw, if_true, if_false, branch_end, break, continue, loop, loop_back, return",
+                mk
+            ));
+        }
+    }
+    if rule.effect.is_none() && rule.marker.is_none() {
+        return Err("phải khai báo ít nhất một trong `effect` hoặc `marker`".into());
+    }
+    if rule.label.is_some()
+        && !matches!(
+            rule.marker,
+            Some("throw") | Some("catch_start") | Some("if_true")
+        )
+    {
+        return Err("label chỉ hợp lệ với marker = throw | catch_start | if_true".into());
+    }
+    if rule.keep_call.is_some() && rule.marker.is_none() {
+        return Err("keep_call chỉ hợp lệ khi có marker".into());
+    }
+    if rule.text.trim().is_empty() {
         return Err("text matcher rỗng".into());
     }
     let path = effect_config_path(root);
@@ -292,15 +351,27 @@ pub fn add_effect_rule(
         .as_array_of_tables_mut()
         .ok_or("effect_rules phải là array-of-tables")?;
     let mut call = toml_edit::Table::new();
-    call.insert(matcher, toml_edit::value(text));
-    let mut rule = toml_edit::Table::new();
-    rule.insert("call", toml_edit::Item::Table(call));
-    rule.insert("effect", toml_edit::value(effect));
-    arr.push(rule);
+    call.insert(rule.matcher, toml_edit::value(rule.text));
+    let mut rule_table = toml_edit::Table::new();
+    rule_table.insert("call", toml_edit::Item::Table(call));
+    if let Some(eff) = rule.effect {
+        rule_table.insert("effect", toml_edit::value(eff));
+    }
+    if let Some(mk) = rule.marker {
+        rule_table.insert("marker", toml_edit::value(mk));
+    }
+    if let Some(l) = rule.label.filter(|l| !l.trim().is_empty()) {
+        rule_table.insert("label", toml_edit::value(l));
+    }
+    if let Some(kc) = rule.keep_call {
+        rule_table.insert("keep_call", toml_edit::value(kc));
+    }
+    arr.push(rule_table);
     std::fs::write(&path, doc.to_string()).map_err(|e| e.to_string())?;
     // Áp dụng ngay cho thread hiện tại (orchestrator tự reload mỗi index).
-    let classifier = ExtractConfig::load(root).effect_classifier;
-    crate::languages::effects::install_current(Some(std::sync::Arc::new(classifier)));
+    let cfg = ExtractConfig::load(root);
+    crate::languages::effects::install_current(Some(std::sync::Arc::new(cfg.effect_classifier)));
+    crate::languages::flows::install_current(Some(std::sync::Arc::new(cfg.flow_classifier)));
     Ok(())
 }
 
@@ -319,19 +390,31 @@ pub fn remove_effect_rule(root: &Utf8Path, index: usize) -> Result<bool, String>
     }
     arr.remove(index);
     std::fs::write(&path, doc.to_string()).map_err(|e| e.to_string())?;
-    let classifier = ExtractConfig::load(root).effect_classifier;
-    crate::languages::effects::install_current(Some(std::sync::Arc::new(classifier)));
+    let cfg = ExtractConfig::load(root);
+    crate::languages::effects::install_current(Some(std::sync::Arc::new(cfg.effect_classifier)));
+    crate::languages::flows::install_current(Some(std::sync::Arc::new(cfg.flow_classifier)));
     Ok(true)
 }
 
-/// Raw rule — `effect` để string để rule lỗi (unknown) bị skip + warn, không
-/// làm hỏng toàn bộ config; parse lại bằng `EffectType::parse`.
+/// Raw rule — `effect`/`marker` để string để rule lỗi (unknown) bị skip +
+/// warn, không làm hỏng toàn bộ config. ≥1 trong hai phải có giá trị.
+/// Parse lại bằng `EffectType::parse` / `FlowMarker::parse`.
 #[derive(Debug, Deserialize)]
 struct EffectRuleRaw {
     #[serde(rename = "call")]
     call: EffectCallPattern,
-    effect: String,
+    #[serde(default)]
+    effect: Option<String>,
+    #[serde(default)]
+    marker: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    keep_call: Option<bool>,
 }
+
+// Xoá `FlowRuleRaw` riêng — logic dùng chung gộp vào `EffectRuleRaw` (xem
+// plan effect-rules-control-flow-upgrade.md).
 
 /// Project-level extraction settings (`.codegraph/config.toml`).
 #[derive(Debug, Clone, Default)]
@@ -339,6 +422,9 @@ pub struct ExtractConfig {
     pub header_language: HeaderLanguage,
     /// Classifier effect của project — config rules override bảng default.
     pub effect_classifier: EffectClassifier,
+    /// Classifier flow (macro → marker) — KHÔNG có default: config trống →
+    /// mọi call map `None`. LLM khai báo qua MCP `codegraph_config_effects`.
+    pub flow_classifier: crate::languages::flows::FlowClassifier,
     /// Backend storage được chọn trong config (mặc định sqlite).
     pub storage: StorageConfig,
     /// Cấu hình embedding backend (semantic search) — đọc từ `[embedding]`.
@@ -397,9 +483,15 @@ impl ExtractConfig {
         let Ok(file) = toml::from_str::<ConfigFile>(&text) else {
             return Self::default();
         };
+        // Key `[[flow_rules]]` cũ đã gộp vào `[[effect_rules]]`.
+        if text.contains("flow_rules") {
+            tracing::warn!("`[[flow_rules]]` đã gộp vào `[[effect_rules]]` — rule cũ bị bỏ qua");
+        }
+        let (effect_classifier, flow_classifier) = build_classifiers(file.effect_rules);
         Self {
             header_language: parse_header_language(file.languages.headers.as_deref()),
-            effect_classifier: build_classifier(file.effect_rules),
+            effect_classifier,
+            flow_classifier,
             embedding: codegraph_graph::embeddings::EmbeddingConfig::from_raw(
                 file.embedding.backend.as_deref(),
                 file.embedding.model.as_deref(),
@@ -662,23 +754,51 @@ fn split_format_override(entry: &str) -> (&str, Option<&str>) {
     (entry, None)
 }
 
-/// Setup rule config → skip rule effect unknown (warn) + giữ phần còn lại.
-fn build_classifier(raw: Vec<EffectRuleRaw>) -> EffectClassifier {
-    let mut rules = Vec::with_capacity(raw.len());
+/// Setup rule config → skip rule effect/marker unknown (warn) + giữ phần còn
+/// lại. `effect`/`marker` là hai dimension độc lập: rule có effect sai vẫn
+/// giữ marker đúng và ngược lại. Config trống → classifier rỗng (`classify_flow`
+/// → `None`, `classify_effect` chỉ có bảng default).
+fn build_classifiers(raw: Vec<EffectRuleRaw>) -> (EffectClassifier, FlowClassifier) {
+    let mut effect_rules = Vec::with_capacity(raw.len());
+    let mut flow_rules = Vec::with_capacity(raw.len());
     for r in raw {
-        let Some(effect) = EffectType::parse(&r.effect) else {
-            tracing::warn!(
-                "[[effect_rules]]: unknown effect `{}`, rule ignored",
-                r.effect
-            );
-            continue;
-        };
-        rules.push(EffectRule {
-            call: r.call,
-            effect,
-        });
+        // ── effect dimension ──
+        if let Some(s) = r.effect.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            match EffectType::parse(s) {
+                Some(effect) => effect_rules.push(EffectRule {
+                    call: r.call.clone(),
+                    effect: Some(effect),
+                    marker: None,
+                    label: None,
+                    keep_call: None,
+                }),
+                None => tracing::warn!(
+                    "[[effect_rules]]: unknown effect `{s}` — effect dimension ignored"
+                ),
+            }
+        }
+        // ── marker dimension ──
+        if let Some(s) = r.marker.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            match codegraph_core::FlowMarker::parse(s) {
+                Some(marker) => flow_rules.push(EffectRule {
+                    call: r.call,
+                    effect: None,
+                    marker: Some(marker),
+                    label: r.label.clone(),
+                    keep_call: r.keep_call,
+                }),
+                None => tracing::warn!(
+                    "[[effect_rules]]: unknown marker `{s}` — marker dimension ignored"
+                ),
+            }
+        } else if r.label.is_some() || r.keep_call.is_some() {
+            tracing::warn!("[[effect_rules]]: label/keep_call without marker — ignored");
+        }
     }
-    EffectClassifier::with_config(rules)
+    (
+        EffectClassifier::with_config(effect_rules),
+        FlowClassifier::with_config(flow_rules),
+    )
 }
 
 fn parse_header_language(raw: Option<&str>) -> HeaderLanguage {
@@ -699,8 +819,40 @@ pub const DEFAULT_CONFIG_TOML: &str = r#"# CodeGraph project configuration
 headers = "auto"
 
 # Critical effect rules — matched before the built-in defaults (first match wins).
-# call matchers: prefix / contains / exact. Effects: sql_query, sql_write,
-# cache_read, cache_write, http_call, event_emit, file_read, file_write, log.
+# Rule có thể khai báo `effect`, `marker`, hoặc cả hai (≥1 trong hai).
+# call matchers: prefix / contains / exact.
+# effect: sql_query, sql_write, cache_read, cache_write, http_call, event_emit,
+#         file_read, file_write, log, panic (shadow default bằng "none").
+# marker: try_start, try_end, catch_start, throw, if_true, if_false, branch_end,
+#         break, continue, loop, loop_back, return.
+# label (optional): exception / nhánh — chỉ với throw | catch_start | if_true.
+# keep_call (optional): mặc định true cho throw, false cho các marker khác.
+# Ví dụ PostgreSQL-style exception engine:
+# [[effect_rules]]
+# call = { exact = "PG_TRY" }
+# marker = "try_start"
+# [[effect_rules]]
+# call = { exact = "PG_CATCH" }
+# marker = "catch_start"
+# [[effect_rules]]
+# call = { exact = "PG_END_TRY" }
+# marker = "try_end"
+# [[effect_rules]]
+# call = { contains = "ereport" }
+# effect = "panic"
+# marker = "throw"
+# Ví dụ macro if/else/endif tự chế:
+# [[effect_rules]]
+# call = { exact = "IF" }
+# marker = "if_true"
+# label = "..."
+# [[effect_rules]]
+# call = { exact = "ELSE" }
+# marker = "if_false"
+# [[effect_rules]]
+# call = { exact = "ENDIF" }
+# marker = "branch_end"
+# Ví dụ rule chỉ effect (như trước):
 # [[effect_rules]]
 # call = { prefix = "db." }
 # effect = "sql_query"
@@ -855,8 +1007,30 @@ fn effect_rule_crud_roundtrip() {
     crate::project::init_project(&root).unwrap();
     assert!(list_effect_rules(&root).is_empty());
     // add: CHECK macro → panic (exception-like)
-    add_effect_rule(&root, "contains", "CHECK", "panic").unwrap();
-    add_effect_rule(&root, "prefix", "db.", "sql_query").unwrap();
+    add_effect_rule(
+        &root,
+        NewEffectRule {
+            matcher: "contains",
+            text: "CHECK",
+            effect: Some("panic"),
+            marker: None,
+            label: None,
+            keep_call: None,
+        },
+    )
+    .unwrap();
+    add_effect_rule(
+        &root,
+        NewEffectRule {
+            matcher: "prefix",
+            text: "db.",
+            effect: Some("sql_query"),
+            marker: None,
+            label: None,
+            keep_call: None,
+        },
+    )
+    .unwrap();
     let rules = list_effect_rules(&root);
     assert_eq!(rules.len(), 2);
     assert_eq!(rules[0].matcher, "contains");
@@ -867,7 +1041,18 @@ fn effect_rule_crud_roundtrip() {
     assert_eq!(classifier.classify("CHECK_OK").0, EffectType::Panic);
     assert_eq!(classifier.classify("db.Query").0, EffectType::SqlQuery);
     // invalidate: effect sai bị chặn, file không đổi
-    assert!(add_effect_rule(&root, "contains", "x", "nonsense").is_err());
+    assert!(add_effect_rule(
+        &root,
+        NewEffectRule {
+            matcher: "contains",
+            text: "x",
+            effect: Some("nonsense"),
+            marker: None,
+            label: None,
+            keep_call: None,
+        },
+    )
+    .is_err());
     assert_eq!(list_effect_rules(&root).len(), 2);
     // remove theo index
     assert!(remove_effect_rule(&root, 0).unwrap());
@@ -1117,5 +1302,172 @@ effect = "not_a_real_effect"
         let cfg = fx.load();
         assert_eq!(cfg.header_language, HeaderLanguage::Auto);
         assert_eq!(cfg.storage.kind, StorageKind::default());
+    }
+
+    /// CRUD: add → list → remove → list.
+    #[test]
+    fn effect_rule_crud() {
+        let fx = CfgFixture::without_config();
+        let root = fx.root();
+        assert!(list_effect_rules(root).is_empty());
+
+        add_effect_rule(
+            root,
+            NewEffectRule {
+                matcher: "exact",
+                text: "PG_TRY",
+                effect: None,
+                marker: Some("try_start"),
+                label: None,
+                keep_call: None,
+            },
+        )
+        .unwrap();
+        add_effect_rule(
+            root,
+            NewEffectRule {
+                matcher: "contains",
+                text: "ereport",
+                effect: Some("panic"),
+                marker: Some("throw"),
+                label: Some("Error"),
+                keep_call: Some(true),
+            },
+        )
+        .unwrap();
+
+        let rules = list_effect_rules(root);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].matcher, "exact");
+        assert_eq!(rules[0].text, "PG_TRY");
+        assert_eq!(rules[0].marker, "try_start");
+        assert_eq!(rules[1].matcher, "contains");
+        assert_eq!(rules[1].effect, "panic");
+        assert_eq!(rules[1].marker, "throw");
+        assert_eq!(rules[1].label, "Error");
+        assert_eq!(rules[1].keep_call, "true");
+
+        assert!(remove_effect_rule(root, 0).unwrap());
+        let rules = list_effect_rules(root);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].text, "ereport");
+
+        assert!(!remove_effect_rule(root, 99).unwrap());
+        assert_eq!(list_effect_rules(root).len(), 1);
+    }
+
+    /// Validation: phải có ≥1 trong effect/marker; label chỉ với throw|catch_start|if_true;
+    /// keep_call chỉ với marker; effect/marker/matcher phải hợp lệ; text không rỗng.
+    #[test]
+    fn effect_rule_validation() {
+        let fx = CfgFixture::without_config();
+        let root = fx.root();
+
+        let bad = |rule: NewEffectRule<'_>| assert!(add_effect_rule(root, rule).is_err());
+
+        // Không có effect và marker → lỗi.
+        bad(NewEffectRule {
+            matcher: "exact",
+            text: "x",
+            effect: None,
+            marker: None,
+            label: None,
+            keep_call: None,
+        });
+        // Label với marker không hợp lệ (branch_end) → lỗi.
+        bad(NewEffectRule {
+            matcher: "exact",
+            text: "x",
+            effect: None,
+            marker: Some("branch_end"),
+            label: Some("err"),
+            keep_call: None,
+        });
+        // keep_call không có marker → lỗi.
+        bad(NewEffectRule {
+            matcher: "exact",
+            text: "x",
+            effect: None,
+            marker: None,
+            label: None,
+            keep_call: Some(true),
+        });
+        // Effect không hợp lệ → lỗi.
+        bad(NewEffectRule {
+            matcher: "exact",
+            text: "x",
+            effect: Some("not_an_effect"),
+            marker: None,
+            label: None,
+            keep_call: None,
+        });
+        // Marker không hợp lệ → lỗi.
+        bad(NewEffectRule {
+            matcher: "exact",
+            text: "x",
+            effect: None,
+            marker: Some("not_a_marker"),
+            label: None,
+            keep_call: None,
+        });
+        // Matcher sai → lỗi.
+        bad(NewEffectRule {
+            matcher: "regex",
+            text: "x",
+            effect: Some("panic"),
+            marker: None,
+            label: None,
+            keep_call: None,
+        });
+        // Text rỗng → lỗi.
+        bad(NewEffectRule {
+            matcher: "exact",
+            text: "",
+            effect: Some("panic"),
+            marker: None,
+            label: None,
+            keep_call: None,
+        });
+
+        // Hợp lệ: chỉ effect.
+        add_effect_rule(
+            root,
+            NewEffectRule {
+                matcher: "exact",
+                text: "panic",
+                effect: Some("panic"),
+                marker: None,
+                label: None,
+                keep_call: None,
+            },
+        )
+        .unwrap();
+        // Hợp lệ: chỉ marker.
+        add_effect_rule(
+            root,
+            NewEffectRule {
+                matcher: "exact",
+                text: "PG_TRY",
+                effect: None,
+                marker: Some("try_start"),
+                label: None,
+                keep_call: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(list_effect_rules(root).len(), 2);
+    }
+
+    /// Key cũ `[[flow_rules]]` bị bỏ qua (không đọc được như `[[effect_rules]]`).
+    #[test]
+    fn legacy_flow_rules_ignored() {
+        let fx = CfgFixture::with_config(
+            r#"
+[[flow_rules]]
+call = { exact = "PG_TRY" }
+marker = "try_start"
+"#,
+        );
+        assert!(list_effect_rules(fx.root()).is_empty());
     }
 }

@@ -14,6 +14,8 @@
 //! Kết quả là `codegraph_graph::ParseResult` — input của pipeline 2 phase.
 
 use crate::languages::effects::classify_effect;
+use crate::languages::flows::{classify_flow, FlowHit};
+use codegraph_core::FlowMarker;
 use codegraph_core::{
     Annotation, CallRecord, Result, ScopeLevel, Symbol, SymbolKind, MARKER_BRANCH_END,
     MARKER_BREAK, MARKER_CALL_ENTER, MARKER_CALL_EXIT, MARKER_CATCH_START, MARKER_CONTINUE,
@@ -949,6 +951,7 @@ pub fn build_chain(
         func_id,
         chain: vec![func_id],
         calls: Vec::new(),
+        flow_try: Vec::new(),
     };
     if let Some(body) = node.child_by_field_name(spec.markers.body_field) {
         walk_chain(&mut ctx, &body, 0, 0, None);
@@ -964,8 +967,27 @@ struct ChainCtx<'a> {
     func_id: u64,
     chain: Vec<u64>,
     calls: Vec<CallRecord>,
+    /// Trạng thái lifecycle của macro try/catch dùng chung mọi ngôn ngữ —
+    /// cho phép remap marker theo thứ tự statement (PG style: TRY_START,
+    /// body, [TRY_END, CATCH_START, handler, BRANCH_END]...). Stack hỗ trợ
+    /// try lồng nhau trong body / handler.
+    flow_try: Vec<TryPhase>,
 }
 
+/// Phase của một `TRY_START` đang mở trong function đang build.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TryPhase {
+    /// Ở trong body try, chưa gặp handler.
+    Body,
+    /// Ở trong handler (sau `CATCH_START`, chưa đóng bằng `BRANCH_END`).
+    Handler,
+}
+
+impl Default for ChainCtx<'_> {
+    fn default() -> Self {
+        unreachable!("ChainCtx is built manually in build_chain")
+    }
+}
 fn walk_chain(
     ctx: &mut ChainCtx,
     node: &Node,
@@ -1004,12 +1026,34 @@ fn walk_chain(
 
     // 1. Call sites.
     if let Some(rule) = ctx.spec.calls.iter().find(|r| r.kind == k) {
+        // Flow rule (`[[effect_rules]]`) — macro/magic call → marker:
+        // - keep_call=false (PG_TRY/PG_CATCH…): macro không phải call thật —
+        //   chỉ emit marker lifecycle, KHÔNG wrap CALL_ENTER/EXIT (wrapper
+        //   nuốt marker như callee, phá interpreter catch_stack).
+        //   Tham số (vd IF(has_perm(u))) vẫn được walk TRƯỚC marker.
+        // - keep_call=true (ereport, longjmp…): emit call như thường, rồi
+        //   THROW marker TRẦN sau CALL_EXIT — nếu đặt trong wrapper thì
+        //   CALL_ENTER nuốt marker làm callee, THROW không bao giờ processing.
+        let flow_hit = macro_flow_hit(ctx, node, rule);
+        if let Some(hit) = &flow_hit {
+            if !hit.keep_call {
+                // Tham số của macro (nếu có) vẫn vào graph trước marker.
+                for ch in named_children(node) {
+                    walk_chain(ctx, &ch, depth + 1, in_loop, None);
+                }
+                emit_flow_macro(ctx, hit);
+                return;
+            }
+        }
         chain_push(ctx, MARKER_CALL_ENTER);
         emit_call(ctx, node, rule, in_loop, condition);
         for ch in named_children(node) {
             walk_chain(ctx, &ch, depth + 1, in_loop, None);
         }
         chain_push(ctx, MARKER_CALL_EXIT);
+        if let Some(hit) = &flow_hit.filter(|h| h.keep_call) {
+            emit_flow_throw(ctx, hit);
+        }
         return;
     }
 
@@ -1557,12 +1601,123 @@ fn exception_type_of(node: &Node, src: &[u8]) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
-/// Gắn **nhãn nhánh** vào đúng vị trí marker trong chain (không thêm node):
-/// thêm một `CallRecord` với `position = <marker vừa push>`, `condition = label`,
-/// `call_name = ""`. Marker không bao giờ có call thật ở cùng position nên record
-/// này tách hẳn khỏi call — không tạo edge, không lọt vào call-name index, và
-/// `flow()` đọc lại thành `branch_labels` cho UI (`IF_TRUE: x > 0`, `LOOP: i < n`,
-/// `SWITCH_CASE: Cmd::Init`).
+// Gắn **nhãn nhánh** vào đúng vị trí marker trong chain (không thêm node):
+// thêm một `CallRecord` với `position = <marker vừa push>`, `condition = label`,
+// `call_name = ""`. Marker không bao giờ có call thật ở cùng position nên record
+// này tách hẳn khỏi call — không tạo edge, không lọt vào call-name index, và
+// `flow()` đọc lại thành `branch_labels` cho UI (`IF_TRUE: x > 0`, `LOOP: i < n`,
+// `SWITCH_CASE: Cmd::Init`).
+// ── Macro → marker lifecycle (`[[flow_rules]]`, docs/architecture.md) ──
+// Macro try/catch đứng dạng statement tuần tự nên layout marker khác try
+// node thật của ngôn ngữ: TRY_START(PG_TRY) → body → *TRY_END + CATCH_START*
+// (PG_CATCH, remap!) → handler → *BRANCH_END* (PG_END_TRY, remap!).
+// Interpreter hiện có giả định handler nằm ngay sau `TRY_END`
+// (`handler_positions`/`skip_handlers`) — remap này thỏa được giả định đó.
+
+/// Flow hit cho macro tại call node — tính tên call giống `emit_call` rồi
+/// classify. Gọi TRƯỚC khi wrap `CALL_ENTER/EXIT` vì wrapper nuốt marker như
+/// callee, phá interpreter catch_stack.
+fn macro_flow_hit(ctx: &ChainCtx, node: &Node, rule: &CallRule) -> Option<FlowHit> {
+    let callee = if rule.callee_field.is_empty() {
+        named_children(node).into_iter().next()
+    } else {
+        node.child_by_field_name(rule.callee_field)
+    };
+    let name = if let Some(f) = rule.name_fn {
+        f(node, ctx.src)
+    } else {
+        callee.as_ref().and_then(|c| text(c, ctx.src))
+    }?;
+    if name.is_empty() {
+        return None;
+    }
+    classify_flow(&name)
+}
+
+/// Emit marker cho macro **không phải call thật** (PG_TRY/PG_CATCH/…,
+/// `keep_call = false`): chỉ đóng gói control-flow lifecycle, không CallRecord.
+///
+/// State machine dùng stack `Vec<TryPhase>` để hỗ trợ try lồng nhau trong
+/// body / handler (PG có rất nhiều trường hợp này). LifecyclePG_CATCH remap:
+/// đóng try body (`TRY_END` → interpreter skip handlers trong path bình
+/// thường) rồi mới mở handler. `PG_END_TRY` → `BRANCH_END` đóng handler, hoặc
+/// `TRY_END` đóng try không handler.
+fn emit_flow_macro(ctx: &mut ChainCtx, hit: &FlowHit) {
+    match hit.marker {
+        FlowMarker::TryStart => {
+            chain_push(ctx, MARKER_TRY_START);
+            ctx.flow_try.push(TryPhase::Body);
+        }
+        FlowMarker::CatchStart => match ctx.flow_try.last() {
+            Some(TryPhase::Body) => {
+                // PG_CATCH remap: đóng try body, mở handler.
+                ctx.flow_try.pop();
+                chain_push(ctx, MARKER_TRY_END);
+                chain_push(ctx, MARKER_CATCH_START);
+                let label = match &hit.label {
+                    Some(l) => format!("catch {l}"),
+                    None => "catch".to_string(),
+                };
+                emit_branch_label(ctx, &label);
+                ctx.flow_try.push(TryPhase::Handler);
+            }
+            _ => {
+                // `catch_start` ngoài scope try — marker mồ côi, bỏ qua
+                // (tránh break `handler_positions` / `skip_handlers`).
+                tracing::debug!("flow marker `catch_start` ngoài try đang mở — bỏ qua");
+            }
+        },
+        FlowMarker::TryEnd => match ctx.flow_try.pop() {
+            Some(TryPhase::Handler) => {
+                // Đóng handler bằng BRANCH_END.
+                chain_push(ctx, MARKER_BRANCH_END);
+            }
+            Some(TryPhase::Body) => {
+                // Đóng try không handler.
+                chain_push(ctx, MARKER_TRY_END);
+            }
+            None => {
+                tracing::debug!("flow marker `try_end` không có try đang mở — bỏ qua");
+            }
+        },
+        FlowMarker::Throw => {
+            // Macro throw thuần (keep_call=false): chỉ marker + label.
+            chain_push(ctx, MARKER_THROW);
+            emit_branch_label(ctx, &throw_label(hit));
+        }
+        FlowMarker::IfTrue => {
+            chain_push(ctx, MARKER_IF_TRUE);
+            if let Some(l) = &hit.label {
+                emit_branch_label(ctx, l);
+            }
+        }
+        FlowMarker::IfFalse => chain_push(ctx, MARKER_IF_FALSE),
+        FlowMarker::BranchEnd => chain_push(ctx, MARKER_BRANCH_END),
+        FlowMarker::Break => chain_push(ctx, MARKER_BREAK),
+        FlowMarker::Continue => chain_push(ctx, MARKER_CONTINUE),
+        FlowMarker::Loop => chain_push(ctx, MARKER_LOOP),
+        FlowMarker::LoopBack => chain_push(ctx, MARKER_LOOP_BACK),
+        FlowMarker::Return => chain_push(ctx, MARKER_RETURN),
+    }
+}
+
+/// Nhãn của marker `throw`: rule có `label` → `throw <label>`; không → `throw`
+/// throw vô danh (handler không label match mọi exception).
+fn throw_label(hit: &FlowHit) -> String {
+    hit.label
+        .as_deref()
+        .map(|l| format!("throw {l}"))
+        .unwrap_or_else(|| "throw".to_string())
+}
+
+/// Emit `MARKER_THROW` + nhãn cho một call có rule flow (`keep_call = true`):
+/// throw-er (ereport, longjmp…) là call thật — truncate phần try body còn lại
+/// là việc của interpreter; CallRecord vẫn được ghi như call thường.
+fn emit_flow_throw(ctx: &mut ChainCtx, hit: &FlowHit) {
+    chain_push(ctx, MARKER_THROW);
+    emit_branch_label(ctx, &throw_label(hit));
+}
+
 fn emit_branch_label(ctx: &mut ChainCtx, label: &str) {
     let name = label.trim();
     if name.is_empty() {

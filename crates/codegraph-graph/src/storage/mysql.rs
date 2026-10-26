@@ -83,10 +83,13 @@ impl MySqlStorage {
         // Stats tổng hợp (codegraph_status đọc O(1) không rebuild) — idempotent.
 
         // Dynamic-index inputs (file imports + fn-ptr assigns) — idempotent.
+        // MySQL không cho TEXT trong PRIMARY KEY (error 1170) → dùng VARCHAR(700),
+        // khớp với migration sql/mysql/001-initial-schema.sql và đủ dài cho hầu
+        // hết đường dẫn project.
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sg_file_deps (
                 repo_id BIGINT NOT NULL,
-                path TEXT NOT NULL,
+                path VARCHAR(700) NOT NULL,
                 deps BLOB NOT NULL,
                 PRIMARY KEY (repo_id, path)
             )",
@@ -97,7 +100,7 @@ impl MySqlStorage {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sg_fn_ptr_assigns (
                 repo_id BIGINT NOT NULL,
-                path TEXT NOT NULL,
+                path VARCHAR(700) NOT NULL,
                 assigns BLOB NOT NULL,
                 PRIMARY KEY (repo_id, path)
             )",

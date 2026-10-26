@@ -290,6 +290,8 @@ impl CodegraphServer {
                 });
         }
 
+        // codegraph_config_flow đã gộp vào codegraph_config_effects — không còn route riêng.
+
         if name.starts_with("codegraph_graphdoc_") {
             let doc_graph = self.doc_graph.clone();
             return match name {
