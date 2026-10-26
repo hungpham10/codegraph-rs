@@ -138,7 +138,7 @@ fn minimal_format_name_round_trips() {
 #[test]
 fn every_registered_tool_advertises_output_controls() {
     let tools = tools::rmcp_tools();
-    assert_eq!(tools.len(), 40);
+    assert_eq!(tools.len(), 42);
     for tool in tools {
         let props = &tool.input_schema["properties"];
         assert!(props.get("detail").is_some(), "{}", tool.name);

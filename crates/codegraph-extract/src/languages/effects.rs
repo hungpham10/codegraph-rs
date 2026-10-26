@@ -157,15 +157,21 @@ impl Default for EffectClassifier {
 
 impl EffectClassifier {
     /// Rule config xét TRƯỚC bảng default (override), phần còn lại rơi về defaults.
+    /// Rule có `effect = None` (chỉ marker) bị bỏ qua ở đây.
     pub fn with_config(config_rules: Vec<EffectRule>) -> Self {
-        let mut rules: Vec<ClassifierRule> =
-            config_rules.into_iter().map(Self::from_rule).collect();
+        let mut rules: Vec<ClassifierRule> = config_rules
+            .into_iter()
+            .filter_map(|r| {
+                let effect = r.effect?;
+                Some(Self::from_rule(r.call, effect))
+            })
+            .collect();
         rules.extend(Self::default().rules);
         Self { rules }
     }
 
-    fn from_rule(rule: EffectRule) -> ClassifierRule {
-        let (matcher, text) = match rule.call {
+    fn from_rule(call: EffectCallPattern, effect: EffectType) -> ClassifierRule {
+        let (matcher, text) = match call {
             EffectCallPattern::Prefix { prefix } => (MatchTy::Prefix, prefix),
             EffectCallPattern::Contains { contains } => (MatchTy::Contains, contains),
             EffectCallPattern::Exact { exact } => (MatchTy::Exact, exact),
@@ -173,7 +179,7 @@ impl EffectClassifier {
         ClassifierRule {
             matcher,
             text,
-            effect: rule.effect,
+            effect,
         }
     }
 
@@ -285,13 +291,19 @@ mod tests {
                 call: EffectCallPattern::Prefix {
                     prefix: "db.".to_string(),
                 },
-                effect: EffectType::SqlQuery,
+                effect: Some(EffectType::SqlQuery),
+                marker: None,
+                label: None,
+                keep_call: None,
             },
             EffectRule {
                 call: EffectCallPattern::Exact {
                     exact: "sendEmail".to_string(),
                 },
-                effect: EffectType::EventEmit,
+                effect: Some(EffectType::EventEmit),
+                marker: None,
+                label: None,
+                keep_call: None,
             },
         ];
         let c = EffectClassifier::with_config(rules);
@@ -313,7 +325,10 @@ mod tests {
             call: EffectCallPattern::Contains {
                 contains: "legacy-".to_string(),
             },
-            effect: EffectType::FileWrite,
+            effect: Some(EffectType::FileWrite),
+            marker: None,
+            label: None,
+            keep_call: None,
         }];
         install_current(Some(Arc::new(EffectClassifier::with_config(rules))));
         assert_eq!(classify_effect("legacy-writer").0, EffectType::FileWrite);

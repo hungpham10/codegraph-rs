@@ -5,6 +5,7 @@
 
 use crate::config::ExtractConfig;
 use crate::languages::effects::{self, EffectClassifier};
+use crate::languages::flows;
 use crate::{walker, LangParser};
 use camino::Utf8Path;
 use codegraph_core::Result;
@@ -43,8 +44,12 @@ impl Orchestrator {
     pub fn parse_project(&self, root: &Utf8Path) -> Result<(Vec<ParseResult>, ExtractStats)> {
         let config = ExtractConfig::load(root);
         let files = walker::walk(root, &self.parsers, &config);
-        let (mut parsed, mut skipped) =
-            self.parse_files(&files, None, config.effect_classifier.clone());
+        let (mut parsed, mut skipped) = self.parse_files(
+            &files,
+            None,
+            config.effect_classifier.clone(),
+            config.flow_classifier.clone(),
+        );
         #[cfg(feature = "binary")]
         {
             let (bin, bin_skipped) = codegraph_binary::collect_binaries(root, &config.binary);
@@ -81,8 +86,12 @@ impl Orchestrator {
             );
         }
 
-        let (mut parsed, mut skipped) =
-            self.parse_files(&files, progress.clone(), config.effect_classifier.clone());
+        let (mut parsed, mut skipped) = self.parse_files(
+            &files,
+            progress.clone(),
+            config.effect_classifier.clone(),
+            config.flow_classifier.clone(),
+        );
 
         // Binary đi dataset riêng (`[bingraph]` → binary.sqlite) — KHÔNG ingest
         // vào code index nữa (tránh n_symbol binary làm phình trie/RAM của
@@ -146,8 +155,10 @@ impl Orchestrator {
         files: &[walker::FileMatch],
         progress: Option<Arc<ProgressBar>>,
         classifier: EffectClassifier,
+        flow_classifier: crate::languages::flows::FlowClassifier,
     ) -> (Vec<ParseResult>, u64) {
         let classifier = Arc::new(classifier);
+        let flow_classifier = Arc::new(flow_classifier);
         let progress_opt = progress.clone();
         let results: Vec<_> = files
             .par_iter()
@@ -156,6 +167,7 @@ impl Orchestrator {
                 // worker thread trước khi parse file (rayon reuse thread, mỗi
                 // job set lại cho chắc).
                 effects::install_current(Some(classifier.clone()));
+                flows::install_current(Some(flow_classifier.clone()));
                 let res = parse_one(fm);
                 if let Some(ref bar) = progress_opt {
                     bar.inc(1);

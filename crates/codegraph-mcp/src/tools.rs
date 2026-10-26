@@ -210,12 +210,15 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_config_effects",
-            "Read/write project effect rules in .codegraph/config.toml `[[effect_rules]]` — declare what a call/macro DOES (semantic classification), e.g. treat a macro like an exception. Rules are checked FIRST (before the built-in defaults, first-match-wins) at extraction time: each rule maps a call-name matcher to an effect. op: 'list' returns current rules (index order = removal index); 'add' appends {matcher: 'contains'|'prefix'|'exact', text, effect} — effect is snake_case (panic, sql_query, sql_write, cache_read, cache_write, http_call, event_emit, file_read, file_write, log, none); 'remove' deletes by index. Rules take effect from the NEXT codegraph_index (the re-index re-classifies call records); the current thread applies them immediately. Example: {op:'add', matcher:'contains', text:'CHECK', effect:'panic'} makes every CHECK_* macro invocation classify as an exception-like terminal call.",
+            "Read/write project effect rules in .codegraph/config.toml `[[effect_rules]]` — declare what a call/macro DOES (semantic classification) and/or what control-flow MARKER it acts as. ONE bảng duy nhất cho cả hai dimension: `effect` (sql_query, http_call, panic, …) và `marker` (try_start, throw, if_true, if_false, branch_end, loop, loop_back, break, continue, return, …). ≥1 trong hai phải khai báo. Rules share the matcher schema (prefix|contains|exact, first-match-wins in declaration order) and take effect from the NEXT codegraph_index (the re-index re-classifies call records); the current thread applies them immediately.\n\nTypical pairing (PostgreSQL-style exception engine):\n  {op:'add', matcher:'exact', text:'PG_TRY', marker:'try_start'}\n  {op:'add', matcher:'exact', text:'PG_CATCH', marker:'catch_start'}  → no label = match EVERY exception\n  {op:'add', matcher:'exact', text:'PG_END_TRY', marker:'try_end'}\n  {op:'add', matcher:'contains', text:'ereport', effect:'panic', marker:'throw'}  → throw keeps CallRecord + effect panic\n\nMacro if/else/endif tự chế:\n  {op:'add', matcher:'exact', text:'IF', marker:'if_true', label:'...'}\n  {op:'add', matcher:'exact', text:'ELSE', marker:'if_false'}\n  {op:'add', matcher:'exact', text:'ENDIF', marker:'branch_end'}\n\n`label` chỉ hợp lệ với marker = throw | catch_start | if_true (exception type / điều kiện hiển thị).\n`keep_call` (boolean, optional): mặc định true cho throw (giữ CallRecord), false cho các marker khác (macro không phải call thật, chỉ emit marker).\nCảnh báo matcher: ưu tiên exact/prefix — contains:'longjmp' cũng trúng 'siglongjmp'/'setjmp'.\nVerify sau re-index: codegraph_search_flow {pattern:'THROW,CATCH'} và codegraph_flow.\nop: 'list' returns current rules (index order = removal index); 'add' appends {matcher, text, effect?, marker?, label?, keep_call?}; 'remove' deletes by index.",
             json!({ "type": "object", "properties": {
                 "op": { "type": "string", "enum": ["list", "add", "remove"] },
                 "matcher": { "type": "string", "enum": ["contains", "prefix", "exact"] },
                 "text": { "type": "string" },
                 "effect": { "type": "string" },
+                "marker": { "type": "string", "enum": ["try_start", "try_end", "catch_start", "throw", "if_true", "if_false", "branch_end", "break", "continue", "loop", "loop_back", "return"] },
+                "label": { "type": "string", "description": "Exception type / nhánh hiển thị — chỉ với marker = throw | catch_start | if_true." },
+                "keep_call": { "type": "boolean", "description": "Giữ CallRecord (mặc định true cho throw, false cho marker khác)." },
                 "index": { "type": "integer" }
             }, "required": ["op"] }),
         ),
@@ -1282,6 +1285,8 @@ fn normalize_response(value: &mut Value, root: &str, detail: DetailLevel, style:
                 "doc",
                 "annotations",
                 "language",
+                "impl_trait",
+                "sig_key",
             ];
             let symbol = ["id", "name", "kind", "file", "line"]
                 .iter()
@@ -1881,18 +1886,59 @@ pub fn dispatch_config_effects(
             let lines: Vec<String> = rules
                 .iter()
                 .enumerate()
-                .map(|(i, r)| format!("[{i}] {} {:?} → {}", r.matcher, r.text, r.effect))
+                .map(|(i, r)| {
+                    let eff = if r.effect.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" effect={}", r.effect)
+                    };
+                    let mk = if r.marker.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" marker={}", r.marker)
+                    };
+                    let label = if r.label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" label={:?}", r.label)
+                    };
+                    let keep = if r.keep_call.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" keep_call={}", r.keep_call)
+                    };
+                    format!(
+                        "[{i}] {} {:?} →{}{}{}{}",
+                        r.matcher, r.text, eff, mk, label, keep
+                    )
+                })
                 .collect();
             Ok(lines.join("\n"))
         }
         "add" => {
             let matcher = args.get("matcher").and_then(|v| v.as_str()).unwrap_or("");
             let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let effect = args.get("effect").and_then(|v| v.as_str()).unwrap_or("");
-            config::add_effect_rule(root, matcher, text, effect)
-                .map_err(codegraph_core::Error::Invalid)?;
+            let effect = args.get("effect").and_then(|v| v.as_str());
+            let marker = args.get("marker").and_then(|v| v.as_str());
+            let label = args.get("label").and_then(|v| v.as_str());
+            let keep_call = args.get("keep_call").and_then(|v| v.as_bool());
+            config::add_effect_rule(
+                root,
+                config::NewEffectRule {
+                    matcher,
+                    text,
+                    effect,
+                    marker,
+                    label,
+                    keep_call,
+                },
+            )
+            .map_err(codegraph_core::Error::Invalid)?;
+            let eff = effect.map_or("".to_string(), |e| format!(" effect={e}"));
+            let mk = marker.map_or("".to_string(), |m| format!(" marker={m}"));
             Ok(format!(
-                "Added effect rule: {matcher} {text:?} → {effect}. Applies from the next codegraph_index."
+                "Added effect rule: {matcher} {text:?}→{}{}. Applies from the next codegraph_index.",
+                eff, mk
             ))
         }
         "remove" => {

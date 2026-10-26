@@ -240,8 +240,9 @@ impl Mutation {
     }
 
     /// Đọc/ghi `[[effect_rules]]` trong .codegraph/config.toml — khai báo
-    /// hành vi của call/macro (VD macro exception-like → panic). op:
+    /// hành vi của call/macro (effect và/hoặc control-flow marker). op:
     /// list|add|remove; áp dụng từ lần index kế tiếp.
+    #[allow(clippy::too_many_arguments)]
     async fn config_effects(
         &self,
         ctx: &Context<'_>,
@@ -249,6 +250,9 @@ impl Mutation {
         matcher: Option<String>,
         text: Option<String>,
         effect: Option<String>,
+        marker: Option<String>,
+        label: Option<String>,
+        keep_call: Option<bool>,
         index: Option<i32>,
     ) -> GqlResult<String> {
         use codegraph_extract::config;
@@ -267,15 +271,45 @@ impl Mutation {
                 Ok(rules
                     .iter()
                     .enumerate()
-                    .map(|(i, r)| format!("[{i}] {} {:?} → {}", r.matcher, r.text, r.effect))
+                    .map(|(i, r)| {
+                        let eff = if r.effect.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" effect={}", r.effect)
+                        };
+                        let mk = if r.marker.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" marker={}", r.marker)
+                        };
+                        let label = if r.label.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" label={:?}", r.label)
+                        };
+                        let keep = if r.keep_call.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" keep_call={}", r.keep_call)
+                        };
+                        format!(
+                            "[{i}] {} {:?} →{}{}{}{}",
+                            r.matcher, r.text, eff, mk, label, keep
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
             "add" => config::add_effect_rule(
                 &root,
-                matcher.as_deref().unwrap_or(""),
-                text.as_deref().unwrap_or(""),
-                effect.as_deref().unwrap_or(""),
+                config::NewEffectRule {
+                    matcher: matcher.as_deref().unwrap_or(""),
+                    text: text.as_deref().unwrap_or(""),
+                    effect: effect.as_deref(),
+                    marker: marker.as_deref(),
+                    label: label.as_deref(),
+                    keep_call,
+                },
             )
             .map_err(async_graphql::Error::new)
             .map(|_| "Added. Applies from the next index.".to_string()),

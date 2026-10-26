@@ -1202,7 +1202,10 @@ void setup() {
             call: EffectCallPattern::Contains {
                 contains: "CALL".to_string(),
             },
-            effect: EffectType::Panic,
+            effect: Some(EffectType::Panic),
+            marker: None,
+            label: None,
+            keep_call: None,
         }]);
     let (eff, _) = classifier.classify("CALL");
     assert_eq!(eff, EffectType::Panic);

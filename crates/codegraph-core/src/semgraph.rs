@@ -409,12 +409,111 @@ pub enum EffectCallPattern {
 }
 
 /// Một effect rule từ `[[effect_rules]]` trong config.toml.
+/// Một rule có thể khai báo `effect`, `marker`, hoặc cả hai (≥1 trong hai):
+/// - `effect` — tác động bên ngoài (sql_query, http_call, panic, …).
+/// - `marker` — vai trò control-flow (try_start, throw, if_true, …).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectRule {
     #[serde(rename = "call")]
     pub call: EffectCallPattern,
-    pub effect: EffectType,
+    /// `None` = rule không khai báo effect (chỉ marker). `Some(None)` vẫn dùng
+    /// để shadow một bảng default (ví dụ `effect = "none"` chặn default sql_write).
+    #[serde(default)]
+    pub effect: Option<EffectType>,
+    /// Vai trò control-flow (None = rule effect thuần).
+    #[serde(default)]
+    pub marker: Option<FlowMarker>,
+    /// Nhãn exception / nhánh nhánh — hợp lệ với `throw` | `catch_start` | `if_true`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// `true` → vẫn ghi CallRecord (throw-er là call thật); `false` → chỉ emit
+    /// marker (macro không phải call thật). Default: throw=true, còn lại=false.
+    #[serde(default)]
+    pub keep_call: Option<bool>,
 }
+
+impl EffectRule {
+    /// Default `keep_call` theo marker: `throw` = call thật (giữ CallRecord),
+    /// các marker khác = macro (chỉ marker).
+    pub fn keep_call_or_default(&self) -> bool {
+        self.keep_call
+            .unwrap_or(self.marker == Some(FlowMarker::Throw))
+    }
+}
+
+/// Marker control-flow mà một flow rule được map vào — whitelist các marker
+/// "điều khiển" (`[[effect_rules]]` báo macro/magic call đóng vai trò này).
+/// Không cho phép marker call-edge (`CALL_ENTER`/`CALL_EXIT`) → không phá được
+/// call graph. Các variant đều đã có sẵn `Marker` (serialization ổn định).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowMarker {
+    /// Mở khối try — interpreter push `catch_stack` tại vị trí này.
+    TryStart,
+    /// Đóng khối try gần nhất — pop `catch_stack`.
+    TryEnd,
+    /// Handler catch trong khối try; không label → match mọi exception.
+    CatchStart,
+    /// Throw — interpreter nhảy tới handler khớp, hoặc unwind lên caller.
+    Throw,
+    /// Nhánh nếu-đúng của macro if.
+    IfTrue,
+    /// Nhánh nếu-sai / else của macro if.
+    IfFalse,
+    /// Đóng khối nhánh của macro if/endif.
+    BranchEnd,
+    /// Break của macro loop.
+    Break,
+    /// Continue của macro loop.
+    Continue,
+    /// Mở loop của macro loop.
+    Loop,
+    /// Đóng loop (quay lại LOOP tương ứng).
+    LoopBack,
+    /// Return của macro return sớm.
+    Return,
+}
+
+impl FlowMarker {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TryStart => "try_start",
+            Self::TryEnd => "try_end",
+            Self::CatchStart => "catch_start",
+            Self::Throw => "throw",
+            Self::IfTrue => "if_true",
+            Self::IfFalse => "if_false",
+            Self::BranchEnd => "branch_end",
+            Self::Break => "break",
+            Self::Continue => "continue",
+            Self::Loop => "loop",
+            Self::LoopBack => "loop_back",
+            Self::Return => "return",
+        }
+    }
+
+    /// Parse snake_case (case-insensitive) — chuỗi không biết → `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "try_start" => Self::TryStart,
+            "try_end" => Self::TryEnd,
+            "catch_start" => Self::CatchStart,
+            "throw" => Self::Throw,
+            "if_true" => Self::IfTrue,
+            "if_false" => Self::IfFalse,
+            "branch_end" => Self::BranchEnd,
+            "break" => Self::Break,
+            "continue" => Self::Continue,
+            "loop" => Self::Loop,
+            "loop_back" => Self::LoopBack,
+            "return" => Self::Return,
+            _ => return None,
+        })
+    }
+}
+
+// Xoá `FlowRule` riêng — logic dùng chung gộp vào `EffectRule` (xem plan
+// effect-rules-control-flow-upgrade.md).
 
 // ==================== Entities ====================
 

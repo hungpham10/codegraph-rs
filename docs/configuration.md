@@ -164,6 +164,43 @@ Requires binary built with `--features fastembed`.
 
 ---
 
+## `[[effect_rules]]`
+
+Declares per-call semantic behavior (effect) and/or control-flow role (marker).
+One table only — `[[flow_rules]]` (the old flow-only table) is ignored with a warning
+on load; its rules are merged into `[[effect_rules]]`.
+
+```toml
+[[effect_rules]]
+call   = { exact = "PG_TRY" }
+marker = "try_start"
+
+[[effect_rules]]
+call   = { contains = "ereport" }
+effect = "panic"
+marker = "throw"
+label  = "Error"
+
+[[effect_rules]]
+call   = { prefix = "db." }
+effect = "sql_query"
+```
+
+Each rule needs **at least one** of `effect` or `marker`:
+
+| Key | Values | Notes |
+|-----|--------|-------|
+| `call` | `{ exact = "…" }`, `{ prefix = "…" }`, `{ contains = "…" }` | Matcher schema, shared with effect classification. First match wins in declaration order. |
+| `effect` | `sql_query`, `sql_write`, `cache_read`, `cache_write`, `http_call`, `event_emit`, `file_read`, `file_write`, `log`, `panic` | External side effect. `effect = "none"` shadows a built-in default. Omitted = rule is marker-only. |
+| `marker` | `try_start`, `try_end`, `catch_start`, `throw`, `if_true`, `if_false`, `branch_end`, `loop`, `loop_back`, `break`, `continue`, `return` | Control-flow marker whitelist. `CALL_ENTER`/`CALL_EXIT` are not allowed (would break the call graph). |
+| `label` | string | Exception type / branch label. Valid only with `throw` | `catch_start` | `if_true`. |
+| `keep_call` | boolean | Default `true` for `throw` (keeps `CallRecord`), `false` for other markers (macro emits marker only). |
+
+Rules in `[[effect_rules]]` are applied **before** built-in effect defaults
+(first match wins), so config can override the default table.
+
+---
+
 ## Environment Variable Overrides
 
 | Variable | Effect |
