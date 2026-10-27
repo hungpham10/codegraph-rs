@@ -70,6 +70,10 @@ pub fn registry() -> Vec<Arc<dyn LangParser>> {
     v.push(Arc::new(languages::swift::SwiftParser::new()));
     #[cfg(feature = "lang-lua")]
     v.push(Arc::new(languages::lua::LuaParser::new()));
+    #[cfg(feature = "lang-svelte")]
+    v.push(Arc::new(languages::svelte::SvelteParser::new()));
+    #[cfg(feature = "lang-astro")]
+    v.push(Arc::new(languages::astro::AstroParser::new()));
     v
 }
 

@@ -1173,6 +1173,8 @@ fn kind_token(kind: &Kind) -> DocToken {
         Kind::Number => DocToken::num(0),
         Kind::Bool => DocToken::bool(0),
         Kind::Null | Kind::Reference => DocToken::null(),
+        Kind::Header => DocToken::header(),
+        Kind::Code => DocToken::code(),
     }
 }
 
@@ -1188,6 +1190,8 @@ fn token_label(tag: DocTag) -> &'static str {
         DocTag::Num => "NUMBER",
         DocTag::Bool => "BOOL",
         DocTag::Null => "NULL",
+        DocTag::Header => "HEADER",
+        DocTag::Code => "CODE",
     }
 }
 
@@ -1203,6 +1207,8 @@ pub fn parse_kind_label(label: &str) -> DocToken {
         "NUMBER" | "NUM" => DocToken::num(0),
         "BOOL" => DocToken::bool(0),
         "NULL" => DocToken::null(),
+        "HEADER" => DocToken::header(),
+        "CODE" => DocToken::code(),
         _ => DocToken::map(),
     }
 }

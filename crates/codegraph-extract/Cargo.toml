@@ -32,6 +32,10 @@ tree-sitter-swift     = { workspace = true, optional = true }
 # tree-sitter-kotlin uses tree-sitter 0.20 — incompatible. Re-enable when upstream upgrades.
 # tree-sitter-kotlin    = { workspace = true, optional = true }
 tree-sitter-lua       = { workspace = true, optional = true }
+# Svelte/Astro grammar forks tương thích tree-sitter 0.25+ — host grammar chỉ
+# parse markup (script là raw_text) nên cần JS/TS spec để re-parse script block.
+tree-sitter-svelte-next = { workspace = true, optional = true }
+tree-sitter-astro-next  = { workspace = true, optional = true }
 codegraph-binary = { path = "../codegraph-binary", optional = true }
 rusqlite = { workspace = true }
 serde_json = { workspace = true }
@@ -56,7 +60,7 @@ default = ["all-langs", "binary"]
 all-langs = [
     "lang-typescript", "lang-javascript", "lang-python", "lang-rust", "lang-go",
     "lang-java", "lang-c", "lang-cpp", "lang-csharp", "lang-ruby", "lang-php",
-    "lang-scala", "lang-swift", "lang-lua",
+    "lang-scala", "lang-swift", "lang-lua", "lang-svelte", "lang-astro",
 ]
 lang-typescript = ["dep:tree-sitter-typescript"]
 lang-javascript = ["dep:tree-sitter-javascript"]
@@ -73,4 +77,6 @@ lang-scala      = ["dep:tree-sitter-scala"]
 lang-swift      = ["dep:tree-sitter-swift"]
 # lang-kotlin     = ["dep:tree-sitter-kotlin"]
 lang-lua        = ["dep:tree-sitter-lua"]
+lang-svelte     = ["dep:tree-sitter-svelte-next", "lang-javascript", "lang-typescript"]
+lang-astro      = ["dep:tree-sitter-astro-next", "lang-javascript", "lang-typescript"]
 binary         = ["dep:codegraph-binary"]

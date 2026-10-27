@@ -21,6 +21,11 @@ pub enum RecursiveNode {
     Number(f64, ByteSpan),
     Bool(bool, ByteSpan),
     Null(ByteSpan),
+    /// Markdown heading: text tiêu đề + các node con (paragraph/header/code).
+    /// Node gốc của markdown cũng dùng variant này (text rỗng) → `Kind::Root`.
+    Header(String, Vec<(RecursiveNode, ByteSpan)>, ByteSpan),
+    /// Fenced code block: ngôn ngữ (nếu có) + nội dung thô.
+    Code(Option<String>, String, ByteSpan),
 }
 
 /// Build a `Document` from `RecursiveNode`, assigning global node ids and
@@ -75,6 +80,22 @@ impl DocBuilder {
             RecursiveNode::Number(n, _) => (Kind::Number, Some(Scalar::Number(*n))),
             RecursiveNode::Bool(b, _) => (Kind::Bool, Some(Scalar::Bool(*b))),
             RecursiveNode::Null(_) => (Kind::Null, Some(Scalar::Null)),
+            // Markdown: node gốc (id 1, text rỗng) là Root; header con là Header.
+            RecursiveNode::Header(..) => {
+                if id == 1 {
+                    (Kind::Root, None)
+                } else {
+                    (Kind::Header, None)
+                }
+            }
+            RecursiveNode::Code(_, code, _) => (Kind::Code, Some(Scalar::String(code.clone()))),
+        };
+        // Header tự mang key = text tiêu đề; root markdown (text rỗng) không key.
+        // Code block dùng key = ngôn ngữ (nếu fence có khai báo).
+        let key = match node {
+            RecursiveNode::Header(text, _, _) if id != 1 && !text.is_empty() => Some(text.clone()),
+            RecursiveNode::Code(lang, _, _) => lang.clone().or(key),
+            _ => key,
         };
         let built_node = Node {
             id,
@@ -114,6 +135,15 @@ impl DocBuilder {
                 }
             }
             RecursiveNode::Array(items) => {
+                for (i, (child, child_span)) in items.iter().enumerate() {
+                    let child_id = self.next_id;
+                    self.next_id += 1;
+                    let child_node =
+                        self.walk(child_id, Some(id), None, Some(i as u32), child, *child_span);
+                    self.nodes.insert(child_id, child_node);
+                }
+            }
+            RecursiveNode::Header(_, items, _) => {
                 for (i, (child, child_span)) in items.iter().enumerate() {
                     let child_id = self.next_id;
                     self.next_id += 1;
@@ -386,6 +416,137 @@ fn convert_hcl_value(value: &hcl::Value, span: ByteSpan) -> RecursiveNode {
         hcl::Value::Bool(b) => RecursiveNode::Bool(*b, span),
         hcl::Value::Null => RecursiveNode::Null(span),
     }
+}
+
+// ── markdown parser ──────────────────────────────────────────────────────
+
+pub struct MarkdownParser;
+
+impl DocParser for MarkdownParser {
+    fn format(&self) -> &'static str {
+        "markdown"
+    }
+
+    fn parse(&self, path: &str, source: &str, id: u64) -> Result<Document> {
+        let root = parse_markdown(source);
+        Ok(build_document(
+            path.to_string(),
+            self.format().to_string(),
+            id,
+            root,
+        ))
+    }
+}
+
+/// Parse markdown theo mô hình bao bọc: header bậc càng nhỏ (h1 < h2 < …)
+/// càng bao bọc rộng — h1 chứa h2, h2 chứa h3… Paragraph là item con của
+/// header gần nhất; fenced code block là node `Code` riêng. Phần tử khác
+/// (list, table, blockquote…) giữ nguyên dạng text paragraph.
+fn parse_markdown(source: &str) -> RecursiveNode {
+    let span = ByteSpan {
+        start: 0,
+        end: source.len() as u64,
+    };
+    let zero = ByteSpan { start: 0, end: 0 };
+    // Stack khung header: (mức #, text tiêu đề, các node con). Khung gốc
+    // level 0, text rỗng → trở thành `Kind::Root`.
+    type MdFrame = (u8, String, Vec<(RecursiveNode, ByteSpan)>);
+    let mut stack: Vec<MdFrame> = vec![(0, String::new(), Vec::new())];
+    let mut para: Vec<String> = Vec::new();
+    let mut fence: Option<Option<String>> = None;
+    let mut code: Vec<String> = Vec::new();
+
+    macro_rules! flush_para {
+        () => {
+            if !para.is_empty() {
+                let text = para.join("\n");
+                para.clear();
+                stack
+                    .last_mut()
+                    .expect("markdown stack always has root frame")
+                    .2
+                    .push((RecursiveNode::String(text, zero), zero));
+            }
+        };
+    }
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(open) = fence.as_mut() {
+            // Dòng trong code fence: ``` đóng fence, còn lại là code thô.
+            if trimmed.starts_with("```") {
+                let lang = open.take();
+                fence = None;
+                let body = code.join("\n");
+                code.clear();
+                stack
+                    .last_mut()
+                    .expect("markdown stack always has root frame")
+                    .2
+                    .push((RecursiveNode::Code(lang, body, zero), zero));
+            } else {
+                code.push(line.to_string());
+            }
+            continue;
+        }
+        if let Some(info) = trimmed.strip_prefix("```") {
+            flush_para!();
+            let info = info.trim();
+            let lang = info.split_whitespace().next().filter(|s| !s.is_empty());
+            fence = Some(lang.map(|s| s.to_string()));
+            continue;
+        }
+        // ATX header: 1–6 dấu `#` theo sau bởi space/tab hoặc hết dòng.
+        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+        let is_header = (1..=6).contains(&hashes)
+            && (trimmed.len() == hashes
+                || matches!(trimmed.as_bytes().get(hashes), Some(b' ' | b'\t')));
+        if is_header {
+            flush_para!();
+            let text = trimmed[hashes..].trim().to_string();
+            // Pop về header cha có mức nhỏ hơn; frame bị pop gói thành
+            // `Header` và nối vào items của khung mới hiện hành.
+            while let Some(&(top, _, _)) = stack.last() {
+                if top < hashes as u8 {
+                    break;
+                }
+                let (_, text, items) = stack.pop().expect("checked non-empty");
+                stack
+                    .last_mut()
+                    .expect("root frame has level 0, always stays")
+                    .2
+                    .push((RecursiveNode::Header(text, items, zero), zero));
+            }
+            stack.push((hashes as u8, text, Vec::new()));
+            continue;
+        }
+        if line.trim().is_empty() {
+            flush_para!();
+            continue;
+        }
+        para.push(line.trim_end().to_string());
+    }
+    // Fence chưa đóng: lấy phần code đã thu được làm block cuối.
+    if let Some(lang) = fence.take() {
+        let body = code.join("\n");
+        stack
+            .last_mut()
+            .expect("markdown stack always has root frame")
+            .2
+            .push((RecursiveNode::Code(lang, body, zero), zero));
+    }
+    flush_para!();
+    // Gói toàn bộ stack còn lại thành cây: top trước → lồng vào khung dưới.
+    while stack.len() > 1 {
+        let (_, text, items) = stack.pop().expect("stack.len() > 1");
+        stack
+            .last_mut()
+            .expect("stack.len() > 1 before pop")
+            .2
+            .push((RecursiveNode::Header(text, items, zero), zero));
+    }
+    let (_, text, items) = stack.pop().expect("markdown stack non-empty");
+    RecursiveNode::Header(text, items, span)
 }
 
 // ── nginx parser ──────────────────────────────────────────────────────────
@@ -707,7 +868,8 @@ fn push_nginx_entry(
 }
 
 /// Detect document format từ extension: `tf`/`hcl` → hcl, `yaml`/`yml`,
-/// `json`, `toml`. Lỗi khi extension không nhận diện được.
+/// `json`, `toml`, `conf`/`nginx` → nginx, `md`/`markdown` → markdown.
+/// Lỗi khi extension không nhận diện được.
 pub fn detect_format(path: &str) -> Result<String> {
     let ext = std::path::Path::new(path)
         .extension()
@@ -720,13 +882,15 @@ pub fn detect_format(path: &str) -> Result<String> {
         "json" => Ok("json".to_string()),
         "toml" => Ok("toml".to_string()),
         "conf" | "nginx" => Ok("nginx".to_string()),
+        "md" | "markdown" => Ok("markdown".to_string()),
         _ => Err(anyhow::anyhow!(
             "unknown format for extension .{ext}; specify --format to override"
         )),
     }
 }
 
-/// Chọn parser theo format name (`"hcl"`, `"yaml"`, `"json"`, `"toml"`).
+/// Chọn parser theo format name (`"hcl"`, `"yaml"`, `"json"`, `"toml"`,
+/// `"nginx"`, `"markdown"`).
 pub fn parser_for(format: &str) -> Result<Box<dyn DocParser>> {
     match format {
         "hcl" => Ok(Box::new(HclParser)),
@@ -734,6 +898,7 @@ pub fn parser_for(format: &str) -> Result<Box<dyn DocParser>> {
         "json" => Ok(Box::new(JsonParser)),
         "toml" => Ok(Box::new(TomlParser)),
         "nginx" => Ok(Box::new(NginxParser)),
+        "markdown" => Ok(Box::new(MarkdownParser)),
         _ => Err(anyhow::anyhow!("unsupported document format: {format}")),
     }
 }
@@ -741,7 +906,7 @@ pub fn parser_for(format: &str) -> Result<Box<dyn DocParser>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DocConfig, DocumentGraph};
+    use crate::{DocConfig, DocToken, DocumentGraph};
     use codegraph_graph::InMemoryStorage;
     use std::sync::Arc;
     use tokio::sync::RwLock as TokioRwLock;
@@ -929,6 +1094,148 @@ http {
     fn nginx_detect_format() {
         assert_eq!(detect_format("conf/nginx.conf").unwrap(), "nginx");
         assert_eq!(detect_format("a.CONF").unwrap(), "nginx");
+    }
+
+    #[test]
+    fn markdown_parser_header_nesting() {
+        let src = "\
+# Top
+Intro paragraph.
+
+## Section
+Body text.
+
+### Sub
+Sub body.
+
+## Second section
+# Back to top
+Outro.
+";
+        let doc = MarkdownParser.parse("a.md", src, 1).unwrap();
+        let find = |key: &str| doc.nodes.iter().find(|n| n.key.as_deref() == Some(key));
+        // root, Top, intro, Section, body, Sub, sub body, Second section,
+        // Back to top, outro = 10 node.
+        assert_eq!(doc.nodes.len(), 10);
+        assert_eq!(doc.nodes[0].kind, Kind::Root);
+        let top = find("Top").unwrap();
+        assert_eq!(top.kind, Kind::Header);
+        assert_eq!(top.parent, Some(1));
+        // Paragraph là con của header gần nhất.
+        let intro = doc
+            .nodes
+            .iter()
+            .find(|n| n.parent == Some(top.id) && n.kind == Kind::String)
+            .unwrap();
+        assert_eq!(intro.value, Some(Scalar::String("Intro paragraph.".into())));
+        // h2 nằm dưới h1, h3 nằm dưới h2.
+        let section = find("Section").unwrap();
+        assert_eq!(section.parent, Some(top.id));
+        let sub = find("Sub").unwrap();
+        assert_eq!(sub.parent, Some(section.id));
+        let sub_body = doc
+            .nodes
+            .iter()
+            .find(|n| n.parent == Some(sub.id) && n.kind == Kind::String)
+            .unwrap();
+        assert_eq!(sub_body.value, Some(Scalar::String("Sub body.".into())));
+        // h2 mới sau h3 quay về cha là h1; h1 mới về root.
+        let second = find("Second section").unwrap();
+        assert_eq!(second.parent, Some(top.id));
+        let back = find("Back to top").unwrap();
+        assert_eq!(back.parent, Some(1));
+        let outro = doc
+            .nodes
+            .iter()
+            .find(|n| n.parent == Some(back.id) && n.kind == Kind::String)
+            .unwrap();
+        assert_eq!(outro.value, Some(Scalar::String("Outro.".into())));
+    }
+
+    #[test]
+    fn markdown_parser_code_blocks() {
+        let src = "\
+# Doc
+```rust
+fn main() {
+    println!(\"# not a header\");
+}
+```
+After code.
+
+```
+plain fence
+```
+";
+        let doc = MarkdownParser.parse("a.md", src, 1).unwrap();
+        // root, Doc, code(rust), "After code.", code(không lang) = 5 node.
+        assert_eq!(doc.nodes.len(), 5);
+        let doc_header = doc
+            .nodes
+            .iter()
+            .find(|n| n.key.as_deref() == Some("Doc"))
+            .unwrap();
+        let kids: Vec<_> = doc
+            .nodes
+            .iter()
+            .filter(|n| n.parent == Some(doc_header.id))
+            .collect();
+        assert_eq!(kids.len(), 3);
+        // Fence có lang → key = ngôn ngữ, value = code thô; `#` trong code
+        // không bị parse thành header.
+        assert_eq!(kids[0].kind, Kind::Code);
+        assert_eq!(kids[0].key.as_deref(), Some("rust"));
+        assert!(matches!(kids[0].value, Some(Scalar::String(ref s)) if s.contains("not a header")));
+        // Fence không lang → key None.
+        assert_eq!(kids[2].kind, Kind::Code);
+        assert_eq!(kids[2].key, None);
+        assert_eq!(kids[2].value, Some(Scalar::String("plain fence".into())));
+    }
+
+    #[test]
+    fn markdown_parser_preamble_and_unclosed_fence() {
+        // Nội dung trước header đầu tiên nằm ngay dưới root.
+        let doc = MarkdownParser
+            .parse("a.md", "Preamble line.\n\n# Title\n", 1)
+            .unwrap();
+        assert_eq!(doc.nodes.len(), 3); // root, preamble, Title
+        let preamble = doc.nodes[1].clone();
+        assert_eq!(preamble.parent, Some(1));
+        assert_eq!(preamble.kind, Kind::String);
+        assert_eq!(
+            preamble.value,
+            Some(Scalar::String("Preamble line.".into()))
+        );
+
+        // Fence chưa đóng: phần code thu được vẫn thành node Code.
+        let doc = MarkdownParser
+            .parse("a.md", "# T\n```js\nlet x = 1;\n", 1)
+            .unwrap();
+        let code = doc.nodes.iter().find(|n| n.kind == Kind::Code).unwrap();
+        assert_eq!(code.key.as_deref(), Some("js"));
+        assert_eq!(code.value, Some(Scalar::String("let x = 1;".into())));
+    }
+
+    #[tokio::test]
+    async fn markdown_detect_format_and_ingest() {
+        assert_eq!(detect_format("README.md").unwrap(), "markdown");
+        assert_eq!(detect_format("doc.Markdown").unwrap(), "markdown");
+        assert_eq!(parser_for("markdown").unwrap().format(), "markdown");
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("README.md");
+        std::fs::write(&p, "# Title\nHello.\n").unwrap();
+        let storage = Arc::new(TokioRwLock::new(InMemoryStorage::default()));
+        let mut graph = DocumentGraph::new(storage, DocConfig::default());
+        graph.ingest_file(p.to_str().unwrap(), None).await.unwrap();
+        // root + Title + Hello = 3.
+        assert_eq!(graph.stats().await.unwrap_or_default().nodes, 3);
+        // Pattern cấu trúc HEADER → STRING tìm thấy paragraph "Hello."
+        let hits = graph
+            .search_struct(&[DocToken::header(), DocToken::str(0)], None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     #[tokio::test]

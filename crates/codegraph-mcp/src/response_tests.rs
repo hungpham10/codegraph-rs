@@ -156,7 +156,7 @@ fn every_registered_tool_advertises_output_controls() {
         if tool.name == "codegraph_graphdoc_ingest" {
             assert_eq!(
                 props["format"]["enum"],
-                json!(["hcl", "yaml", "json", "toml"])
+                json!(["hcl", "yaml", "json", "toml", "nginx", "markdown"])
             );
         }
     }

@@ -14,6 +14,8 @@ pub enum DocTag {
     Bool,
     Null,
     Root,
+    Header,
+    Code,
 }
 
 impl DocTag {
@@ -51,6 +53,8 @@ impl DocToken {
             6 => DocTag::Bool,
             7 => DocTag::Null,
             8 => DocTag::Root,
+            9 => DocTag::Header,
+            10 => DocTag::Code,
             _ => DocTag::Map,
         }
     }
@@ -118,6 +122,12 @@ impl DocToken {
     }
     pub fn root() -> Self {
         Self::new(DocTag::Root, 0)
+    }
+    pub fn header() -> Self {
+        Self::new(DocTag::Header, 0)
+    }
+    pub fn code() -> Self {
+        Self::new(DocTag::Code, 0)
     }
 }
 

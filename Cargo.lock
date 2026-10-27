@@ -862,6 +862,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "tracing",
  "tree-sitter",
+ "tree-sitter-astro-next",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
  "tree-sitter-cpp",
@@ -874,6 +875,7 @@ dependencies = [
  "tree-sitter-ruby",
  "tree-sitter-rust",
  "tree-sitter-scala",
+ "tree-sitter-svelte-next",
  "tree-sitter-swift",
  "tree-sitter-typescript",
 ]
@@ -5351,7 +5353,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5810,6 +5812,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-astro-next"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "794a4a59fc2d88e49b4bc41fef9522d77184a36f4e68bbaf545cd1eb2364c46e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-c"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5930,6 +5942,16 @@ name = "tree-sitter-scala"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de5a4a7ff23a55474ce6a741d52aaeca7a82fe9421bb982b86e98c6ac8629397"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-svelte-next"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56f88190d0743e897c3e148a7e241aba0a8844b8afe816943851426e3f7b9753"
 dependencies = [
  "cc",
  "tree-sitter-language",
