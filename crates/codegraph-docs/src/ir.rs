@@ -21,6 +21,10 @@ pub enum Kind {
     Bool,
     Null,
     Reference,
+    /// Markdown heading — level thể hiện qua độ sâu lồng nhau.
+    Header,
+    /// Fenced code block (markdown).
+    Code,
 }
 
 /// Scalar value stored on a leaf node.

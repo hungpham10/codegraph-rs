@@ -72,6 +72,8 @@ tree-sitter-scala      = "0.26"
 tree-sitter-swift      = "0.7"
 tree-sitter-kotlin     = "0.3"
 tree-sitter-lua        = "0.5"
+tree-sitter-svelte-next = "0.1.1"
+tree-sitter-astro-next  = "0.1.1"
 
 # cli / async / fs
 clap = { version = "4", features = ["derive", "wrap_help"] }

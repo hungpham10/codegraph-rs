@@ -348,10 +348,10 @@ fn tool_defs() -> Vec<ToolDef> {
         // ── Document tools (codegraph_graphdoc_*) ──
         tool(
             "codegraph_graphdoc_ingest",
-            "Parse and ingest a document file (HCL/Terraform, YAML, JSON, TOML). The file is read, parsed by the appropriate format parser, and added to the document graph.",
+            "Parse and ingest a document file (HCL/Terraform, YAML, JSON, TOML, nginx, Markdown). The file is read, parsed by the appropriate format parser, and added to the document graph.",
             json!({ "type": "object", "properties": {
                 "path": { "type": "string", "description": "Path to the document file." },
-                "format": { "type": "string", "enum": ["hcl", "yaml", "json", "toml"], "description": "Override auto-detected format. If omitted, format is inferred from file extension (.tf/.hcl → hcl, .yaml/.yml → yaml, .json → json, .toml → toml)." }
+                "format": { "type": "string", "enum": ["hcl", "yaml", "json", "toml", "nginx", "markdown"], "description": "Override auto-detected format. If omitted, format is inferred from file extension (.tf/.hcl → hcl, .yaml/.yml → yaml, .json → json, .toml → toml, .conf/.nginx → nginx, .md/.markdown → markdown)." }
             }, "required": ["path"] }),
         ),
         tool(
@@ -1818,7 +1818,7 @@ pub async fn dispatch_doc_ingest_dir(
     path: &str,
     limit: usize,
 ) -> Result<String> {
-    const EXTS: [&str; 6] = ["yaml", "yml", "json", "toml", "tf", "hcl"];
+    const EXTS: [&str; 8] = ["yaml", "yml", "json", "toml", "tf", "hcl", "md", "markdown"];
     let mut files = Vec::new();
     let mut stack = vec![std::path::PathBuf::from(path)];
     while let Some(dir) = stack.pop() {
