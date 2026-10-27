@@ -96,7 +96,7 @@ cargo test -p codegraph-installer
 
 | Feature | Languages |
 |---------|-----------|
-| `all-langs` (default) | All 14 |
+| `all-langs` (default) | All 16 |
 | `lang-rust` | Rust |
 | `lang-go` | Go |
 | `lang-python` | Python |
@@ -111,6 +111,8 @@ cargo test -p codegraph-installer
 | `lang-scala` | Scala |
 | `lang-swift` | Swift |
 | `lang-lua` | Lua |
+| `lang-svelte` | Svelte (hybrid: markup + script re-parse JS/TS) |
+| `lang-astro` | Astro (hybrid: markup + frontmatter/script re-parse JS/TS) |
 
 ```bash
 # Test single language
