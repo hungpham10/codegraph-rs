@@ -146,9 +146,7 @@ fn pack_install_copies_files_and_is_idempotent_and_merges() {
     assert!(found.is_some(), "policy not found after pack install");
     let uses_security: Vec<&str> = p.rhai.rules.iter().map(|r| r.use_script.as_str()).collect();
     assert!(
-        uses_security
-            .iter()
-            .any(|u| *u == "security.dangerous_exec"),
+        uses_security.contains(&"security.dangerous_exec"),
         "pack fragment rules not merged: {uses_security:?}"
     );
 

@@ -14,6 +14,6 @@ pub async fn build_index(root: &Utf8Path) -> anyhow::Result<GraphIndex> {
     let orch = Orchestrator::with_registry();
     let (parsed, _stats) = orch.parse_project(root)?;
     let mut index = GraphIndex::in_memory();
-    index.ingest(&parsed).await?;
+    index.ingest(&parsed, None).await?;
     Ok(index)
 }

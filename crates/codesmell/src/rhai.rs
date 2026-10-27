@@ -632,6 +632,8 @@ mod tests {
             doc: None,
             annotations: vec![],
             language: "rust".to_string(),
+            impl_trait: None,
+            sig_key: None,
         }
     }
 

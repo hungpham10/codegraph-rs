@@ -124,14 +124,17 @@ where
     pub fn get(&self, key: &K) -> Option<V> {
         let index = *self.mapping.get(key)?;
 
-        // Đọc giá trị an toàn (Node này chắc chắn tồn tại vì mapping đang giữ nó)
-        let val = self.caching[index].value.as_ref()?.clone();
-
-        // Optimistic LRU Update: Dùng try_lock để không làm chậm luồng Read
+        // Key/value của node chỉ được chạm dưới khoá shard của key — nếu không
+        // `put` (overwrite value) và `clear` (reset slot) sẽ race với phép đọc này.
         let shard_idx = self.get_shard_idx(key);
-        if let Some(mut ht) = self.shards[shard_idx].mutex.try_lock() {
-            self.move_to_front_inside_lock(&mut ht, index);
+        let mut ht = self.shards[shard_idx].mutex.lock();
+        // Slot có thể đã bị tái sử dụng (key bị `remove` rồi `put` mới chiếm
+        // chỗ) giữa lúc tra mapping và lúc khoá shard — xác minh lại key.
+        if self.caching[index].key.as_ref() != Some(key) {
+            return None;
         }
+        let val = self.caching[index].value.as_ref()?.clone();
+        self.move_to_front_inside_lock(&mut ht, index);
 
         Some(val)
     }
@@ -139,21 +142,23 @@ where
     pub fn put(&self, key: K, value: V) {
         let shard_idx = self.get_shard_idx(&key);
 
-        // Case 1: Key đã tồn tại (Update)
-        if let Some(entry) = self.mapping.get_mut(&key) {
-            let index = *entry.value();
+        // Case 1: Key đã tồn tại (Update). Không giữ DashMap guard khi chờ
+        // shard mutex — Case 2 giữ mutex rồi mới insert vào mapping, giữ guard
+        // cùng lúc sẽ tạo chu trình khoá chéo giữa DashMap shard và shard mutex.
+        let existing = self.mapping.get(&key).map(|e| *e.value());
+        if let Some(index) = existing {
             if let Some(cb) = &self.on_updating {
                 cb(key.clone(), value.clone());
             }
 
-            unsafe {
-                let node_ptr = &self.caching[index] as *const Node<K, V> as *mut Node<K, V>;
-                (*node_ptr).value = Some(value);
-            }
-            drop(entry);
-
-            // Cập nhật thứ tự (Có thể dùng try_lock hoặc lock tùy độ ưu tiên)
-            if let Some(mut ht) = self.shards[shard_idx].mutex.try_lock() {
+            let mut ht = self.shards[shard_idx].mutex.lock();
+            // Re-check dưới khoá shard: `remove`/`clear` có thể đã xoá key
+            // sau bước tra trên — bỏ qua update thay vì ghi vào slot mồ côi.
+            if self.mapping.get(&key).map(|e| *e.value()) == Some(index) {
+                unsafe {
+                    let node_ptr = &self.caching[index] as *const Node<K, V> as *mut Node<K, V>;
+                    (*node_ptr).value = Some(value);
+                }
                 self.move_to_front_inside_lock(&mut ht, index);
             }
             return;
@@ -191,7 +196,12 @@ where
     /// Chỉ remove khỏi DashMap, slot trong arena được tái sử dụng khi `put` overwrite.
     pub fn remove(&self, key: &K) -> Option<V> {
         let (_, index) = self.mapping.remove(key)?;
-        self.caching[index].value.clone()
+        // Khoá shard trước khi đọc value — `clear`/`put` ghi slot dưới cùng khoá này.
+        let shard_idx = self.get_shard_idx(key);
+        let ht = self.shards[shard_idx].mutex.lock();
+        let val = self.caching[index].value.clone();
+        drop(ht);
+        val
     }
 
     /// Số entry đang cache — `DashMap::len()` O(1), dùng cho báo cáo memory.
