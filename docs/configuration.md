@@ -30,6 +30,8 @@ php = true
 scala = true
 swift = true
 lua = true
+svelte = true
+astro = true
 
 # C/C++ header handling
 # headers = "auto"   # "auto" (default), "c", or "cpp"
@@ -89,6 +91,8 @@ Enable/disable individual language extractors. All 14 are enabled by default.
 | `scala` | Scala | tree-sitter-scala |
 | `swift` | Swift | tree-sitter-swift |
 | `lua` | Lua | tree-sitter-lua |
+| `svelte` | Svelte | tree-sitter-svelte-next (script re-parse JS/TS) |
+| `astro` | Astro | tree-sitter-astro-next (frontmatter/script re-parse JS/TS) |
 
 **Headers**: The `headers` key controls `.h` file parsing:
 - `"auto"` (default): Detect from project — C++ if `.cpp`/`.hpp` present, C if `.c` present, inspect each `.h` for C++ syntax in mixed projects
