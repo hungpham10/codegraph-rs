@@ -58,6 +58,7 @@ pub const RULE_MAX_COMPLEXITY: &str = "style.function.max_complexity";
 pub const RULE_NAMING: &str = "style.naming";
 pub const RULE_BOUNDARY: &str = "architecture.boundary";
 pub const RULE_MISSING_TEST: &str = "testing.missing_test";
+pub const RULE_COVERAGE: &str = "testing.coverage";
 pub const RULE_DENY_CALL: &str = "security.deny_call";
 pub const RULE_DENY_SYMBOL: &str = "security.deny_symbol";
 
@@ -114,6 +115,61 @@ impl Default for RhaiSection {
     }
 }
 
+// ==================== Testing / coverage ====================
+
+/// One layer definition shared by `testing.missing_test` params and the
+/// `[testing.coverage]` config: a named region of the repo matched by path
+/// globs (repo-relative).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LayerSpec {
+    /// Layer name referenced by `selectors[].layers`.
+    pub name: String,
+    /// Path globs (repo-relative) that map a file to this layer.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// One selector: a function is "business logic" when its layer is listed here
+/// or its body is at least `min_lines` lines. Shared with the
+/// `testing.missing_test` rule so both rules select the same functions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SelectorSpec {
+    /// Layer names this selector accepts.
+    #[serde(default)]
+    pub layers: Vec<String>,
+    /// Minimum body length (end_line − line + 1) this selector accepts.
+    #[serde(default)]
+    pub min_lines: u32,
+}
+
+/// The `[testing.coverage]` table: call-graph coverage estimate with an
+/// optional enforcement threshold.
+///
+/// Semantics mirror `testing.missing_test`: a logic function is *covered* when
+/// at least one direct caller lives in a file matching `test_paths`. `line`
+/// (percent) turns the measurement into a `testing.coverage` violation in
+/// `codesmell check`; without it the number is report-only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CoverageConfig {
+    /// Minimum acceptable coverage percent (0–100). `None` = report only.
+    pub line: Option<u64>,
+    /// Path globs that identify test files (repo-relative).
+    pub test_paths: Vec<String>,
+    /// Named repo regions used by `selectors`.
+    pub layers: Vec<LayerSpec>,
+    /// Which functions count toward coverage; empty = every function/method.
+    pub selectors: Vec<SelectorSpec>,
+}
+
+/// The `[testing]` section of the policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestingSection {
+    /// Call-graph coverage estimate + optional threshold.
+    pub coverage: Option<CoverageConfig>,
+}
+
 // ==================== Policy ====================
 
 /// One `[[include]]` entry in `policy.toml`: pulls a pack into the policy by
@@ -147,6 +203,9 @@ pub struct Policy {
     /// `[[include]]` table in `policy.toml`.
     #[serde(default, rename = "include")]
     pub includes: Vec<IncludeEntry>,
+    /// The `[testing]` section (coverage estimate + threshold).
+    #[serde(default)]
+    pub testing: TestingSection,
 }
 
 impl Default for Policy {
@@ -156,6 +215,7 @@ impl Default for Policy {
             rhai: RhaiSection::default(),
             severity: HashMap::new(),
             includes: Vec::new(),
+            testing: TestingSection::default(),
         }
     }
 }
@@ -175,7 +235,7 @@ impl Policy {
 pub fn default_severity(rule_id: &str) -> Severity {
     match rule_id {
         RULE_BOUNDARY => Severity::Blocking,
-        RULE_MISSING_TEST => Severity::Required,
+        RULE_MISSING_TEST | RULE_COVERAGE => Severity::Required,
         _ if rule_id.starts_with("security.") => Severity::Required,
         _ => Severity::Warning,
     }
@@ -232,6 +292,9 @@ pub(crate) fn merge_fragment_text(policy: &mut Policy, text: &str) -> bool {
             policy.rhai.rules.extend(frag.rhai.rules);
             for (k, v) in frag.severity {
                 policy.severity.insert(k, v);
+            }
+            if frag.testing.coverage.is_some() {
+                policy.testing.coverage = frag.testing.coverage;
             }
             true
         }

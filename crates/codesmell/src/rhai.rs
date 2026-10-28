@@ -50,7 +50,7 @@ pub const RULE_SYMBOL_KINDS: &[SymbolKind] = &[
 ];
 
 /// Symbol kinds for `check_calls` / `check_flow` (only symbols with a call graph).
-const FN_KINDS: &[SymbolKind] = &[SymbolKind::Function, SymbolKind::Method];
+pub(crate) const FN_KINDS: &[SymbolKind] = &[SymbolKind::Function, SymbolKind::Method];
 
 #[derive(Default, Clone, Copy)]
 struct HookSet {

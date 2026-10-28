@@ -56,9 +56,17 @@ Unit tests for policy merge/severity/param-count/nesting; integration tests
 over fixture repos (`tests/fixtures/rustshop` expecting every rule category,
 `cleanshop` expecting zero violations, diff-scope narrowing).
 
+## Coverage estimate (built)
+
+`src/coverage.rs` aggregates the `testing.missing_test` mechanism into a
+percentage: a logic function (same `selectors`/`layers` semantics) is covered
+when a direct caller lives in a `test_paths` file. `[testing.coverage] line`
+turns a below-threshold estimate into one `testing.coverage` violation in
+`codesmell check`; `codesmell coverage` reports percent + uncovered list
+(human/json). User guide: [docs/codesmell-coverage.md](../docs/codesmell-coverage.md).
+
 ## Fast-follow (not built)
 
 Convention discovery (statistics → candidate policies with confidence),
-coverage threshold enforcement, policy history/evolution, runtime/engineering
-policies (timeouts/retries via effect classification), stored-index reuse as
-a performance optimization.
+policy history/evolution, runtime/engineering policies (timeouts/retries via
+effect classification), stored-index reuse as a performance optimization.

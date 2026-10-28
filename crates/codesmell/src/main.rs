@@ -43,6 +43,21 @@ enum Cmd {
         #[arg(long, value_enum, default_value = "required")]
         fail_on: policy::Severity,
     },
+    /// Estimate call-graph test coverage of the business logic (see
+    /// docs/codesmell-coverage.md). Requires `[testing.coverage]` in policy.
+    Coverage {
+        /// File or directory paths to scope the measurement to (default: whole repo).
+        paths: Vec<PathBuf>,
+        /// Read a unified diff from a file path or `-` (stdin) and measure only changed symbols.
+        #[arg(long)]
+        diff: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: OutFormat,
+        /// Exit non-zero when coverage is below the policy threshold.
+        #[arg(long, value_enum, default_value = "info")]
+        fail_on: policy::Severity,
+    },
     /// Print the conventions pack an LLM should read before writing code.
     Guide {
         /// Optional path to show conventions effective for that area.
@@ -107,6 +122,15 @@ async fn main() -> anyhow::Result<()> {
             let registry = packs::resolve_registry(cli.registry.as_deref()).ok();
             guide(&root, path, registry.as_ref())
         }
+        Cmd::Coverage {
+            paths,
+            diff,
+            format,
+            fail_on,
+        } => {
+            let registry = packs::resolve_registry(cli.registry.as_deref()).ok();
+            coverage(&root, paths, diff, format, fail_on, registry.as_ref()).await
+        }
         Cmd::Init { pack } => init(&root, pack.as_deref()),
         Cmd::Policy => {
             let (p, _) = policy::load_policy(&root);
@@ -141,27 +165,7 @@ async fn check(
     }
     packs::expand_includes(&mut policy, root, registry)?;
 
-    let scope = if let Some(dp) = diff {
-        let text = if dp.as_os_str() == "-" {
-            let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s)?;
-            s
-        } else {
-            std::fs::read_to_string(&dp)?
-        };
-        let parsed =
-            parse_unified_diff(&text).map_err(|e| anyhow::anyhow!("failed to parse diff: {e}"))?;
-        CheckScope::Diff(parsed)
-    } else if paths.is_empty() {
-        CheckScope::All
-    } else {
-        CheckScope::Paths(
-            paths
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
-        )
-    };
+    let scope = build_scope(diff, paths)?;
 
     let root_utf8 = camino::Utf8PathBuf::from_path_buf(root.to_path_buf())
         .map_err(|_| anyhow::anyhow!("non-UTF8 repository path"))?;
@@ -178,6 +182,96 @@ async fn check(
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Coverage measurement over a scope, shared by the `coverage` subcommand and
+/// the threshold violation inside `check`.
+async fn coverage(
+    root: &std::path::Path,
+    paths: Vec<PathBuf>,
+    diff: Option<PathBuf>,
+    format: OutFormat,
+    fail_on: policy::Severity,
+    registry: Option<&Registry>,
+) -> anyhow::Result<()> {
+    let (mut policy, found) = policy::load_policy(root);
+    if found.is_none() {
+        eprintln!(
+            "codesmell: no .codesmell/policy.toml found; using built-in defaults. \
+             Run `codesmell init` to create one."
+        );
+    }
+    packs::expand_includes(&mut policy, root, registry)?;
+    let Some(cfg) = policy.testing.coverage.clone() else {
+        anyhow::bail!(
+            "no [testing.coverage] section in the policy — \
+             see docs/codesmell-coverage.md for the configuration guide"
+        );
+    };
+
+    let scope = build_scope(diff, paths)?;
+    let root_utf8 = camino::Utf8PathBuf::from_path_buf(root.to_path_buf())
+        .map_err(|_| anyhow::anyhow!("non-UTF8 repository path"))?;
+    let index = build_index(&root_utf8).await?;
+    let stats = codesmell::coverage::measure(&index, &scope, &cfg, root).await;
+
+    match format {
+        OutFormat::Human => print_coverage_human(&stats),
+        OutFormat::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
+    }
+
+    if !stats.met && policy.severity_of(codesmell::policy::RULE_COVERAGE) >= fail_on {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Build the evaluation scope from `--diff` / positional paths.
+fn build_scope(diff: Option<PathBuf>, paths: Vec<PathBuf>) -> anyhow::Result<CheckScope> {
+    if let Some(dp) = diff {
+        let text = if dp.as_os_str() == "-" {
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            s
+        } else {
+            std::fs::read_to_string(&dp)?
+        };
+        let parsed =
+            parse_unified_diff(&text).map_err(|e| anyhow::anyhow!("failed to parse diff: {e}"))?;
+        Ok(CheckScope::Diff(parsed))
+    } else if paths.is_empty() {
+        Ok(CheckScope::All)
+    } else {
+        Ok(CheckScope::Paths(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+        ))
+    }
+}
+
+fn print_coverage_human(stats: &codesmell::coverage::CoverageStats) {
+    match stats.threshold {
+        Some(t) => println!(
+            "Coverage: {}% ({} of {} logic functions tested) — threshold {t}%: {}",
+            stats.percent,
+            stats.covered,
+            stats.total,
+            if stats.met { "MET" } else { "NOT MET" }
+        ),
+        None => println!(
+            "Coverage: {}% ({} of {} logic functions tested)",
+            stats.percent, stats.covered, stats.total
+        ),
+    }
+    if stats.uncovered.is_empty() {
+        return;
+    }
+    println!("\nUncovered:");
+    for u in &stats.uncovered {
+        println!("  --> {}:{}  {}", u.file, u.line, u.symbol);
+    }
 }
 
 fn guide(

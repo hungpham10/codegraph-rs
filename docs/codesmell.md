@@ -86,8 +86,11 @@ require_tests_for_changed_logic = true
 test_paths = ["tests/**", "**/*_test.go", "**/*_test.rs", "**/test_*.py", "**/*Test.java"]
 logic_selectors = [{ layers = ["service"] }, { min_lines = 20 }]
 
-[testing.coverage]   # reserved — parsed but not enforced yet
+[testing.coverage]   # call-graph coverage estimate + threshold
 line = 80
+test_paths = ["tests/**", "**/*_test.rs", "**/*_test.go", "**/test_*.py"]
+layers = [{ name = "service", paths = ["src/services/**"] }]
+selectors = [{ layers = ["service"] }, { min_lines = 20 }]
 
 [severity]                    # per-rule severity overrides
 "style.function.max_lines" = "warning"
@@ -161,6 +164,8 @@ codesmell guide            (read conventions)
 ## Relationship with CodeGraph
 
 CodeGraph understands the software (AST, symbols, call graph, flows);
+Test-coverage estimate & threshold: see [docs/codesmell-coverage.md](codesmell-coverage.md).
+
 CodeSmell evaluates those facts against the team's engineering conventions.
 CodeSmell builds a fresh in-memory CodeGraph per run — the persistent
 `.codegraph` index is not required.
@@ -168,6 +173,5 @@ CodeSmell builds a fresh in-memory CodeGraph per run — the persistent
 ## Not implemented yet (fast-follow)
 
 - Convention discovery (statistics → candidate policies with confidence)
-- Coverage threshold enforcement
 - Policy history / evolution
 - Runtime/engineering policies (timeouts, retries via effect classification)

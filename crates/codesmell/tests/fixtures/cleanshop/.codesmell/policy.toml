@@ -29,3 +29,11 @@ deny = ["controller -> repository"]
 require_tests_for_changed_logic = true
 test_paths = ["tests/**", "**/test_*.rs", "**/*_test.rs"]
 logic_selectors = [{ layers = ["service"] }, { min_lines = 20 }]
+
+# --- testing (coverage) ---
+# Every service function has a test caller — the expected estimate is 100%.
+[testing.coverage]
+line = 80
+test_paths = ["tests/**", "**/test_*.rs", "**/*_test.rs"]
+layers = [{ name = "service", paths = ["src/services/**"] }]
+selectors = [{ layers = ["service"] }, { min_lines = 20 }]

@@ -97,6 +97,16 @@ params = { layers = [{ name = "controller", paths = ["src/controllers/**", "**/*
 use = "testing.missing_test"
 params = { require = true, test_paths = ["tests/**", "**/*_test.rs", "**/*_test.go", "**/test_*.py"], selectors = [{ layers = ["service"] }, { min_lines = 20 }] }
 
+# --- testing (coverage estimate + threshold) ---
+# A logic function counts as covered when a test file calls it (call-graph
+# estimate, no test run). `line` makes `codesmell check` fail below 80%.
+# See docs/codesmell-coverage.md.
+[testing.coverage]
+line = 80
+test_paths = ["tests/**", "**/*_test.rs", "**/*_test.go", "**/test_*.py"]
+layers = [{ name = "service", paths = ["src/services/**"] }]
+selectors = [{ layers = ["service"] }, { min_lines = 20 }]
+
 # --- security (see `codesmell pack add security`) ---
 # [[rhai.rule]]
 # use = "security.deny_call"
@@ -106,10 +116,13 @@ params = { require = true, test_paths = ["tests/**", "**/*_test.rs", "**/*_test.
 "style.function.max_lines" = "warning"
 "architecture.boundary" = "blocking"
 "testing.missing_test" = "required"
+"testing.coverage" = "required"
 "#;
 
 /// Suggested AGENTS.md / CLAUDE.md snippet.
 pub const AGENTS_SNIPPET: &str = r#"## CodeSmell conventions
 Run `codesmell guide` before writing or modifying code, and `codesmell check` (or
-`codesmell check --diff -`) after, then fix every violation by severity.
+`codesmell check --diff -`) after, then fix every violation by severity. Keep
+test coverage above the policy threshold (`codesmell coverage` shows the
+estimate and the uncovered functions).
 "#;

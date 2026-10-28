@@ -2,6 +2,7 @@
 //! the policy. Fixtures live under `tests/fixtures/`.
 
 use codegraph_graph::diff::parse_unified_diff;
+use codesmell::coverage::measure;
 use codesmell::engine::{evaluate, CheckScope};
 use codesmell::index::build_index;
 use codesmell::packs::{self, Registry, SECURITY_PACK};
@@ -322,4 +323,79 @@ fn include_from_git_registry_resolves_offline_after_update() {
             .any(|p| p.name == "demo" && p.version.as_deref() == Some("0.1.0")),
         "pack metadata not listed: {infos:?}"
     );
+}
+
+#[tokio::test]
+async fn rustshop_coverage_estimate_and_threshold_violation() {
+    let (root, idx) = index_for("rustshop").await;
+    let (p, _) = policy::load_policy(&root);
+    let cfg = p
+        .testing
+        .coverage
+        .as_ref()
+        .expect("fixture enables coverage");
+
+    // Two logic functions in the service layer: compute_big (tested) and
+    // unreached_logic (untested) -> 50%.
+    let stats = measure(&idx, &CheckScope::All, cfg, &root).await;
+    assert_eq!(stats.total, 2, "logic functions: {:?}", stats);
+    assert_eq!(stats.covered, 1);
+    assert_eq!(stats.percent, 50);
+    assert!(!stats.met);
+    assert_eq!(stats.uncovered.len(), 1);
+    assert_eq!(stats.uncovered[0].symbol, "unreached_logic");
+
+    // `check` turns the below-threshold estimate into one violation.
+    let report = evaluate(&idx, &CheckScope::All, &p, &root).await.unwrap();
+    let cov: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|v| v.rule == "testing.coverage")
+        .collect();
+    assert_eq!(cov.len(), 1, "got {:?}", report.violations);
+    assert_eq!(cov[0].severity, policy::Severity::Required);
+    assert!(cov[0].message.contains("50% is below threshold 80%"));
+    assert!(cov[0].fix_hint.contains("unreached_logic"));
+}
+
+#[tokio::test]
+async fn rustshop_coverage_met_when_threshold_is_low() {
+    let (root, idx) = index_for("rustshop").await;
+    let (p, _) = policy::load_policy(&root);
+    let mut low = p.clone();
+    low.testing.coverage.as_mut().unwrap().line = Some(50);
+
+    let report = evaluate(&idx, &CheckScope::All, &low, &root).await.unwrap();
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| v.rule == "testing.coverage"),
+        "50% meets a threshold of 50"
+    );
+    // Stats still ride along on the report for tooling.
+    let stats = report.coverage.expect("coverage stats present");
+    assert_eq!(stats.percent, 50);
+    assert!(stats.met);
+}
+
+#[tokio::test]
+async fn cleanshop_coverage_is_full() {
+    let (root, idx) = index_for("cleanshop").await;
+    let (p, _) = policy::load_policy(&root);
+    let cfg = p
+        .testing
+        .coverage
+        .as_ref()
+        .expect("fixture enables coverage");
+
+    let stats = measure(&idx, &CheckScope::All, cfg, &root).await;
+    assert_eq!(stats.percent, 100, "uncovered: {:?}", stats.uncovered);
+    assert!(stats.met);
+
+    let report = evaluate(&idx, &CheckScope::All, &p, &root).await.unwrap();
+    assert!(!report
+        .violations
+        .iter()
+        .any(|v| v.rule == "testing.coverage"));
 }

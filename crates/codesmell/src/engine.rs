@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::policy::Policy;
+use crate::policy::{Policy, RULE_COVERAGE};
 use crate::rhai;
+
+pub use crate::coverage::{measure, CoverageStats};
 
 /// A single policy violation surfaced to the developer / LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +32,9 @@ pub struct CheckReport {
     pub violations: Vec<Violation>,
     /// Count of violations keyed by human label (`note`/`warning`/`error`).
     pub summary: HashMap<String, usize>,
+    /// Coverage estimate when the policy enables `[testing.coverage]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageStats>,
 }
 
 /// What part of the repository to evaluate.
@@ -108,6 +113,8 @@ pub fn collect_symbols(
 }
 
 /// Run the policy over the repository and return a severity-sorted report.
+/// When the policy sets `[testing.coverage] line`, a below-threshold result
+/// adds one `testing.coverage` violation (plus coverage stats on the report).
 pub async fn evaluate(
     index: &GraphIndex,
     scope: &CheckScope,
@@ -115,6 +122,33 @@ pub async fn evaluate(
     root: &Path,
 ) -> anyhow::Result<CheckReport> {
     let mut violations = rhai::run(index, scope, policy, root).await?;
+
+    let mut coverage: Option<CoverageStats> = None;
+    if let Some(cfg) = &policy.testing.coverage {
+        let stats = measure(index, scope, cfg, root).await;
+        if let (Some(threshold), Some(worst)) = (stats.threshold, stats.uncovered.first()) {
+            if !stats.met {
+                violations.push(Violation {
+                    rule: RULE_COVERAGE.to_string(),
+                    severity: policy.severity_of(RULE_COVERAGE),
+                    file: worst.file.clone(),
+                    line: worst.line,
+                    symbol: worst.symbol.clone(),
+                    message: format!(
+                        "test coverage {}% is below threshold {threshold}% ({} of {} logic functions untested)",
+                        stats.percent,
+                        stats.uncovered.len(),
+                        stats.total
+                    ),
+                    fix_hint: format!(
+                        "add unit tests calling the uncovered logic, starting with the largest: {}:{} {}",
+                        worst.file, worst.line, worst.symbol
+                    ),
+                });
+            }
+        }
+        coverage = Some(stats);
+    }
 
     // Most serious first.
     violations.sort_by_key(|v| std::cmp::Reverse(v.severity));
@@ -128,5 +162,6 @@ pub async fn evaluate(
     Ok(CheckReport {
         violations,
         summary,
+        coverage,
     })
 }

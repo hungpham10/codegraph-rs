@@ -6,6 +6,7 @@
 //! conventions pack before writing code (`codesmell guide`) and fixes every
 //! reported violation afterwards.
 
+pub mod coverage;
 pub mod engine;
 pub mod glob;
 pub mod guide;

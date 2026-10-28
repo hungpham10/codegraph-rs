@@ -66,6 +66,7 @@ codesmell init                        # write .codesmell/policy.toml
 codesmell guide                       # conventions pack for the LLM / team
 codesmell check                       # lint the repo (style, architecture, testing)
 git diff | codesmell check --diff -   # change-aware validation
+codesmell coverage                    # test-coverage estimate + threshold
 ```
 
 Policies cover function size/parameter/nesting limits, naming conventions
@@ -168,6 +169,7 @@ binaries → radare2 (r2pipe) ──┘
 | Semantic Search | `docs/semantic-search.md` |
 | Binary Analysis (radare2) | `docs/binary-analysis.md` |
 | CodeSmell Linter | `docs/codesmell.md` |
+| CodeSmell Coverage | `docs/codesmell-coverage.md` |
 | Why Rust (Rewrite Story) | `docs/why-rust.md` |
 | Development Guide | `docs/development.md` |
 
