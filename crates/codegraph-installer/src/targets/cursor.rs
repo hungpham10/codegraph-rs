@@ -139,4 +139,15 @@ impl AgentTarget for CursorTarget {
             Ok(InstallReport::Updated(removed))
         }
     }
+
+    fn skills_dir(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        if opts.global {
+            let home = opts.home_dir()?;
+            Utf8PathBuf::from_path_buf(home.join(".cursor").join("skills")).ok()
+        } else {
+            opts.project_root
+                .as_ref()
+                .map(|r| r.join(".cursor").join("skills"))
+        }
+    }
 }

@@ -65,6 +65,29 @@ type = "sqlite"  # "sqlite" | "lmdb" | "redis" | "memory" | "postgres" | "mysql"
 # SQLite-only: HNSW ANN via sqlite-vss
 # vss_extension = "~/.cache/codegraph/embeddings/vss"
 # execution_provider = "coreml"       # macOS hardware acceleration
+
+# Document graph — ingest structured docs (yaml/json/toml/hcl/nginx/markdown)
+[docgraph]
+# enabled = true          # default: on when `paths` is non-empty
+# paths = ["infra/*.tf", "config/**/*.yaml"]   # globs from project root; "path:format" overrides detection
+# doc_base = 1000000000   # doc node id base (default 1e9)
+# pattern_base = 3000000000  # mined-pattern id base (default 3e9)
+# bloom_cap = 64
+# aliases = [["instances", "replicas"]]
+
+# Binary graph — symbols extracted from ELF/PE/Mach-O binaries
+[bingraph]
+# enabled = true
+# bin_base = 2000000000   # binary symbol id base (default 2e9)
+# [bingraph.storage]      # sqlite only; other backends fall back to memory
+# type = "sqlite"
+
+# Binary analysis with radare2
+[binary]
+# enabled = true       # on by default; skipped with a warning if r2 is not on PATH
+# depth = "aaa"        # "aaa" (full) | "fast" (af + aar + aac)
+# cfg_markers = true   # build IF/LOOP/SWITCH markers from each function's CFG (pdfj)
+# cache = true         # cache analysis by (path, mtime, size)
 ```
 
 ---
@@ -166,6 +189,41 @@ codegraph embed --model bge-small-en-v1.5
 ```
 Requires binary built with `--features fastembed`.
 
+### `[docgraph]`
+
+Configures ingest of structured documents into the document graph at `codegraph init`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | on when `paths` non-empty | Turn doc ingest on/off |
+| `paths` | `Vec<String>` | `[]` | Globs from project root (`config/**/*.yaml`); a `:format` suffix (`"deploy/README:hcl"`) overrides extension detection |
+| `storage` | table | derived from `[storage]` | `{ type, dsn }` override; default dataset is `.codegraph/docs.sqlite` for sqlite |
+| `doc_base` | `u64` | `1e9` | ID base for doc nodes |
+| `pattern_base` | `u64` | `3e9` | ID base for mined structural patterns |
+| `bloom_cap` | `usize` | `64` | Bloom-filter cap |
+| `aliases` | `Vec<(String, String)>` | `[]` | Key normalization aliases, e.g. `["instances", "replicas"]` |
+
+### `[bingraph]`
+
+Binary graph dataset — binary symbols live separately from the code index so search/list query the SQL index lazily without rebuilding RAM.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `true` | Toggle binary graph |
+| `storage` | table | — | `{ type, dsn }`; **sqlite only** — other backends fall back to in-memory with a warning |
+| `bin_base` | `u64` | `2e9` | ID base for binary symbols (kept clear of docs 1e9/3e9 and code IDs) |
+
+### `[binary]`
+
+Controls radare2 analysis of binaries found in the repo (requires `radare2` on `PATH`; skipped with a warning if missing — see `codegraph doctor`).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `true` | Analyze binaries during index |
+| `depth` | `"aaa"` \| `"fast"` | `"aaa"` | `"aaa"` full analysis; `"fast"` runs `af` + `aar` + `aac` (better for large binaries) |
+| `cfg_markers` | `bool` | `true` | Build IF/LOOP/SWITCH markers from each function's CFG (`pdfj`) |
+| `cache` | `bool` | `true` | Cache analysis by `(path, mtime, size)` to avoid re-running `aaa` |
+
 ---
 
 ## `[[effect_rules]]`
@@ -209,8 +267,9 @@ Rules in `[[effect_rules]]` are applied **before** built-in effect defaults
 
 | Variable | Effect |
 |----------|--------|
-| `CODEGRAPH_CONFIG` | Path to config.toml (default: `.codegraph/config.toml`) |
 | `CODEGRAPH_INSTALL_DIR` | Install script target directory (default: `~/.local/bin`) |
+| `CODEGRAPH_PROFILE` / `CODEGRAPH_PROFILE_FILE` | Enable internal profiling: `off`/`0`/`false` disables, `stderr` or a file path selects the sink |
+| `CODEGRAPH_BENCH_REPOS_LIST` | File listing repos for criterion benches (codegraph-bench only) |
 
 ---
 

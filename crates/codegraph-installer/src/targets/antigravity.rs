@@ -150,6 +150,16 @@ impl AgentTarget for AntigravityTarget {
             Ok(InstallReport::Unchanged)
         }
     }
+
+    fn skills_dir(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        if opts.global {
+            None
+        } else {
+            opts.project_root
+                .as_ref()
+                .map(|r| r.join(".agents").join("skills"))
+        }
+    }
 }
 
 const AGENTS_MD_CONTENT: &str = r#"---

@@ -10,7 +10,7 @@ pub struct ClaudeTarget;
 impl ClaudeTarget {
     fn settings_path(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
         if opts.global {
-            let home = dirs::home_dir()?;
+            let home = opts.home_dir()?;
             Utf8PathBuf::from_path_buf(home.join(".claude").join("settings.json")).ok()
         } else {
             let root = opts.project_root.as_ref()?;
@@ -19,7 +19,7 @@ impl ClaudeTarget {
     }
     fn instructions_path(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
         if opts.global {
-            let home = dirs::home_dir()?;
+            let home = opts.home_dir()?;
             Utf8PathBuf::from_path_buf(home.join(".claude").join("CLAUDE.md")).ok()
         } else {
             opts.project_root.as_ref().map(|r| r.join("CLAUDE.md"))
@@ -132,6 +132,17 @@ impl AgentTarget for ClaudeTarget {
             Ok(InstallReport::Unchanged)
         } else {
             Ok(InstallReport::Updated(removed))
+        }
+    }
+
+    fn skills_dir(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        if opts.global {
+            let home = opts.home_dir()?;
+            Utf8PathBuf::from_path_buf(home.join(".claude").join("skills")).ok()
+        } else {
+            opts.project_root
+                .as_ref()
+                .map(|r| r.join(".claude").join("skills"))
         }
     }
 }

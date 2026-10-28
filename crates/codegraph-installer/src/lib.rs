@@ -1,6 +1,8 @@
 //! Multi-agent installer. One target per file in `targets/`.
 
+pub mod skills;
 pub mod targets;
+pub mod workflow;
 
 use anyhow::Result;
 use camino::Utf8PathBuf;
@@ -51,6 +53,11 @@ pub trait AgentTarget: Send + Sync {
     fn detect(&self, opts: &InstallOpts) -> DetectStatus;
     fn install(&self, opts: &InstallOpts) -> Result<InstallReport>;
     fn uninstall(&self, opts: &InstallOpts) -> Result<InstallReport>;
+    /// Thư mục cài skills của agent (None = agent không hỗ trợ skills).
+    fn skills_dir(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        let _ = opts;
+        None
+    }
 }
 
 pub fn registry() -> Vec<Arc<dyn AgentTarget>> {
@@ -61,13 +68,11 @@ pub fn registry() -> Vec<Arc<dyn AgentTarget>> {
         Arc::new(targets::opencode::OpencodeTarget),
         Arc::new(targets::hermes::HermesTarget),
         Arc::new(targets::antigravity::AntigravityTarget),
+        Arc::new(targets::zcode::ZcodeTarget),
     ]
 }
 
-/// Project-scoped targets only (skip ones that only support global config).
+/// Alias của `registry()` — mọi target hiện đều hỗ trợ cả hai scope.
 pub fn project_registry() -> Vec<Arc<dyn AgentTarget>> {
     registry()
-        .into_iter()
-        .filter(|t| t.id() != "codex")
-        .collect()
 }
