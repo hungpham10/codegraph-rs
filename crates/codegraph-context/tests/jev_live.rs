@@ -34,7 +34,10 @@ fn cfg() -> JevConfig {
 #[ignore = "gọi API thật: cần OPENCODE_API_KEY + mạng"]
 async fn jev_chọn_đúng_symbol_và_trả_xác_suất() {
     let cfg = cfg();
-    assert!(cfg.api_key().is_some(), "thiếu env `{}`", cfg.api_key_env);
+    assert!(
+        cfg.api_key().is_some(),
+        "thiếu biến môi trường API key cho Jev"
+    );
     let candidates = vec![
         candidate(
             1,
