@@ -77,6 +77,24 @@ pub struct ContextRequestInput {
     pub limit: Option<i32>,
     pub format: Option<ContextFormat>,
     pub strip_prefix: Option<String>,
+    /// `NONE` (mặc định) hoặc `JEV` — rerank bằng Jev, cần `[jev] enabled = true`.
+    pub rerank: Option<ContextRerank>,
+}
+
+/// Cách chọn symbol gốc của `context` (mirror `codegraph_context::Rerank`).
+#[derive(Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextRerank {
+    None,
+    Jev,
+}
+
+impl From<ContextRerank> for codegraph_context::Rerank {
+    fn from(r: ContextRerank) -> Self {
+        match r {
+            ContextRerank::None => Self::None,
+            ContextRerank::Jev => Self::Jev,
+        }
+    }
 }
 
 impl From<ContextRequestInput> for codegraph_context::ContextRequest {
@@ -91,6 +109,10 @@ impl From<ContextRequestInput> for codegraph_context::ContextRequest {
                 .map(|f| f.into())
                 .unwrap_or(CoreCtxFormat::Markdown),
             strip_prefix: i.strip_prefix,
+            rerank: i
+                .rerank
+                .map(|r| r.into())
+                .unwrap_or(codegraph_context::Rerank::None),
         }
     }
 }

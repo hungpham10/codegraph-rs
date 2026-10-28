@@ -4,11 +4,13 @@
 //! semgraph (`semgraph` module) — wire breaking đã chốt ở plan.
 
 mod error;
+pub mod jev;
 pub mod prof;
 mod route;
 mod semgraph;
 
 pub use error::{Error, Result};
+pub use jev::{jev_config, set_jev_config, JevConfig, NONE_OPTION};
 pub use route::StorageRoute;
 pub use semgraph::{
     is_marker, marker_id, marker_name, Annotation, BranchLabel, CallRecord, CallSite,

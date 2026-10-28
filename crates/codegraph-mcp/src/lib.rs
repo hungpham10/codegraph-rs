@@ -322,7 +322,8 @@ impl CodegraphServer {
                                 )
                             })?;
                     let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-                    tools::dispatch_doc_search(doc_graph, pattern, depth)
+                    let rerank = tools::rerank_from_args(&args);
+                    tools::dispatch_doc_search(doc_graph, pattern, depth, rerank)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))
                         .map(|text| ToolOutput::Text {
@@ -360,7 +361,8 @@ impl CodegraphServer {
                         )
                     })?;
                     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                    tools::dispatch_doc_search_value(doc_graph, query, limit)
+                    let rerank = tools::rerank_from_args(&args);
+                    tools::dispatch_doc_search_value(doc_graph, query, limit, rerank)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))
                         .map(|text| ToolOutput::Text {
@@ -432,7 +434,8 @@ impl CodegraphServer {
                             })?;
                     let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
                     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                    tools::dispatch_doc_search_struct(doc_graph, pattern, depth, limit)
+                    let rerank = tools::rerank_from_args(&args);
+                    tools::dispatch_doc_search_struct(doc_graph, pattern, depth, limit, rerank)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))
                         .map(|text| ToolOutput::Text {
