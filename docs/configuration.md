@@ -220,3 +220,4 @@ Rules in `[[effect_rules]]` are applied **before** built-in effect defaults
 - [Semantic Search](semantic-search.md) — Embedding setup, models, sqlite-vss, CoreML
 - [Architecture](architecture.md) — How config maps to pipeline
 - [README](../README.md) — Quick start
+- [CodeSmell Linter](codesmell.md) — `.codesmell/policy.toml` conventions

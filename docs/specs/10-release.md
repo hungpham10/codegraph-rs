@@ -1,77 +1,58 @@
-# Spec 10 — Release pipeline (GitHub Actions)
+# Spec 10 — Release, packaging & CI
 
-**État**: pending
+**Status**: ✅ done (evolved) — CI in `.github/workflows/`, packaging in
+`scripts/` + `packaging/aur`.
 
-## Objectif
+## CI (`ci.yml`)
 
-Builds reproductibles cross-platform + GitHub Releases avec binaires attachés. `cargo install codegraph` fonctionne en parallèle.
+Triggers: push to `main`, PRs, manual. `RUSTFLAGS: -D warnings`.
 
-## Cibles
+- **clippy** — `cargo clippy --workspace --all-targets -- -D warnings` +
+  a feature matrix run (`codegraph-graph` with postgres/mysql/redis).
+- **test** — `cargo test --workspace --no-fail-fast` under coverage
+  instrumentation (`grcov` → lcov → Codecov), plus ignored storage
+  integration tests against real services (redis, postgres, mysql containers
+  with schemas from `sql/`).
+- **slim** — verifies `cargo build -p codegraph --no-default-features`
+  compiles without the `rdbms` wiring.
 
-| OS | Target triple | Runner |
-|---|---|---|
-| Linux x86_64 | `x86_64-unknown-linux-gnu` | ubuntu-latest |
-| Linux x86_64 musl | `x86_64-unknown-linux-musl` | ubuntu-latest (cross) |
-| Linux aarch64 | `aarch64-unknown-linux-gnu` | ubuntu-latest (cross) |
-| macOS x86_64 | `x86_64-apple-darwin` | macos-13 |
-| macOS aarch64 | `aarch64-apple-darwin` | macos-latest |
-| Windows x86_64 | `x86_64-pc-windows-msvc` | windows-latest |
+The workspace's newer crates (`codesmell`) are covered automatically as
+workspace members.
 
-Linux musl = bin statique zéro dep glibc → recommandé pour `curl | sh` install.
+## Distribution
 
-## Workflow `.github/workflows/release.yml`
+- GitHub Releases with per-platform archives (Linux x86_64 musl + aarch64,
+  macOS x86_64 + arm64, Windows x86_64) — see the README install matrix.
+- `scripts/install.sh` (curl | sh → `~/.local/bin`, override with
+  `CODEGRAPH_INSTALL_DIR`) and `scripts/install.ps1` (Windows).
+- Arch Linux AUR package (`packaging/aur`, `codegraph-rs-bin`).
+- From source: `cargo build --release -p codegraph` or
+  `cargo install --git … codegraph`.
 
-Déclencheur: `push: tags: ['v*']`.
+## Binary size & features
 
-Steps:
-1. Checkout.
-2. `actions/cache` sur `~/.cargo`, `target/`.
-3. Setup rust stable + target triple.
-4. `cargo build --release --target $TRIPLE -p codegraph`.
-5. Strip + UPX (optionnel — UPX casse macOS signing, à valider).
-6. Archive: `tar.gz` Linux/macOS, `zip` Windows.
-7. Checksums SHA256 par archive.
-8. `gh release create $TAG --notes-file CHANGELOG_EXTRACT.md` (extract section `## [X.Y.Z]`).
-9. `gh release upload` toutes les archives + `.sha256`.
+Reality vs the original "<15 MB" target: ~**58 MB** stripped with **every**
+backend bundled (SQLite, LMDB, Redis, Postgres/MySQL drivers, ONNX embedding
+runtime) — accepted in exchange for a single zero-setup binary. The
+`release-small` profile (`opt-level="z"`) remains for constrained targets.
 
-## CI hors release `.github/workflows/ci.yml`
+Feature flags (see README "Development" for the full list): `rdbms` (default
+on the binary), `fastembed` (embed CLI + backend), `apple-accel` (macOS
+CoreML), per-language `lang-*` on `codegraph-extract`.
 
-- Push/PR: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- Matrix: Linux + macOS + Windows.
-- Bench (optionnel): `cargo bench` sur Linux, comparaison vs baseline stockée.
+## crates.io (when publishing)
 
-## Install script
+Manual `cargo publish` in dependency order — the original order referenced
+crates that no longer exist; the current one is:
 
-`scripts/install.sh`:
-```sh
-#!/bin/sh
-# detect OS+arch, download from GH Releases latest, verify sha256, install to ~/.local/bin
-```
+1. `codegraph-core`
+2. `codegraph-extract` · `codegraph-graph` (extract depends on graph)
+3. `codegraph-context` · `codegraph-sboxes` · `codegraph-api`
+4. `codegraph-mcp` · `codegraph-installer`
+5. `codesmell` (depends on core/extract/graph)
+6. `codegraph` (binary — users install this)
 
-Equivalent `install.ps1` pour Windows.
+## Deviations from the original spec
 
-## crates.io
-
-`cargo publish` manuel (pas dans CI) pour éviter publish accidentel. Publier dans l'ordre des deps:
-1. codegraph-core
-2. codegraph-db
-3. codegraph-extract, codegraph-resolve, codegraph-graph
-4. codegraph-context
-5. codegraph-mcp, codegraph-installer
-6. codegraph (binaire — utilisateurs feront `cargo install codegraph`)
-
-## Tailles cibles
-
-- Bin Linux x86_64 stripped + LTO: viser **<15MB**.
-- Si dépasse: profil `release-small` ou retirer langages exotiques (Lua/Scala/Swift via feature flags off).
-
-## Tests
-
-- Job `release-smoke`: après build, run `codegraph --version`, `codegraph init -i` sur fixture, assert exit=0.
-
-## Pièges
-
-- macOS notarization: hors scope MVP, signature ad-hoc OK.
-- musl + rusqlite bundled: vérifier que `cc` est statique (devrait être OK avec bundled).
-- Windows: `\r\n` dans archives — utiliser `7z` propre, pas `tar` GNU sur Win.
-- CHANGELOG.md: réutiliser format archive (sections Added/Changed/Fixed) pour script d'extraction notes.
+- musl is built via cross in CI; UPX was dropped (breaks macOS signing).
+- No CHANGELOG auto-extraction job; release notes are written manually.

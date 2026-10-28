@@ -1,67 +1,44 @@
 # Spec 09 — CLI + file watcher
 
-**État**: pending (squelette CLI fait)
+**Status**: ✅ done — implemented in `crates/codegraph`
+(`src/main.rs`, `src/watcher.rs`).
 
-## Objectif
+## Goal
 
-Binaire `codegraph` final qui orchestre tout. Watcher live pour sync auto.
+A deliberately minimal binary: workspace lifecycle + serving. All reading
+and querying goes through MCP tools — the CLI intentionally has no
+query/context/status subcommands.
 
-## Sous-commandes
+## Subcommands
 
-| Cmd | Action |
+| Command | What it does |
 |---|---|
-| `codegraph` (no arg) | → `install` interactif |
-| `install` | installer multi-agent (spec 08) |
-| `init [-i/--index]` | crée `.codegraph/` + DB; `-i` lance indexation après |
-| `uninit` | supprime `.codegraph/` après confirmation |
-| `index` | full reindex |
-| `sync` | incremental: rescan fichiers modifiés (compare mtime+sha256) |
-| `status` | size DB, count nodes/edges/files, backend SQLite, dernière indexation |
-| `query <q>` | search FTS, sortie tableau |
-| `files [path]` | liste fichiers indexés sous path |
-| `context <target>` | build markdown context, stdout |
-| `affected <node>` | impact radius, stdout |
-| `serve --mcp` | run MCP server stdio (spec 07) |
-| `watch` | run file watcher en foreground (debug) |
+| `codegraph init [--no-index]` | Create `.codegraph/` (idempotent; preserves an existing `config.toml`), self-heal `repo_id` for RDBMS backends, full re-index unless `--no-index`. Live progress bar by default (`--no-progress` to disable) |
+| `codegraph deinit` | Remove `.codegraph/` |
+| `codegraph embed [--model <m>] [--cache-dir <dir>]` | Pre-download the embedding model into the global cache (needs `fastembed` feature; default `bge-small-en-v1.5`) |
+| `codegraph serve --mcp [--http …]` | Run the MCP server — stdio, or Streamable HTTP with `--addr` / `--allow-host` / `--allow-any-host` / `--api-key` / `--enable-observability` / `--format` (spec 07, [docs/mcp.md](../mcp.md)) |
+| `codegraph install` | Multi-agent client installer (spec 08) |
 
-## Watcher
+Global `--path <dir>` overrides the workspace root (default cwd).
 
-- Crate `notify` + `notify-debouncer-full` (debounce ~500ms).
-- Démarré automatiquement quand `serve --mcp` tourne — réindex live pendant que l'agent code.
-- Filtre: même `ignore::WalkBuilder` qu'à l'index pour rejeter événements sur fichiers ignorés.
-- Sur event:
-  - Create/Modify → enqueue `sync_file(path)`.
-  - Delete → `db.delete_file_cascade`.
-  - Rename → delete old + sync new.
-- Worker tokio task dédié.
+## File watcher
 
-## Output
+- Spawned by `serve` when the startup root is initialized **and** the
+  backend has a local DSN (sqlite/lmdb/redis). `memory` and Postgres/MySQL
+  get no watcher.
+- `notify` + `notify-debouncer-full`, 500 ms debounce, recursive on the root.
+- Ignores events under `.codegraph/`, `.git/`, and paths matched by the
+  repo's `.gitignore` (note: it does not consult `.codegraphignore`).
+- Any relevant event triggers a **full re-index** (`GraphIndex::open(dsn)` →
+  `ingest`) — there is no incremental mode by design; simplicity over stale
+  state. `SharedGraphIndex::ensure_fresh()` picks the new version up on the
+  next query.
 
-- `--json` global flag → toutes les commandes sortent JSON au lieu de texte humain.
-- Couleurs via `anstream` (auto-detect TTY).
-- Progress bar via `indicatif` pour `index` / `sync` long.
+## Deviations from the original spec
 
-## .codegraph layout
-
-```
-.codegraph/
-  db.sqlite        // schéma v1
-  config.toml      // ignore patterns custom, lang overrides
-  .gitignore       // contient "*" (jamais commité)
-  version          // texte: version du binaire ayant créé le dossier
-```
-
-## CLAUDE.md detection (existant archive)
-
-`init` détecte si project a CLAUDE.md / AGENTS.md / `.cursor/rules/` → propose `codegraph install` à la suite.
-
-## Tests
-
-- Smoke test: `init -i` sur fixture, `status` montre N nodes > 0, `query foo` répond.
-- Watcher test: créer fichier dans tempdir, attendre debounce, assert node apparaît dans DB.
-
-## Pièges
-
-- `tracing` doit écrire stderr — `serve --mcp` corrompt le protocole sinon.
-- Lockfile concurrent: `.codegraph/db.sqlite.lock` (advisory `fs2::FileExt::try_lock_exclusive`) pour bloquer `index` + `serve --mcp` simultanés sur le même writer.
-- Signal handling: SIGINT pendant index → flush transaction en cours puis exit clean.
+- `sync`, `status`, `query`, `files`, `context`, `affected`, `watch`
+  subcommands were cut — the MCP tools cover all of them, and `status` lives
+  at `codegraph_status`.
+- `init -i` became the inverse: indexing is the default, `--no-index` opts
+  out.
+- No per-event create/modify/delete handling — debounce then full re-index.

@@ -1,91 +1,57 @@
-# Spec 06 — Graph traversal + context builder
+# Spec 06 — GraphIndex, GraphApi & context builder
 
-**État**: pending
+**Status**: ✅ done — implemented in `crates/codegraph-graph`
+(`GraphIndex`, `SharedGraphIndex`, `diff.rs`), `crates/codegraph-api`
+(`GraphApi`), `crates/codegraph-context`.
 
-## Objectif
+## GraphIndex
 
-Requêtes graphe haut niveau pour MCP/CLI: callers, callees, impact radius. Builder qui compose tout en markdown/json pour l'agent.
+The main index: an in-memory registry (source of truth) over pluggable
+storage (spec 03), plus two search engines:
 
-## Crate `codegraph-graph`
+- **Chain engine** `Search<u64>` — radix over call chains; callers are found
+  by substring-searching `[callee_id]` across chains (KMP + optional bloom
+  filters), not by BFS over a stored edge table.
+- **Name engine** `Search<u8>` — radix over lowercase symbol names for
+  contains/prefix/suffix/exact.
 
-```rust
-pub struct Traversal<'a> { db: &'a Db }
+Public query surface (sync unless noted):
 
-impl<'a> Traversal<'a> {
-    pub fn callers(&self, node: NodeId, depth: u32) -> Result<Vec<CallerHit>>;
-    pub fn callees(&self, node: NodeId, depth: u32) -> Result<Vec<CalleeHit>>;
-    pub fn impact_radius(&self, node: NodeId, max_depth: u32) -> Result<ImpactReport>;
-    pub fn path(&self, from: NodeId, to: NodeId, max_depth: u32) -> Result<Option<Vec<NodeId>>>;
-}
-```
+| Method | Notes |
+|---|---|
+| `symbol_by_id` / `resolve_by_name_or_id` | id-first; duplicate names → `ambiguous` + matches |
+| `callers(id, depth)` (async) / `callees(id)` (async) | transitive BFS on the chain engine / direct chain read |
+| `flow(id)` (async) | chain + rendered descriptions + call sites |
+| `search_flow(pattern)` (async) | functions whose chain contains ids/markers |
+| `callers_by_call_name(query, limit)` (async) | call-name index, includes unresolved calls |
+| `function_scope(id)` | parameters + locals via `scope_index` |
+| `members_of` / `list_methods_of_class` / `get_class_info` | class structure |
+| `list_symbols_by_kind` / `search_by_annotation` (+ `_resumable` variants) | paginated, deadline-aware |
+| `files()` / `dependencies_report()` / `stats()` | topology + health |
+| `diff_assess(&ParsedDiff, root)` (async) | unified diff → read-only `DiffReport` (touched symbols, affected flows with marker windows, transitive callers) — the engine behind `codegraph_diff` |
 
-- BFS avec `VecDeque<(NodeId, u32 depth)>`, set visited `HashSet<NodeId>`.
-- Edge kind filter: callers/callees → `calls`; impact → `calls|references|imports|extends|implements`.
-- Limite dure: 5000 visités, retourne `Truncated` flag.
+`SharedGraphIndex` (Arc + RwLock) adds `ensure_fresh()`: probes the storage
+version and rebuilds when the index was re-written (watcher / another
+process).
 
-`ImpactReport`:
-```rust
-pub struct ImpactReport {
-    pub root: Node,
-    pub direct: Vec<Node>,         // depth 1
-    pub transitive: Vec<Node>,     // depth 2..=max
-    pub by_kind: HashMap<NodeKind, u32>,
-    pub truncated: bool,
-}
-```
+## GraphApi (`crates/codegraph-api`)
 
-## Crate `codegraph-context`
+Async facade over `Arc<SharedGraphIndex>` — every method ensures freshness
+then delegates. Adds pagination (`Pagination`), resumable searches with
+server-side cursors (`SearchSessionStore`, `SearchCursor` +
+`SearchCursorPhase`) and the timeout/resume protocol surfaced by the MCP
+tools, plus `context_markdown` (delegating to codegraph-context).
 
-Compose les briques pour répondre "give me context for X" — analogue à `codegraph_context` MCP tool.
+## codegraph-context
 
-```rust
-pub enum Format { Markdown, Json }
-
-pub struct ContextRequest {
-    pub query: String,            // symbol name OR free-text topic
-    pub depth: u32,
-    pub include_source: bool,
-    pub format: Format,
-}
-
-pub fn build(db: &Db, req: &ContextRequest) -> Result<String>;
-```
-
-Algorithme (port du `archive/src/context/`):
-1. `search_nodes(query)` → top N candidates par FTS rank.
-2. Pour chaque candidate: charge node, callers (d=1), callees (d=1), file siblings.
-3. Si `include_source`: charge slice `start_line..=end_line` depuis disque (cache LRU sur fichier).
-4. Sérialise selon Format.
-
-## Format markdown
-
-```
-## `getName` — function — src/foo.ts:42
-
-```ts
-<signature ou source>
-```
-
-**Callers** (3):
-- `processUser` — src/users.ts:118 (calls)
-- ...
-
-**Callees** (2):
-- `formatString` — src/utils.ts:5 (calls)
-- ...
-```
-
-## Format json
-
-Structure tagged identique surface MCP `codegraph_context` archive — agents prompts existants compatibles.
+Composes the "give me context for X" answer used by `codegraph_context`:
+search candidates → for each, the symbol + direct callers + direct callees +
+optional on-disk source slice → markdown serialization. Token-lean by design.
 
 ## Tests
 
-- Fixture: 4 fichiers TS avec chaîne d'appels `A → B → C → D`.
-- Assert: `callers(D, depth=3)` retourne A,B,C.
-- Assert: `impact_radius(A, max=2).by_kind` count exact.
-
-## Pièges
-
-- Charger source à la demande → IO sur traversal large; cache file→string LRU 32 entrées suffit.
-- Tronquage profondeur: documenter le flag dans la sortie markdown ("⚠ truncated at depth 5").
+`crates/codegraph-api/tests/api.rs` seeds a synthetic graph via
+`GraphIndex::open(tempfile)` + hand-built `ParseResult`s (symbols, chains,
+call records) and exercises the whole query surface including resume
+round-trips with `TIMEOUT_EXPIRE_IMMEDIATELY`; `codegraph-graph` keeps
+inline unit tests for engines and ingest invariants.

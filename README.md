@@ -54,6 +54,27 @@ The agent binds the workspace with `codegraph_init {"path": ...}` and gets tools
 
 → [Full comparison with decision matrix](docs/comparison.md)
 
+## 🧹 CodeSmell — convention linter for LLM agents
+
+The workspace also ships [`codesmell`](docs/codesmell.md), a team-convention
+linter built on CodeGraph facts. LLM agents read the conventions pack before
+writing code and fix every reported violation afterwards — each violation
+carries a `fix_hint`, so the agent repairs code instead of guessing:
+
+```bash
+codesmell init                        # write .codesmell/policy.toml
+codesmell guide                       # conventions pack for the LLM / team
+codesmell check                       # lint the repo (style, architecture, testing)
+git diff | codesmell check --diff -   # change-aware validation
+codesmell coverage                    # test-coverage estimate + threshold
+```
+
+Policies cover function size/parameter/nesting limits, naming conventions
+(`*Service`, `Async` suffix), layer boundaries (`controller !-> repository`,
+severity `blocking`), and required unit tests for changed business logic
+(severity `required`), with per-area `[[override]]` scopes. See
+[docs/codesmell.md](docs/codesmell.md) for the full policy schema.
+
 ## 📄 Supported Formats
 
 CodeGraph supports parsing both **source code** (via tree-sitter) and **configuration/document** files:
@@ -85,6 +106,8 @@ Document files can be ingested into a **document graph** and queried via:
 - **Full re-index always** — watcher debounces changes, re-indexes completely (simpler, no stale state)
 
 ## 📦 Install
+
+Read the [server instructions](docs/codegraph.md) that ship with the binary — they tell your agent when to reach for which tool.
 
 **Automatic (recommended)**
 
@@ -145,6 +168,8 @@ binaries → radare2 (r2pipe) ──┘
 | Storage Backends | `docs/storage-backends.md` |
 | Semantic Search | `docs/semantic-search.md` |
 | Binary Analysis (radare2) | `docs/binary-analysis.md` |
+| CodeSmell Linter | `docs/codesmell.md` |
+| CodeSmell Coverage | `docs/codesmell-coverage.md` |
 | Why Rust (Rewrite Story) | `docs/why-rust.md` |
 | Development Guide | `docs/development.md` |
 

@@ -1,26 +1,52 @@
-# Spec 01 — Bootstrap workspace
+# Spec 01 — Workspace bootstrap
 
-**État**: ✅ done
+**Status**: ✅ done — describes the shipped workspace.
 
-## Objectif
+## Goal
 
-Workspace Cargo compilable avec les 9 crates squelettes. Aucun comportement, juste structure.
+A Cargo workspace holding every CodeGraph component, with shared dependency
+versions and release profiles centralized.
 
-## Livré
+## Workspace layout (11 crates)
 
-- `/Cargo.toml`: workspace resolver=2, `[workspace.package]` (version, edition, license, repo), `[workspace.dependencies]` centralisées (serde, rusqlite, tree-sitter + 15 grammaires, clap, tokio, notify, ignore, rayon, dirs, jsonc-parser, toml_edit).
-- Profils:
-  - `release`: `lto="fat"`, `codegen-units=1`, `strip="symbols"`, `panic="abort"`.
-  - `release-small`: hérite + `opt-level="z"`.
-- `rust-toolchain.toml`: channel stable + rustfmt + clippy.
-- `.gitignore`: `/target`, `.codegraph/`, IDE noise.
-- 9 crates avec `Cargo.toml` + `src/lib.rs` (ou `main.rs` pour le binaire) commenté TODO.
+```
+crates/
+  codegraph-core/       Error + semgraph model (Symbol, SymbolKind, chains, markers, EffectType)
+  codegraph-extract/    tree-sitter extractors (14 langs, feature-gated) + walker + Orchestrator
+  codegraph-graph/      GraphIndex: registry + chain/name engines + pluggable storage + embeddings
+  codegraph-context/    Markdown context composition (symbol + callers + callees + source)
+  codegraph-api/        GraphApi — async query facade over SharedGraphIndex
+  codegraph-sboxes/     Behavior sandbox: Cranelift JIT + Rhai mock runtime
+  codegraph-mcp/        MCP server (rmcp SDK, stdio + Streamable HTTP), 27 tools
+  codegraph-bench/      Criterion benches (search, storage, pipeline) + CodSpeed
+  codegraph-installer/  Multi-agent client installer (Claude Code, Cursor, Codex, opencode)
+  codegraph/            CLI binary (init/deinit/embed/serve) + file watcher
+  codesmell/            Team-convention linter consuming CodeGraph facts (lib + CLI)
+```
+
+## Conventions
+
+- Root `Cargo.toml`: `resolver = 2`, `[workspace.package]` (version, edition
+  2021, license, repository), `[workspace.dependencies]` centralizing serde,
+  tree-sitter + grammars, clap, tokio, notify, ignore, rayon, camino, axum,
+  rmcp, globset, etc. Crates reference them via `version.workspace = true` /
+  `{ workspace = true }`.
+- Profiles: `release` = `lto="fat"`, `codegen-units=1`, `strip="symbols"`,
+  `panic="abort"`; `release-small` inherits with `opt-level="z"`.
+- `rust-toolchain.toml`: stable + rustfmt + clippy. MSRV 1.80 workspace-wide;
+  `codegraph-graph` overrides to edition 2024 (needs ≥ 1.85).
+- `.gitignore` keeps `/target` and `.codegraph/` out of VCS.
 
 ## Validation
 
-`cargo check --workspace` finit sans erreur (~6s clean rebuild).
+CI (`ci.yml`) runs `cargo clippy --workspace --all-targets -- -D warnings`
+(with `RUSTFLAGS: -D warnings`), `cargo test --workspace` with coverage, and a
+slim no-default-features build check.
 
-## Notes
+## Historical note
 
-- Versions tree-sitter grammars: `swift=0.7`, `scala=0.26`, `lua=0.5`, `kotlin=0.3`, le reste `0.23`. Certaines crates communautaires lèveraient des conflits — surveiller à l'ajout d'une grammaire neuve.
-- Crate principal `codegraph` (binaire) — `Cargo.toml` workspace dir `crates/codegraph`. Nom du paquet sur crates.io reste `codegraph`.
+The original plan had 9 crates including `codegraph-db` and
+`codegraph-resolve`; both were folded away — storage moved into
+`codegraph-graph` behind a `Storage` trait (spec 03), and resolution became an
+ingest phase of `GraphIndex` (spec 05). `codegraph-api`, `codegraph-sboxes`
+and `codesmell` (spec 11) were added later.

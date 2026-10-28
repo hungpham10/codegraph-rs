@@ -1399,7 +1399,7 @@ fn normalize_response(value: &mut Value, root: &str, detail: DetailLevel, style:
 }
 
 /// Symbol JSON theo `detail` + `style`. `Minimal` (mặc định) → mảng vị trí cố
-/// định (order được document trong server-instructions.md; file đã relativize
+/// định (order được document trong docs/codegraph.md; file đã relativize
 /// theo root — relativize_paths chỉ chạm object key, không chạm phần tử mảng);
 /// `Medium` → object giữ key (field default bị lược trong formatter chung).
 fn symbol_json(root: &str, s: &Symbol, detail: DetailLevel, style: OutputStyle) -> Value {
