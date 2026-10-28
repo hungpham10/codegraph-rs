@@ -1,4 +1,5 @@
-//! Rerank candidate symbol bằng Jev (TypeSafe SystemOne).
+//! Rerank candidate bằng Jev (TypeSafe SystemOne) — dùng chung cho context,
+//! symbol search và document search.
 //!
 //! Jev không phải chat model: nó nhận `state` + `questions` trả về
 //! `probabilities`. Ở đây một request gồm:
@@ -14,57 +15,81 @@
 //! mình luôn tự tin kể cả với danh sách vô nghĩa (đo được: 8 candidate rác →
 //! `confidence = 1.0`).
 //!
-//! Mọi lỗi (timeout, 4xx, JSON lạ, thiếu token) đều trả `Err` để caller
-//! **fail-open**: giữ nguyên hành vi cũ, không làm hỏng `codegraph_context`.
+//! Mọi lỗi (timeout, 4xx, JSON lạ, thiếu token) đều trả `used = false` để
+//! caller **fail-open**: giữ nguyên thứ tự cũ, không làm hỏng tool.
 
-use crate::rel_path;
 use async_trait::async_trait;
-use codegraph_core::{Error, JevConfig, Result, Symbol, SymbolKind, NONE_OPTION};
+use codegraph_core::{Error, JevConfig, Result, Symbol, NONE_OPTION};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Một ứng viên gửi cho Jev — chỉ giữ những gì model cần để phân biệt.
+/// Một ứng viên gửi cho Jev — mọi nguồn (symbol, doc node) quy về đây.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
     pub id: u64,
-    pub name: String,
-    pub kind: SymbolKind,
-    /// Đường dẫn tương đối (đã strip workspace root) — tiết kiệm token.
-    pub file: String,
-    pub line: u32,
-    pub signature: Option<String>,
+    /// Dòng mô tả chính: kind + tên/khoá + vị trí (file:line hoặc doc path).
+    pub label: String,
+    /// Chi tiết thêm: signature (code) hoặc value (doc) — có thể đã bị cắt.
+    pub detail: Option<String>,
 }
 
 impl Candidate {
-    /// Dựng từ symbol, strip `strip` khỏi `file` như markdown hiển thị.
-    pub fn from_symbol(s: &Symbol, strip: Option<&str>) -> Self {
+    /// Candidate từ symbol code.
+    pub fn symbol(s: &Symbol, strip: Option<&str>) -> Self {
+        let sig = s
+            .signature
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         Self {
             id: s.id,
-            name: s.name.clone(),
-            kind: s.kind,
-            file: rel_path(&s.file, strip).to_string(),
-            line: s.line,
-            signature: s.signature.clone(),
+            label: format!(
+                "{} `{}` in `{}:{}`",
+                s.kind.as_str(),
+                s.name,
+                crate::rel_path(&s.file, strip),
+                s.line
+            ),
+            detail: sig,
+        }
+    }
+
+    /// Candidate từ doc node.
+    ///
+    /// `value` chỉ được đưa vào `detail` khi `cfg.doc_include_values = true`:
+    /// value giúp chọn đúng key (`spec.replicas` xuất hiện ở nhiều file) nhưng
+    /// tốn token theo số candidate, nên là opt-in.
+    pub fn doc(
+        id: u64,
+        key_path: &str,
+        doc_path: &str,
+        kind: &str,
+        value: Option<&str>,
+        cfg: &JevConfig,
+    ) -> Self {
+        let detail = if cfg.doc_include_values {
+            value
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(|v| truncate_chars(v, cfg.doc_value_chars))
+        } else {
+            None
+        };
+        Self {
+            id,
+            label: format!("{kind} `{key_path}` in `{doc_path}`"),
+            detail,
         }
     }
 
     /// Dòng mô tả đưa vào `criteria` của Choice.
     fn describe(&self) -> String {
-        let sig = self
-            .signature
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| format!(" — {s}"))
-            .unwrap_or_default();
-        format!(
-            "{} `{}` in `{}:{}`{sig}",
-            self.kind.as_str(),
-            self.name,
-            self.file,
-            self.line
-        )
+        match &self.detail {
+            Some(d) => format!("{} — {d}", self.label),
+            None => self.label.clone(),
+        }
     }
 
     /// Key option trong request/response — `s<id>` để không phụ thuộc tên.
@@ -73,14 +98,65 @@ impl Candidate {
     }
 }
 
-/// Kết quả rerank.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Verdict {
-    /// `(symbol_id, probability)` đã sort giảm dần và **đã lọc** dưới ngưỡng.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// Trạng thái rerank — trả về cho client biết vì sao kết quả trông cũ.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankInfo {
+    /// Jev có thực sự quyết định thứ tự không.
+    pub used: bool,
+    /// Lý do khi `used = false` (tắt, thiếu token, timeout...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Kết quả một lần rerank, đã fail-open.
+#[derive(Debug, Clone)]
+pub struct RankOutcome {
+    pub used: bool,
+    pub reason: Option<String>,
+    /// `(id, probability)` sort giảm dần. Rỗng khi `used = false`.
     pub ranking: Vec<(u64, f32)>,
-    /// Không có symbol nào đủ liên quan — caller trả `hits: []`.
     pub no_match: bool,
     /// `confidence` của Choice (0–1) — chỉ để log, không dùng để quyết định.
+    pub confidence: Option<f32>,
+}
+
+impl RankOutcome {
+    /// Không rerank được — caller giữ thứ tự cũ.
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            used: false,
+            reason: Some(reason.into()),
+            ranking: Vec::new(),
+            no_match: false,
+            confidence: None,
+        }
+    }
+
+    /// `RerankInfo` để nhét vào response.
+    pub fn info(&self) -> RerankInfo {
+        RerankInfo {
+            used: self.used,
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+/// Kết quả rerank thô từ model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verdict {
+    /// `(id, probability)` đã sort giảm dần.
+    pub ranking: Vec<(u64, f32)>,
+    /// Không candidate nào đủ liên quan.
+    pub no_match: bool,
     pub confidence: Option<f32>,
     /// Xác suất của option "không có cái nào".
     pub none_probability: f32,
@@ -89,19 +165,19 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    /// Verdict "không khớp" — dùng khi không gọi được API hoặc pool quá nhỏ.
-    pub fn no_match(reason: f32) -> Self {
+    /// Verdict "không khớp" — dùng khi pool rỗng.
+    pub fn no_match(fits: f32) -> Self {
         Self {
             ranking: Vec::new(),
             no_match: true,
             confidence: None,
             none_probability: 1.0,
-            fits: reason,
+            fits,
         }
     }
 }
 
-/// Bộ chọn symbol — tách trait để test không cần mạng.
+/// Bộ chọn candidate — tách trait để test không cần mạng.
 // `async_trait` sinh `#[must_use]` trên boxed future, trùng với `#[must_use]`
 // của `Result` → clippy `double_must_use`. Không phải vấn đề thật.
 #[allow(clippy::double_must_use)]
@@ -114,6 +190,53 @@ pub trait Judge: Send + Sync {
         repo: Option<&str>,
         candidates: &[Candidate],
     ) -> Result<Verdict>;
+}
+
+/// Chạy rerank với fail-open: dùng `judge` được truyền (test) hoặc tự dựng
+/// [`JevJudge`] từ config global. Mọi lỗi → `used = false` + `reason`.
+pub async fn rank(
+    query: &str,
+    repo: Option<&str>,
+    candidates: &[Candidate],
+    cfg: &JevConfig,
+    judge: Option<&dyn Judge>,
+) -> RankOutcome {
+    if candidates.is_empty() {
+        return RankOutcome::unavailable("pool rỗng — không có gì để chọn");
+    }
+    let owned;
+    let judge: &dyn Judge = match judge {
+        Some(j) => j,
+        None if cfg.is_ready() => {
+            owned = JevJudge::new(cfg.clone());
+            &owned
+        }
+        None => {
+            return RankOutcome::unavailable(format!(
+                "jev không sẵn sàng (enabled={}, env `{}` {})",
+                cfg.enabled,
+                cfg.api_key_env,
+                if cfg.api_key().is_some() {
+                    "có"
+                } else {
+                    "thiếu"
+                }
+            ));
+        }
+    };
+    match judge.rank(query, repo, candidates).await {
+        Ok(v) => RankOutcome {
+            used: true,
+            reason: None,
+            ranking: v.ranking,
+            no_match: v.no_match,
+            confidence: v.confidence,
+        },
+        Err(err) => {
+            tracing::warn!(error = %err, "Jev rerank thất bại — fail-open");
+            RankOutcome::unavailable(format!("jev lỗi: {err}"))
+        }
+    }
 }
 
 /// `Judge` gọi Jev qua HTTP.
@@ -182,8 +305,8 @@ fn build_state(query: &str, repo: Option<&str>) -> String {
 
 /// Map response → Verdict. Tách khỏi HTTP để test được bằng JSON tĩnh.
 fn verdict_from_reply(raw: &str, candidates: &[Candidate], cfg: &JevConfig) -> Result<Verdict> {
-    let reply: Reply = serde_json::from_str(raw)
-        .map_err(|e| Error::Other(format!("Jev trả JSON không hợp lệ: {e}")))?;
+    let reply: Reply =
+        serde_json::from_str(raw).map_err(|e| Error::Other(format!("Jev trả JSON lỗi: {e}")))?;
     let best = reply
         .answers
         .get("best_symbol")
@@ -300,11 +423,8 @@ mod tests {
     fn cand(id: u64, name: &str) -> Candidate {
         Candidate {
             id,
-            name: name.into(),
-            kind: SymbolKind::Function,
-            file: "src/lib.rs".into(),
-            line: 10,
-            signature: Some(format!("fn {name}()")),
+            label: format!("function `{name}` in `src/lib.rs:10`"),
+            detail: Some(format!("fn {name}()")),
         }
     }
 
@@ -317,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn verdict_sort_và_lọc_ngưỡng() {
+    fn verdict_sort_theo_xác_suất() {
         let cands = vec![cand(1, "alpha"), cand(2, "beta"), cand(3, "gamma")];
         let raw = r#"{"answers":{
             "best_symbol":{"type":"choice","choice":"s2","confidence":0.8,
@@ -397,19 +517,86 @@ mod tests {
     }
 
     #[test]
-    fn describe_gồm_kind_tên_và_vị_trí() {
+    fn symbol_describe_gồm_kind_tên_và_vị_trí() {
         let c = Candidate {
             id: 7,
-            name: "load_config".into(),
-            kind: SymbolKind::Function,
-            file: "crates/a/src/config.rs".into(),
-            line: 42,
-            signature: Some("fn load_config() -> Config".into()),
+            label: "function `load_config` in `crates/a/src/config.rs:42`".into(),
+            detail: Some("fn load_config() -> Config".into()),
         };
         assert_eq!(
             c.describe(),
             "function `load_config` in `crates/a/src/config.rs:42` — fn load_config() -> Config"
         );
         assert_eq!(c.key(), "s7");
+    }
+
+    #[test]
+    fn doc_candidate_không_có_value_khi_tắt() {
+        let cfg = JevConfig::default();
+        let c = Candidate::doc(
+            9,
+            "spec.replicas",
+            "deploy/api.yaml",
+            "Field",
+            Some("3"),
+            &cfg,
+        );
+        assert_eq!(c.label, "Field `spec.replicas` in `deploy/api.yaml`");
+        assert_eq!(c.detail, None, "mặc định không đưa value (tốn token)");
+    }
+
+    #[test]
+    fn doc_candidate_có_value_và_cắt_theo_config() {
+        let cfg = JevConfig {
+            doc_include_values: true,
+            doc_value_chars: 5,
+            ..JevConfig::default()
+        };
+        let c = Candidate::doc(
+            9,
+            "spec.replicas",
+            "deploy/api.yaml",
+            "Field",
+            Some("abcdefghij"),
+            &cfg,
+        );
+        assert_eq!(c.detail.as_deref(), Some("abcde…"));
+        assert_eq!(
+            c.describe(),
+            "Field `spec.replicas` in `deploy/api.yaml` — abcde…"
+        );
+
+        let empty = Candidate::doc(10, "a.b", "x.yaml", "Field", Some("   "), &cfg);
+        assert_eq!(empty.detail, None, "value rỗng → không thêm detail");
+    }
+
+    #[test]
+    fn rank_fail_open_khi_judge_lỗi_hoặc_chưa_ready() {
+        struct Fail;
+        #[async_trait]
+        impl Judge for Fail {
+            async fn rank(&self, _q: &str, _r: Option<&str>, _c: &[Candidate]) -> Result<Verdict> {
+                Err(Error::Other("timeout".into()))
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cands = vec![cand(1, "alpha")];
+        let out = rt.block_on(rank("q", None, &cands, &cfg(), Some(&Fail)));
+        assert!(!out.used);
+        assert!(out.reason.unwrap_or_default().contains("timeout"));
+
+        let mut off = cfg();
+        off.enabled = false;
+        let out = rt.block_on(rank("q", None, &cands, &off, None));
+        assert!(!out.used);
+        assert!(out.reason.unwrap_or_default().contains("enabled=false"));
+
+        let out = rt.block_on(rank("q", None, &[], &cfg(), None));
+        assert!(!out.used);
+        assert!(out.reason.unwrap_or_default().contains("pool rỗng"));
     }
 }

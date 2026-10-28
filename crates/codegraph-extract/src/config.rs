@@ -239,6 +239,12 @@ struct JevSection {
     /// Tên repo trong `state`; rỗng → lấy basename workspace root.
     #[serde(default)]
     repo: Option<String>,
+    /// Đưa value của doc node vào mô tả option khi rerank doc search.
+    #[serde(default)]
+    doc_include_values: Option<bool>,
+    /// Số ký tự tối đa của value đưa vào option.
+    #[serde(default)]
+    doc_value_chars: Option<usize>,
 }
 
 // ── Effect-rule runtime config (MCP `codegraph_config_effects` + GraphQL) ──
@@ -546,6 +552,8 @@ impl ExtractConfig {
                 file.jev.max_candidates,
                 file.jev.min_probability,
                 file.jev.repo.as_deref(),
+                file.jev.doc_include_values,
+                file.jev.doc_value_chars,
             ),
             storage: StorageConfig {
                 kind: file
@@ -1209,6 +1217,8 @@ timeout_ms = 500
 max_candidates = 12
 min_probability = 0.42
 repo = "codegraph-rs"
+doc_include_values = true
+doc_value_chars = 80
 "#,
         );
         let jev = fx.load().jev;
@@ -1217,6 +1227,8 @@ repo = "codegraph-rs"
         assert_eq!(jev.timeout_ms, 500);
         assert_eq!(jev.max_candidates, 12);
         assert!((jev.min_probability - 0.42).abs() < 1e-6);
+        assert!(jev.doc_include_values);
+        assert_eq!(jev.doc_value_chars, 80);
         assert_eq!(jev.repo.as_deref(), Some("codegraph-rs"));
         assert_eq!(
             jev.endpoint,

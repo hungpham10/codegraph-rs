@@ -10,7 +10,7 @@
 
 mod jev;
 
-pub use jev::{Candidate, JevJudge, Judge, Verdict};
+pub use jev::{rank, Candidate, JevJudge, Judge, RankOutcome, RerankInfo, Verdict};
 
 use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
 use codegraph_graph::{Pagination, SharedGraphIndex};
@@ -85,16 +85,6 @@ pub struct MatchScore {
     pub probability: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
-}
-
-/// Trạng thái rerank của lần gọi này — để client biết vì sao kết quả trông cũ.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RerankInfo {
-    /// Jev có thực sự quyết định thứ tự không.
-    pub used: bool,
-    /// Lý do khi `used = false` (tắt, thiếu token, timeout...).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,40 +227,6 @@ async fn order_candidates(
     }
 
     let cfg = codegraph_core::jev_config();
-    let judge_owned;
-    let judge: Option<&dyn Judge> = match judge {
-        Some(j) => Some(j),
-        None if cfg.is_ready() => {
-            judge_owned = JevJudge::new(cfg.clone());
-            Some(&judge_owned)
-        }
-        None => None,
-    };
-    let Some(judge) = judge else {
-        // Tắt hoặc thiếu token: vẫn dùng pool (rộng hơn Contains 1 query) nhưng
-        // không gọi mạng — hành vi gần nhất với "không có Jev".
-        let pool = build_pool(idx, req).await?;
-        let symbols: Vec<Symbol> = pool.into_iter().take(req.limit as usize).collect();
-        return Ok((
-            symbols,
-            HashMap::new(),
-            false,
-            Some(RerankInfo {
-                used: false,
-                reason: Some(format!(
-                    "jev không sẵn sàng (enabled={}, env `{}` {})",
-                    cfg.enabled,
-                    cfg.api_key_env,
-                    if cfg.api_key().is_some() {
-                        "có"
-                    } else {
-                        "thiếu"
-                    }
-                )),
-            }),
-        ));
-    };
-
     let pool = build_pool(idx, req).await?;
     if pool.len() < MIN_POOL {
         return Ok((
@@ -287,62 +243,68 @@ async fn order_candidates(
         ));
     }
 
-    let repo = cfg.repo.as_deref().or_else(|| {
-        req.strip_prefix
-            .as_deref()
-            .and_then(|p| p.trim_end_matches('/').rsplit('/').next())
-            .filter(|s| !s.is_empty())
-    });
+    let repo = cfg
+        .repo
+        .as_deref()
+        .or_else(|| repo_from_path(req.strip_prefix.as_deref()));
     let candidates: Vec<Candidate> = pool
         .iter()
-        .map(|s| Candidate::from_symbol(s, req.strip_prefix.as_deref()))
+        .map(|s| Candidate::symbol(s, req.strip_prefix.as_deref()))
         .collect();
 
-    match judge.rank(&req.query, repo, &candidates).await {
-        Ok(verdict) => {
-            let by_id: HashMap<u64, Symbol> = pool.into_iter().map(|s| (s.id, s)).collect();
-            let mut scores = HashMap::new();
-            let mut symbols = Vec::new();
-            for (id, p) in verdict.ranking {
-                scores.insert(
-                    id,
-                    MatchScore {
-                        probability: p,
-                        confidence: verdict.confidence,
-                    },
-                );
-                if symbols.len() >= req.limit as usize {
-                    continue;
-                }
-                if let Some(sym) = by_id.get(&id) {
-                    symbols.push(sym.clone());
-                }
-            }
-            let no_match = verdict.no_match;
-            Ok((
-                if no_match { Vec::new() } else { symbols },
-                scores,
-                no_match,
-                Some(RerankInfo {
-                    used: true,
-                    reason: None,
-                }),
-            ))
+    let outcome = rank(&req.query, repo, &candidates, cfg, judge).await;
+    Ok(apply_outcome(outcome, pool, req.limit))
+}
+
+/// Basename của workspace root — dùng làm tên repo trong `state` khi `[jev] repo`
+/// không khai báo.
+pub fn repo_from_path(strip_prefix: Option<&str>) -> Option<&str> {
+    strip_prefix
+        .and_then(|p| p.trim_end_matches('/').rsplit('/').next())
+        .filter(|s| !s.is_empty())
+}
+
+/// Áp kết quả rerank lên pool: cắt `limit`, gắn probability, fail-open khi
+/// `outcome.used = false`.
+pub fn apply_outcome(
+    outcome: RankOutcome,
+    pool: Vec<Symbol>,
+    limit: u32,
+) -> (
+    Vec<Symbol>,
+    HashMap<u64, MatchScore>,
+    bool,
+    Option<RerankInfo>,
+) {
+    let limit = limit as usize;
+    if !outcome.used {
+        let symbols: Vec<Symbol> = pool.into_iter().take(limit).collect();
+        return (symbols, HashMap::new(), false, Some(outcome.info()));
+    }
+    let info = outcome.info();
+    let by_id: HashMap<u64, Symbol> = pool.into_iter().map(|s| (s.id, s)).collect();
+    let mut scores = HashMap::new();
+    let mut symbols = Vec::new();
+    for (id, p) in outcome.ranking {
+        scores.insert(
+            id,
+            MatchScore {
+                probability: p,
+                confidence: outcome.confidence,
+            },
+        );
+        if symbols.len() >= limit {
+            continue;
         }
-        Err(err) => {
-            tracing::warn!(error = %err, "Jev rerank thất bại — fail-open về thứ tự pool");
-            let symbols: Vec<Symbol> = pool.into_iter().take(req.limit as usize).collect();
-            Ok((
-                symbols,
-                HashMap::new(),
-                false,
-                Some(RerankInfo {
-                    used: false,
-                    reason: Some(format!("jev lỗi: {err}")),
-                }),
-            ))
+        if let Some(sym) = by_id.get(&id) {
+            symbols.push(sym.clone());
         }
     }
+    if outcome.no_match {
+        symbols.clear();
+        scores.clear();
+    }
+    (symbols, scores, outcome.no_match, Some(info))
 }
 
 /// Pool tối thiểu để gọi Jev — dưới mức này coi như "không có gì để chọn".
@@ -865,7 +827,7 @@ mod tests {
                         .filter_map(|(name, p)| {
                             _candidates
                                 .iter()
-                                .find(|c| c.name == *name)
+                                .find(|c| c.label.contains(&format!("`{name}`")))
                                 .map(|c| (c.id, *p))
                         })
                         .collect(),
