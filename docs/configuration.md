@@ -66,6 +66,17 @@ type = "sqlite"  # "sqlite" | "lmdb" | "redis" | "memory" | "postgres" | "mysql"
 # vss_extension = "~/.cache/codegraph/embeddings/vss"
 # execution_provider = "coreml"       # macOS hardware acceleration
 
+# Jev rerank cho codegraph_context — OFF by default (dữ liệu rời máy khi bật)
+[jev]
+# enabled = true
+# endpoint = "https://opencode.ai/zen/v1/systemone"
+# model = "jev-1.13-free"      # "jev-1.13" = bản trả phí
+# api_key_env = "OPENCODE_API_KEY"   # token CHỈ đọc từ env, không lưu trong file này
+# timeout_ms = 2000            # quá hạn → fail-open về hành vi cũ
+# max_candidates = 40          # số candidate gửi cho Jev
+# min_probability = 0.25       # xác suất tối thiểu của symbol hạng 1
+# repo = ""                    # tên repo trong `state`; rỗng → basename workspace root
+
 # Document graph — ingest structured docs (yaml/json/toml/hcl/nginx/markdown)
 [docgraph]
 # enabled = true          # default: on when `paths` is non-empty
@@ -163,6 +174,43 @@ dsns = [
 - Sharding: `shard = repo_id % len(dsns)`
 - Schema **not auto-applied** — run SQL files from `sql/postgres/` or `sql/mysql/` manually before indexing
 - See `sql/README.md` for full schema and sharding design
+
+### `[jev]`
+
+Bật rerank ngữ nghĩa cho `codegraph_context` bằng **Jev** (TypeSafe SystemOne —
+một *decision model*, không phải chat model).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Opt-in: khi bật, query + tên symbol + đường dẫn file được gửi tới `endpoint` |
+| `endpoint` | `String` | `https://opencode.ai/zen/v1/systemone` | URL đầy đủ của SystemOne endpoint |
+| `model` | `String` | `"jev-1.13-free"` | Model id. `jev-1.13` là bản trả phí (phải tự khai báo) |
+| `api_key_env` | `String` | `"OPENCODE_API_KEY"` | Tên biến môi trường chứa token — **không** đọc key từ config |
+| `timeout_ms` | `u64` | `2000` | Timeout request; quá hạn → fail-open |
+| `max_candidates` | `usize` | `40` | Số candidate tối đa gửi Jev (Choice nhận tối đa 255 options) |
+| `min_probability` | `f32` | `0.25` | Xác suất tối thiểu của symbol **hạng 1** để coi là khớp |
+| `repo` | `String` | unset | Tên repo trong `state`; rỗng → basename của workspace root |
+
+**Behavior**:
+- **Off by default.** Chỉ chạy khi `enabled = true` **và** env `api_key_env` có giá trị.
+- Bật `rerank = "jev"` ở `codegraph_context` (MCP arg / GraphQL field). Response có
+  `match_score.probability` cho từng hit và `no_match` khi không symbol nào đủ liên quan.
+- Candidate pool = query gốc + từng token của query (`Contains`), lọc kind code
+  (function/method/class/interface/enum/module/file) và **loại test/bench**.
+- Pool < 3 candidate → trả `no_match` luôn, không gọi API.
+- **Fail-open** toàn bộ: timeout, 4xx, JSON lỗi, thiếu token → giữ thứ tự cũ, kèm
+  `rerank.used = false` và `reason`.
+- Quyết định "không khớp" dựa trên option `none_of_the_above` thắng xác suất candidate
+  hạng 1 (hoặc hạng 1 dưới `min_probability`). Câu hỏi Noul chỉ để chẩn đoán.
+
+```toml
+[jev]
+enabled = true
+```
+
+```bash
+export OPENCODE_API_KEY="..."
+```
 
 ### `[embedding]`
 

@@ -799,10 +799,12 @@ dependencies = [
 name = "codegraph-context"
 version = "2.2.12"
 dependencies = [
+ "async-trait",
  "camino",
  "codegraph-core",
  "codegraph-graph",
  "codegraph-source",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

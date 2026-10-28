@@ -153,12 +153,13 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         tool(
             "codegraph_context",
-            "Composed context for a symbol or topic (search + callers + callees + optional source).",
+            "Composed context for a symbol or topic (search + callers + callees + optional source). \"rerank\": \"jev\" lets Jev pick the closest symbol from a token-expanded candidate pool and returns a probability per hit plus \"no_match\" when nothing fits (requires `[jev] enabled = true` + token env).",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string" },
                 "depth": { "type": "integer", "default": 1 },
                 "include_source": { "type": "boolean", "default": false },
-                "limit": { "type": "integer", "default": 5 }
+                "limit": { "type": "integer", "default": 5 },
+                "rerank": { "type": "string", "enum": ["none", "jev"], "default": "none", "description": "\"jev\" = semantic rerank via TypeSafe SystemOne (opt-in, fail-open)." }
             }, "required": ["query"] }),
         ),
         tool(
@@ -693,6 +694,11 @@ pub async fn dispatch_with_api(
                 limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as u32,
                 format: Format::Json,
                 strip_prefix: Some(root.as_str().to_string()),
+                rerank: args
+                    .get("rerank")
+                    .and_then(|v| v.as_str())
+                    .and_then(codegraph_context::Rerank::parse)
+                    .unwrap_or(codegraph_context::Rerank::None),
             };
             // `include_source` đọc qua `Source` trait (đường query), root lấy
             // từ session — không còn `std::fs` rải rác trong context builder.

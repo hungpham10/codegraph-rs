@@ -73,6 +73,9 @@ struct ConfigFile {
     /// Embedding backend cho semantic search (fastembed / hashing) + cache model.
     #[serde(default)]
     embedding: EmbeddingSection,
+    /// Rerank `codegraph_context` bằng Jev (TypeSafe SystemOne) — opt-in.
+    #[serde(default)]
+    jev: JevSection,
     /// Document graph — ingest tài liệu cấu trúc lúc `codegraph init`.
     #[serde(default)]
     docgraph: DocGraphSection,
@@ -203,6 +206,39 @@ struct EmbeddingSection {
     /// qua (chạy CPU). Platform khác macOS luôn CPU.
     #[serde(default)]
     execution_provider: Option<String>,
+}
+
+/// Section `[jev]` — rerank `codegraph_context` bằng Jev (TypeSafe SystemOne).
+///
+/// OPT-IN: khi bật, query + tên symbol + đường dẫn file được gửi tới
+/// `endpoint`. Token **không** nằm trong file này — chỉ đọc từ env var
+/// `api_key_env`.
+#[derive(Debug, Default, Deserialize)]
+struct JevSection {
+    /// Bật rerank. Thiếu key → tắt (fail-open về hành vi cũ).
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// URL đầy đủ của SystemOne endpoint.
+    #[serde(default)]
+    endpoint: Option<String>,
+    /// Model id (`jev-1.13-free` mặc định).
+    #[serde(default)]
+    model: Option<String>,
+    /// Tên env var chứa bearer token.
+    #[serde(default)]
+    api_key_env: Option<String>,
+    /// Timeout request (ms) — quá hạn thì fail-open.
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Số candidate tối đa gửi cho Jev.
+    #[serde(default)]
+    max_candidates: Option<usize>,
+    /// Xác suất tối thiểu của symbol hạng 1 để coi là khớp.
+    #[serde(default)]
+    min_probability: Option<f32>,
+    /// Tên repo trong `state`; rỗng → lấy basename workspace root.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 // ── Effect-rule runtime config (MCP `codegraph_config_effects` + GraphQL) ──
@@ -429,6 +465,8 @@ pub struct ExtractConfig {
     pub storage: StorageConfig,
     /// Cấu hình embedding backend (semantic search) — đọc từ `[embedding]`.
     pub embedding: codegraph_graph::embeddings::EmbeddingConfig,
+    /// Cấu hình Jev rerank cho `codegraph_context` — đọc từ `[jev]`.
+    pub jev: codegraph_core::JevConfig,
     /// Cấu hình document graph — đọc từ `[docgraph]`.
     pub docgraph: DocGraphSection,
     /// Cấu hình binary graph — đọc từ `[bingraph]`.
@@ -499,6 +537,16 @@ impl ExtractConfig {
                 file.embedding.vss_extension.as_deref(),
                 file.embedding.execution_provider.as_deref(),
             ),
+            jev: codegraph_core::JevConfig::from_raw(
+                file.jev.enabled,
+                file.jev.endpoint.as_deref(),
+                file.jev.model.as_deref(),
+                file.jev.api_key_env.as_deref(),
+                file.jev.timeout_ms,
+                file.jev.max_candidates,
+                file.jev.min_probability,
+                file.jev.repo.as_deref(),
+            ),
             storage: StorageConfig {
                 kind: file
                     .storage
@@ -551,6 +599,10 @@ impl ExtractConfig {
         // mở index — `GraphIndex::new_with_storage` đọc global này để quyết định
         // có bật vector index hay không (opt-in: chỉ khi backend = "fastembed").
         codegraph_graph::embeddings::set_embedding_config(self.embedding.clone());
+        // Cùng thời điểm: `[jev]` là config toàn cục cho `codegraph-context`
+        // (module context không phụ thuộc `codegraph-extract`, nên truyền qua
+        // global giống embedding).
+        codegraph_core::set_jev_config(self.jev.clone());
         match self.storage.kind {
             StorageKind::Memory => Some(StorageRoute::Memory),
             StorageKind::Postgres | StorageKind::MySql => {
@@ -1138,6 +1190,44 @@ headers = "cpp"
         assert!(!is_cpp_header(
             "#ifndef FOO_H\n#define FOO_H\nstruct foo { int x; };\n#endif\n"
         ));
+    }
+
+    /// `[jev]` parse đủ field; thiếu section → tắt hoàn toàn (opt-in).
+    #[test]
+    fn parse_jev_section() {
+        let fx = CfgFixture::without_config();
+        let cfg = fx.load();
+        assert!(!cfg.jev.enabled, "thiếu [jev] → tắt");
+        assert_eq!(cfg.jev.model, codegraph_core::jev::DEFAULT_MODEL);
+
+        fx.rewrite(
+            r#"
+[jev]
+enabled = true
+model = "jev-1.13"
+timeout_ms = 500
+max_candidates = 12
+min_probability = 0.42
+repo = "codegraph-rs"
+"#,
+        );
+        let jev = fx.load().jev;
+        assert!(jev.enabled);
+        assert_eq!(jev.model, "jev-1.13");
+        assert_eq!(jev.timeout_ms, 500);
+        assert_eq!(jev.max_candidates, 12);
+        assert!((jev.min_probability - 0.42).abs() < 1e-6);
+        assert_eq!(jev.repo.as_deref(), Some("codegraph-rs"));
+        assert_eq!(
+            jev.endpoint,
+            codegraph_core::jev::DEFAULT_ENDPOINT,
+            "không khai báo endpoint → default"
+        );
+        assert_eq!(
+            jev.api_key_env,
+            codegraph_core::jev::DEFAULT_API_KEY_ENV,
+            "token chỉ đọc từ env, không nằm trong config"
+        );
     }
 
     #[test]

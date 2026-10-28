@@ -278,6 +278,7 @@ async fn files_stats_and_context() {
         limit: 5,
         format: codegraph_context::Format::Markdown,
         strip_prefix: None,
+        rerank: codegraph_context::Rerank::None,
     };
     let md = api.context_markdown(&req, None).await.unwrap();
     assert!(md.contains("caller"));
