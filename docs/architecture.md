@@ -7,22 +7,26 @@ This document provides a high‑level overview of CodeGraph's internal structure
 ```
 crates/
   codegraph-core/       Error + semgraph model (Symbol, SymbolKind, Chain, CallRecord, EffectType, ScopeLevel, markers)
-  codegraph-extract/    tree-sitter native + 14 LangSpec declarative extractors + 5 hand‑written
+  codegraph-source/     Source abstraction (DiskSource) — file content fed to extractors
+  codegraph-extract/    tree-sitter native: 15 LangSpec declarative parsers (16 languages, TSX reuses lang-typescript)
+                        + 2 embedded host parsers (Svelte, Astro re-parse their JS/TS blocks) + effect/flow classifiers
   codegraph-graph/      GraphIndex (semgraph): registry + 2 engines (chain Search<u64> + name Search<u8>) + pluggable storage (SQLite / LMDB / Redis / Postgres / MySQL) + optional embedding vector index
+  codegraph-binary/     Binary graph: radare2 (r2pipe) extraction of functions/imports/strings + CFG-derived IF/LOOP/SWITCH markers, cached by (path, mtime, size)
   codegraph-context/    Markdown/JSON context formatter (symbol + callers + callees + source)
   codegraph-api/        GraphApi wrapper on SharedGraphIndex (async query surface)
-  codegraph-docs/       Document graph: DocParser trait, HCL/YAML/JSON/TOML parsers, DocumentGraph with DocToken tries
+  codegraph-docs/       Document graph: DocParser trait, HCL/YAML/JSON/TOML/Nginx/Markdown parsers, DocumentGraph with DocToken tries + pattern mining
   codegraph-sboxes/     Behavior sandbox: Cranelift JIT compile of function groups + Rhai mock runtime
-  codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 24‑tool dispatch, session‑driven
-  codegraph-graphql/    GraphQL HTTP API server (queries + mutations for code + documents)
+  codegraph-mcp/        MCP server on the rmcp SDK (stdio + Streamable HTTP) + 42-tool dispatch, session-driven
+  codegraph-graphql/    GraphQL HTTP API server (queries + mutations for code + documents + binary graph)
+  codegraph-installer/  Self-install/uninstall logic for the CLI (`codegraph install`/`uninstall`)
   codegraph-bench/      Benchmarks (criterion search benches, storage benches, codspeed)
-  codegraph/            CLI lifecycle (init/deinit/embed/serve --mcp) + watcher (notify + debounced full re‑index)
+  codegraph/            CLI lifecycle (init/deinit/clean/doctor/embed/serve --mcp) + watcher (notify + debounced full re-index)
 ```
 
 ## Pipeline
 
 ```
-files → ignore::WalkBuilder → rayon parse pool (tree‑sitter, 14 langs)
+files → ignore::WalkBuilder → rayon parse pool (tree-sitter, 17 langs)
            ↓
       ParseResult (symbols local‑id, chains, CallRecords)
            ↓
@@ -49,16 +53,18 @@ CodeGraph-docs supports parsing structured configuration and document files into
 | JSON | `.json` | JsonParser | ✅ Implemented |
 | TOML | `.toml` | TomlParser | ✅ Implemented |
 | **HCL** | `.hcl`, `.tf` | HclParser | ✅ Implemented |
+| **Nginx** | `.conf`, `.nginx` | NginxParser | ✅ Implemented |
+| **Markdown** | `.md`, `.markdown` | MarkdownParser | ✅ Implemented (heading-nested IR) |
 
 ### Document Graph
 
 Parsed documents are stored in a `DocumentGraph` backed by `codegraph-graph`'s `InMemoryStorage` (persistent tries) with `Search<DocToken>` indices for path, type, value, struct, and pattern queries.
 
 **Access points:**
-- **MCP**: `codegraph_graphdoc_ingest`, `codegraph_graphdoc_search`, `codegraph_graphdoc_hydrate`, `codegraph_graphdoc_list`, `codegraph_graphdoc_stats`
-- **GraphQL**: `docList`, `docSearch`, `docStats` queries and `docIngest`, `docStats` mutations
+- **MCP**: `codegraph_graphdoc_ingest` / `codegraph_graphdoc_ingest_dir` / `codegraph_graphdoc_remove`, `codegraph_graphdoc_search` / `codegraph_graphdoc_search_value` / `codegraph_graphdoc_search_struct`, `codegraph_graphdoc_hydrate`, `codegraph_graphdoc_list`, `codegraph_graphdoc_stats`, `codegraph_graphdoc_mine_patterns` / `codegraph_graphdoc_list_patterns`
+- **GraphQL**: `graphdocList`, `graphdocSearch`, `graphdocSearchValue`, `graphdocHydrate`, `graphdocStats`, `graphdocListPatterns` queries and `graphdocIngest`, `graphdocIngestDir`, `graphdocRemove`, `graphdocMinePatterns` mutations
 
-**Format auto-detection**: `.tf`/`.hcl` → hcl, `.yaml`/`.yml` → yaml, `.json` → json, `.toml` → toml.
+**Format auto-detection**: `.tf`/`.hcl` → hcl, `.yaml`/`.yml` → yaml, `.json` → json, `.toml` → toml, `.conf`/`.nginx` → nginx, `.md`/`.markdown` → markdown.
 
 ### Crate Structure
 
@@ -70,11 +76,9 @@ codegraph-docs/
   ├── ir.rs             Document, Node, Kind, Scalar, ByteSpan
   ├── tokenize.rs       DocToken (8-byte structural token)
   └── parsers/
-      ├── mod.rs        DocParser trait, build_document(), all parsers
-      ├── hcl.rs        HclParser (hcl-rs)
-      ├── yaml.rs       YamlParser (serde_yaml)
-      ├── json.rs       JsonParser (serde_json)
-      └── toml.rs       TomlParser (toml)
+      └── mod.rs        DocParser trait, build_document(), all parsers
+                        (HclParser, YamlParser, JsonParser, TomlParser,
+                        NginxParser, MarkdownParser), detect_format()
 ```
 
 ## 🔀 Effect rules — call/macro → effect + control-flow marker

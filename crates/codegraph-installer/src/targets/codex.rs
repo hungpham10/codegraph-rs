@@ -1,5 +1,7 @@
-//! Codex CLI — config at `~/.codex/config.toml`, instructions at `~/.codex/AGENTS.md`.
-//! Uses toml_edit to preserve sibling tables and user formatting.
+//! Codex CLI — config at `~/.codex/config.toml` (global) hoặc
+//! `<project>/.codex/config.toml` (project-scoped), instructions at
+//! `AGENTS.md` cạnh đó. Uses toml_edit to preserve sibling tables and user
+//! formatting.
 
 use crate::{AgentTarget, DetectStatus, InstallOpts, InstallReport, INSTRUCTIONS_MD};
 use anyhow::Result;
@@ -9,13 +11,26 @@ use toml_edit::{value, Array, DocumentMut, Item, Table};
 pub struct CodexTarget;
 
 impl CodexTarget {
-    fn config_path(&self) -> Option<Utf8PathBuf> {
-        let home = dirs::home_dir()?;
-        Utf8PathBuf::from_path_buf(home.join(".codex").join("config.toml")).ok()
+    /// Thư mục `.codex` cho scope hiện tại (global = trong home).
+    fn codex_dir(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        if opts.global {
+            let home = opts.home_dir()?;
+            Utf8PathBuf::from_path_buf(home.join(".codex")).ok()
+        } else {
+            opts.project_root.as_ref().map(|r| r.join(".codex"))
+        }
     }
-    fn agents_path(&self) -> Option<Utf8PathBuf> {
-        let home = dirs::home_dir()?;
-        Utf8PathBuf::from_path_buf(home.join(".codex").join("AGENTS.md")).ok()
+    fn config_path(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        self.codex_dir(opts).map(|d| d.join("config.toml"))
+    }
+    /// AGENTS.md: global thì nằm trong `.codex/`, project thì ở root (dùng
+    /// chung cho mọi agent đọc AGENTS.md của repo).
+    fn agents_path(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        if opts.global {
+            self.codex_dir(opts).map(|d| d.join("AGENTS.md"))
+        } else {
+            opts.project_root.as_ref().map(|r| r.join("AGENTS.md"))
+        }
     }
 }
 
@@ -27,12 +42,18 @@ impl AgentTarget for CodexTarget {
         "Codex CLI"
     }
 
-    fn detect(&self, _opts: &InstallOpts) -> DetectStatus {
-        let Some(p) = self.config_path() else {
+    fn detect(&self, opts: &InstallOpts) -> DetectStatus {
+        let Some(dir) = self.codex_dir(opts) else {
             return DetectStatus::NotFound;
         };
-        if !p.exists() {
+        if !dir.exists() {
             return DetectStatus::NotFound;
+        }
+        let Some(p) = self.config_path(opts) else {
+            return DetectStatus::Found;
+        };
+        if !p.exists() {
+            return DetectStatus::Found;
         }
         let Ok(text) = std::fs::read_to_string(p.as_std_path()) else {
             return DetectStatus::Found;
@@ -54,7 +75,7 @@ impl AgentTarget for CodexTarget {
 
     fn install(&self, opts: &InstallOpts) -> Result<InstallReport> {
         let config = self
-            .config_path()
+            .config_path(opts)
             .ok_or_else(|| anyhow::anyhow!("no codex config path"))?;
         let text = std::fs::read_to_string(config.as_std_path()).unwrap_or_default();
         let mut doc: DocumentMut = if text.is_empty() {
@@ -98,13 +119,21 @@ impl AgentTarget for CodexTarget {
             std::fs::write(config.as_std_path(), doc.to_string())?;
             written.push(config);
         }
-        if let Some(md) = self.agents_path() {
+        if let Some(md) = self.agents_path(opts) {
+            let want = INSTRUCTIONS_MD;
             let existing = std::fs::read_to_string(md.as_std_path()).ok();
-            if existing.as_deref() != Some(INSTRUCTIONS_MD) {
+            // AGENTS.md ở project root dùng chung với các agent khác — chỉ ghi
+            // khi chưa tồn tại, không đè nội dung user đang có.
+            let should_write = if opts.global {
+                existing.as_deref() != Some(want)
+            } else {
+                existing.is_none()
+            };
+            if should_write {
                 if let Some(parent) = md.parent() {
                     std::fs::create_dir_all(parent.as_std_path())?;
                 }
-                std::fs::write(md.as_std_path(), INSTRUCTIONS_MD)?;
+                std::fs::write(md.as_std_path(), want)?;
                 written.push(md);
             }
         }
@@ -115,8 +144,8 @@ impl AgentTarget for CodexTarget {
         }
     }
 
-    fn uninstall(&self, _opts: &InstallOpts) -> Result<InstallReport> {
-        let Some(config) = self.config_path() else {
+    fn uninstall(&self, opts: &InstallOpts) -> Result<InstallReport> {
+        let Some(config) = self.config_path(opts) else {
             return Ok(InstallReport::Unchanged);
         };
         if !config.exists() {
@@ -136,5 +165,9 @@ impl AgentTarget for CodexTarget {
         } else {
             Ok(InstallReport::Unchanged)
         }
+    }
+
+    fn skills_dir(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        self.codex_dir(opts).map(|d| d.join("skills"))
     }
 }

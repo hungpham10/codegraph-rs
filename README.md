@@ -16,7 +16,7 @@ Agents that consult the semantic graph instead of grepping the filesystem make *
 
 - **Fewer tool calls** — agents navigate call chains (`codegraph_flow`), not grep
 - **Local & fast** — full re-index 139 files in ~190 ms, nothing leaves your machine
-- **Works everywhere** — 14 languages, 6 storage backends, 24 MCP tools, one binary
+- **Works everywhere** — 17 languages, 6 storage backends, 42 MCP tools, one binary
 - **Semantic, not syntactic** — symbols have global IDs; edges derived from call chains with markers (`LOOP`, `IF_TRUE`, `RETURN`, …)
 - **Binary analysis** — builds call graphs directly from ELF/PE/Mach-O binaries via [radare2](docs/binary-analysis.md), no source needed
 
@@ -59,7 +59,7 @@ The agent binds the workspace with `codegraph_init {"path": ...}` and gets tools
 CodeGraph supports parsing both **source code** (via tree-sitter) and **configuration/document** files:
 
 ### Source Code Languages
-14 languages: TypeScript · TSX · JavaScript · Python · Go · Rust · Java · C · C++ · C# · Ruby · PHP · Scala · Swift · Lua
+17 languages: TypeScript · TSX · JavaScript · Python · Go · Rust · Java · C · C++ · C# · Ruby · PHP · Scala · Swift · Lua · Svelte · Astro
 
 ### Configuration/Document Formats
 

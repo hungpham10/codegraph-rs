@@ -219,4 +219,15 @@ impl AgentTarget for OpencodeTarget {
             Ok(InstallReport::Unchanged)
         }
     }
+
+    fn skills_dir(&self, opts: &InstallOpts) -> Option<Utf8PathBuf> {
+        if opts.global {
+            let cfg = dirs::config_dir()?;
+            Utf8PathBuf::from_path_buf(cfg.join("opencode").join("skills")).ok()
+        } else {
+            opts.project_root
+                .as_ref()
+                .map(|r| r.join(".opencode").join("skills"))
+        }
+    }
 }

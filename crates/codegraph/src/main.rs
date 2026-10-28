@@ -45,6 +45,11 @@ enum Cmd {
             help = "Show live progress bar during indexing"
         )]
         progress: bool,
+        /// Also generate an AGENTS.md-style coding-workflow file for the given
+        /// agent (claude, codex, opencode, zcode, cursor, hermes, antigravity).
+        /// Skipped if the file already exists with other content.
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Remove the .codegraph/ directory.
     Deinit,
@@ -58,12 +63,16 @@ enum Cmd {
     /// the agent at the brew-installed `codegraph`.
     Install {
         /// Target agent: claude (default), cursor, codex, opencode, hermes,
-        /// antigravity, or `all`.
+        /// antigravity, zcode, or `all`.
         #[arg(long, default_value = "claude")]
         target: String,
         /// Install globally (user home) instead of project-local.
         #[arg(long, default_value_t = false)]
         global: bool,
+        /// Skip installing the bundled CodeGraph skills into the agent's
+        /// skills directory (`.claude/skills`, `.codex/skills`).
+        #[arg(long = "no-skills", default_value_t = false)]
+        no_skills: bool,
     },
     /// Remove codegraph's MCP server registration from an AI agent.
     Uninstall {
@@ -185,11 +194,19 @@ async fn main() -> Result<()> {
         }
     };
     match cmd {
-        Cmd::Init { no_index, progress } => cmd_init(&root, !no_index, progress).await,
+        Cmd::Init {
+            no_index,
+            progress,
+            agent,
+        } => cmd_init(&root, !no_index, progress, agent.as_deref()).await,
         Cmd::Deinit => cmd_deinit(&root),
         Cmd::Clean => cmd_clean(&root),
         Cmd::Doctor => cmd_doctor(&root).await,
-        Cmd::Install { target, global } => cmd_install(&root, &target, global),
+        Cmd::Install {
+            target,
+            global,
+            no_skills,
+        } => cmd_install(&root, &target, global, no_skills),
         Cmd::Uninstall { target, global } => cmd_uninstall(&root, &target, global),
 
         #[cfg(feature = "fastembed")]
@@ -279,11 +296,29 @@ async fn open_doc_graph(root: &Utf8Path) -> Result<codegraph_docs::DocumentGraph
 
 /// `codegraph init`: tạo `.codegraph/` + config, index ngay nếu `do_index`
 /// (progress bar khi `show_progress`). không gọi installer nữa.
-async fn cmd_init(root: &Utf8Path, do_index: bool, show_progress: bool) -> Result<()> {
+async fn cmd_init(
+    root: &Utf8Path,
+    do_index: bool,
+    show_progress: bool,
+    agent: Option<&str>,
+) -> Result<()> {
     let dir = codegraph_extract::init_project(root)?;
     eprintln!("initialized {}", dir);
     // RDBMS cần repo_id (partition key) — sinh ngẫu nhiên nếu thiếu (self-heal).
     let _ = codegraph_extract::ExtractConfig::ensure_repo_id(root);
+
+    if let Some(agent) = agent {
+        let root_buf = root.to_owned();
+        match codegraph_installer::workflow::write_workflow(agent, &root_buf) {
+            Ok(Some(path)) => eprintln!("workflow written → {}", path),
+            Ok(None) => eprintln!(
+                "• workflow skipped: {} exists with other content (kept as-is)",
+                codegraph_installer::workflow::project_md_path(agent, &root_buf)
+                    .expect("write_workflow validated agent")
+            ),
+            Err(e) => return Err(e),
+        }
+    }
 
     if do_index {
         let stats = index_all(root, show_progress).await?;
@@ -519,7 +554,7 @@ fn known_targets(global: bool) -> String {
 
 /// `codegraph install --target <agent> [--global]`: register codegraph làm MCP
 /// server cho agent đã chọn, trỏ `command` vào binary hiện tại.
-fn cmd_install(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
+fn cmd_install(root: &Utf8Path, target: &str, global: bool, no_skills: bool) -> Result<()> {
     let binary_path = current_exe_path()?;
     let opts = codegraph_installer::InstallOpts {
         project_root: if global {
@@ -569,12 +604,23 @@ fn cmd_install(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
                 eprintln!("• {}: skipped ({reason})", t.label());
             }
         }
+        if no_skills {
+            continue;
+        }
+        if let Some(dir) = t.skills_dir(&opts) {
+            let written = codegraph_installer::skills::install_skills(&dir)?;
+            if written.is_empty() {
+                eprintln!("• {}: skills already present ({dir})", t.label());
+            } else {
+                eprintln!("✓ {}: skills installed → {}", t.label(), dir);
+            }
+        }
     }
     Ok(())
 }
 
 /// `codegraph uninstall --target <agent> [--global]`: gỡ registration MCP của
-/// codegraph khỏi agent đã chọn.
+/// codegraph khỏi agent đã chọn (kèm skills codegraph đã cài).
 fn cmd_uninstall(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
     let binary_path = current_exe_path()?;
     let opts = codegraph_installer::InstallOpts {
@@ -614,6 +660,12 @@ fn cmd_uninstall(root: &Utf8Path, target: &str, global: bool) -> Result<()> {
                 eprintln!("• {}: skipped ({reason})", t.label());
             }
             codegraph_installer::InstallReport::Installed(_) => unreachable!(),
+        }
+        if let Some(dir) = t.skills_dir(&opts) {
+            let removed = codegraph_installer::skills::uninstall_skills(&dir)?;
+            if !removed.is_empty() {
+                eprintln!("✓ {}: skills removed → {}", t.label(), dir);
+            }
         }
     }
     Ok(())

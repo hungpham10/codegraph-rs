@@ -5,3 +5,4 @@ pub mod cursor;
 pub mod hermes;
 pub(crate) mod jsonutil;
 pub mod opencode;
+pub mod zcode;
