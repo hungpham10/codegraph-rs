@@ -780,3 +780,146 @@ async fn search_symbol_paged_resume_paging() {
         .await
         .is_err());
 }
+
+/// Judge giả: đảo ngược thứ tự candidate để kiểm tra rerank có thật sự
+/// quyết định order, không cần gọi API.
+struct ReverseJudge;
+
+#[async_trait::async_trait]
+impl codegraph_context::Judge for ReverseJudge {
+    async fn rank(
+        &self,
+        _query: &str,
+        _repo: Option<&str>,
+        candidates: &[codegraph_context::Candidate],
+    ) -> codegraph_core::Result<codegraph_context::Verdict> {
+        let mut ranking: Vec<(u64, f32)> = candidates.iter().map(|c| (c.id, 0.1)).collect();
+        ranking.reverse();
+        for (i, (_, p)) in ranking.iter_mut().enumerate() {
+            *p = 0.9 - (i as f32) * 0.1;
+        }
+        Ok(codegraph_context::Verdict {
+            ranking,
+            no_match: false,
+            confidence: Some(0.9),
+            none_probability: 0.01,
+            fits: 1.0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn search_symbol_reranked_đổi_thứ_tự_và_gắn_xác_suất() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_str = format!(
+        "sqlite://{}",
+        dir.path().join("db.sqlite").to_string_lossy()
+    );
+    seed_index(&db_str).await;
+    let api = api(&db_str).await;
+
+    // Thứ tự lexical (không rerank) để so sánh.
+    let lexical: Vec<u64> = api
+        .search_symbol_paged_resumable(
+            "call",
+            None,
+            SymbolMatch::Contains,
+            Pagination {
+                limit: 2,
+                offset: 0,
+            },
+            None,
+            0,
+        )
+        .await
+        .unwrap()
+        .page
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(lexical.len(), 2);
+
+    let out = api
+        .search_symbol_reranked(
+            "call",
+            None,
+            SymbolMatch::Contains,
+            2,
+            0,
+            Some(&ReverseJudge),
+        )
+        .await
+        .unwrap();
+    assert!(out.rerank.as_ref().is_some_and(|r| r.used));
+    assert!(!out.no_match);
+    assert_eq!(out.symbols.len(), 2, "cắt theo limit, không trả cả pool");
+    let reranked: Vec<u64> = out.symbols.iter().map(|(s, _)| s.id).collect();
+    assert_eq!(
+        reranked,
+        vec![lexical[1], lexical[0]],
+        "judge đảo ngược → thứ tự đổi so với lexical"
+    );
+    assert!(out.symbols[0].1.unwrap() > out.symbols[1].1.unwrap());
+    assert_eq!(out.total, 2, "total là số khớp gốc, không phải page");
+}
+
+#[tokio::test]
+async fn search_symbol_reranked_no_match_trả_rỗng() {
+    struct NoneJudge;
+
+    #[async_trait::async_trait]
+    impl codegraph_context::Judge for NoneJudge {
+        async fn rank(
+            &self,
+            _q: &str,
+            _r: Option<&str>,
+            candidates: &[codegraph_context::Candidate],
+        ) -> codegraph_core::Result<codegraph_context::Verdict> {
+            assert!(!candidates.is_empty());
+            Ok(codegraph_context::Verdict {
+                ranking: Vec::new(),
+                no_match: true,
+                confidence: None,
+                none_probability: 0.9,
+                fits: 0.0,
+            })
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_str = format!(
+        "sqlite://{}",
+        dir.path().join("db.sqlite").to_string_lossy()
+    );
+    seed_index(&db_str).await;
+    let api = api(&db_str).await;
+
+    let out = api
+        .search_symbol_reranked("call", None, SymbolMatch::Contains, 5, 0, Some(&NoneJudge))
+        .await
+        .unwrap();
+    assert!(out.no_match);
+    assert!(out.symbols.is_empty());
+    assert!(out.rerank.as_ref().is_some_and(|r| r.used));
+}
+
+#[tokio::test]
+async fn search_symbol_reranked_tắt_jev_thì_fail_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_str = format!(
+        "sqlite://{}",
+        dir.path().join("db.sqlite").to_string_lossy()
+    );
+    seed_index(&db_str).await;
+    let api = api(&db_str).await;
+
+    // Không truyền judge + `[jev] enabled = false` (default) → giữ lexical.
+    let out = api
+        .search_symbol_reranked("call", None, SymbolMatch::Contains, 2, 0, None)
+        .await
+        .unwrap();
+    assert!(!out.rerank.as_ref().unwrap().used);
+    assert!(!out.no_match);
+    assert_eq!(out.symbols.len(), 2);
+    assert!(out.symbols.iter().all(|(_, p)| p.is_none()));
+}

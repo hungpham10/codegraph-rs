@@ -746,6 +746,7 @@ name = "codegraph-api"
 version = "2.2.12"
 dependencies = [
  "anyhow",
+ "async-trait",
  "camino",
  "codegraph-context",
  "codegraph-core",

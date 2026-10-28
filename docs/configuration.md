@@ -76,6 +76,8 @@ type = "sqlite"  # "sqlite" | "lmdb" | "redis" | "memory" | "postgres" | "mysql"
 # max_candidates = 40          # số candidate gửi cho Jev
 # min_probability = 0.25       # xác suất tối thiểu của symbol hạng 1
 # repo = ""                    # tên repo trong `state`; rỗng → basename workspace root
+# doc_include_values = false   # đưa value của doc node vào mô tả option (tốn token)
+# doc_value_chars = 120        # cắt value còn bao nhiêu ký tự khi bật cờ trên
 
 # Document graph — ingest structured docs (yaml/json/toml/hcl/nginx/markdown)
 [docgraph]
@@ -177,8 +179,10 @@ dsns = [
 
 ### `[jev]`
 
-Bật rerank ngữ nghĩa cho `codegraph_context` bằng **Jev** (TypeSafe SystemOne —
-một *decision model*, không phải chat model).
+Bật rerank ngữ nghĩa bằng **Jev** (TypeSafe SystemOne — một *decision model*,
+không phải chat model) cho `codegraph_context`, `codegraph_search_symbol` và ba
+tool document search (`codegraph_graphdoc_search`,
+`codegraph_graphdoc_search_value`, `codegraph_graphdoc_search_struct`).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -190,14 +194,24 @@ một *decision model*, không phải chat model).
 | `max_candidates` | `usize` | `40` | Số candidate tối đa gửi Jev (Choice nhận tối đa 255 options) |
 | `min_probability` | `f32` | `0.25` | Xác suất tối thiểu của symbol **hạng 1** để coi là khớp |
 | `repo` | `String` | unset | Tên repo trong `state`; rỗng → basename của workspace root |
+| `doc_include_values` | `bool` | `false` | Khi rerank doc: đưa **value** của node vào mô tả option. Key một mình thường không phân biệt được (`spec.replicas` ở nhiều file); giá trị giúp Jev chọn đúng nhưng tốn token theo số candidate |
+| `doc_value_chars` | `usize` | `120` | Cắt value còn bao nhiêu ký tự khi `doc_include_values = true` |
 
 **Behavior**:
 - **Off by default.** Chỉ chạy khi `enabled = true` **và** env `api_key_env` có giá trị.
-- Bật `rerank = "jev"` ở `codegraph_context` (MCP arg / GraphQL field). Response có
-  `match_score.probability` cho từng hit và `no_match` khi không symbol nào đủ liên quan.
+- Bật `rerank = "jev"` ở MCP arg của `codegraph_context`, `codegraph_search_symbol`
+  và 3 tool document search. Response có `match_score.probability` cho từng hit và
+  `no_match` khi không candidate nào đủ liên quan.
+- `codegraph_search_symbol` chỉ rerank **trang đầu**: `offset > 0` hoặc có `resume`
+  → lỗi rõ ràng (rerank phá tính ổn định của phân trang). Pool = `limit × 4`
+  (cap `max_candidates`), binary rows giữ nguyên thứ tự.
+- Doc tool trả **object** `{results, no_match, rerank}` khi `rerank = "jev"` (mặc
+  định vẫn là array như cũ). Pool rộng hơn `limit` để model có lựa chọn.
+- `doc_include_values` mặc định **tắt**: bật khi các node trùng key ở nhiều file và
+  bạn cần Jev phân biệt bằng giá trị.
 - Candidate pool = query gốc + từng token của query (`Contains`), lọc kind code
   (function/method/class/interface/enum/module/file) và **loại test/bench**.
-- Pool < 3 candidate → trả `no_match` luôn, không gọi API.
+- Pool < 3 candidate → không gọi API (trả thứ tự cũ / `no_match` tuỳ tool).
 - **Fail-open** toàn bộ: timeout, 4xx, JSON lỗi, thiếu token → giữ thứ tự cũ, kèm
   `rerank.used = false` và `reason`.
 - Quyết định "không khớp" dựa trên option `none_of_the_above` thắng xác suất candidate

@@ -1,7 +1,7 @@
 use crate::session::{DetailLevel, OutputStyle};
 use camino::Utf8Path;
 use codegraph_api::{GraphApi, Pagination};
-use codegraph_context::{ContextRequest, Format};
+use codegraph_context::{Candidate, ContextRequest, Format, RankOutcome, Rerank};
 use codegraph_core::{Error, Result, Symbol, SymbolKind, SymbolMatch};
 use codegraph_docs::tokenize::DocToken;
 use rmcp::model::Tool;
@@ -22,6 +22,10 @@ use std::sync::Arc;
 #[cfg(test)]
 #[path = "callers_tests.rs"]
 mod callers_tests;
+
+#[cfg(test)]
+#[path = "rerank_tests.rs"]
+mod rerank_tests;
 
 struct ToolDef {
     name: &'static str,
@@ -236,6 +240,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 "offset": { "type": "integer", "default": 0 },
                 "resume": { "type": "string", "description": "Resume id from a previous timeout (or from a previous response with more pages) — retry the same call with this to continue where it stopped." },
                 "timeout_ms": { "type": "integer", "default": 20000, "description": "Soft time budget in ms; 0 = no limit. On timeout the tool errors with a resume id." },
+                "rerank": { "type": "string", "enum": ["none", "jev"], "default": "none", "description": "\"jev\" = rerank the top candidates with TypeSafe SystemOne and attach `match_score.probability` per hit plus `no_match`/`rerank` in the response. Opt-in (`[jev] enabled = true` + token env), fail-open. First page only (offset=0, no resume); binary rows keep their order." },
                 "detail": { "type": "string", "enum": ["minimal", "medium", "verbose"], "description": "Symbol detail for this call (overrides session default): minimal = id/name/kind/file/line, medium = + signature, verbose = full Symbol." },
                 "format": { "type": "string", "enum": ["minimal", "medium"], "description": "Output format for this call (overrides session default): minimal = items as fixed-order positional arrays (default), medium = objects with default-valued fields omitted." }
             }, "required": ["query"] }),
@@ -360,7 +365,8 @@ fn tool_defs() -> Vec<ToolDef> {
             "Search document nodes by dotted key path (e.g. `spec.replicas` matches nodes under any `spec` → `replicas` chain across all ingested documents). Returns matching node IDs with path, key and value.",
             json!({ "type": "object", "properties": {
                 "pattern": { "type": "string", "description": "Dotted key path, e.g. `spec.replicas`. Only the last segments need to match at increasing depth." },
-                "depth": { "type": "integer", "default": 1, "description": "Search depth (extra levels below the pattern where the chain may still match)." }
+                "depth": { "type": "integer", "default": 1, "description": "Search depth (extra levels below the pattern where the chain may still match)." },
+                "rerank": { "type": "string", "enum": ["none", "jev"], "default": "none", "description": "\"jev\" = rerank matches with TypeSafe SystemOne (KeyRegistry routing) and attach `match_score.probability`; response becomes `{results, no_match, rerank}`. Opt-in (`[jev] enabled = true` + token env), fail-open. Set `[jev] doc_include_values = true` to include node values in the option text (better picks, more tokens)." },
             }, "required": ["pattern"] }),
         ),
         tool(
@@ -368,7 +374,8 @@ fn tool_defs() -> Vec<ToolDef> {
             "Search document nodes whose scalar value (string/number) contains the query substring, case-insensitive. Good for finding images, hosts, ports across Kubernetes manifests / Terraform files.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string", "description": "Value substring to search, e.g. `nginx`." },
-                "limit": { "type": "integer", "default": 20, "description": "Max results." }
+                "limit": { "type": "integer", "default": 20, "description": "Max results." },
+                "rerank": { "type": "string", "enum": ["none", "jev"], "default": "none", "description": "\"jev\" = rerank matches with TypeSafe SystemOne (KeyRegistry routing) and attach `match_score.probability`; response becomes `{results, no_match, rerank}`. Opt-in (`[jev] enabled = true` + token env), fail-open. Set `[jev] doc_include_values = true` to include node values in the option text (better picks, more tokens)." },
             }, "required": ["query"] }),
         ),
         tool(
@@ -424,7 +431,8 @@ fn tool_defs() -> Vec<ToolDef> {
             json!({ "type": "object", "properties": {
                 "pattern": { "type": "string", "description": "Comma-separated kind labels: MAP, ARRAY, FIELD, INDEX, STRING, NUMBER, BOOL, NULL, ROOT." },
                 "depth": { "type": "integer", "default": 1, "description": "Search depth." },
-                "limit": { "type": "integer", "default": 20, "description": "Max results." }
+                "limit": { "type": "integer", "default": 20, "description": "Max results." },
+                "rerank": { "type": "string", "enum": ["none", "jev"], "default": "none", "description": "\"jev\" = rerank matches with TypeSafe SystemOne (KeyRegistry routing) and attach `match_score.probability`; response becomes `{results, no_match, rerank}`. Opt-in (`[jev] enabled = true` + token env), fail-open. Set `[jev] doc_include_values = true` to include node values in the option text (better picks, more tokens)." },
             }, "required": ["pattern"] }),
         ),
         // ── Binary tools (dataset riêng .codegraph/binary.sqlite — lazy SQL).
@@ -694,11 +702,7 @@ pub async fn dispatch_with_api(
                 limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as u32,
                 format: Format::Json,
                 strip_prefix: Some(root.as_str().to_string()),
-                rerank: args
-                    .get("rerank")
-                    .and_then(|v| v.as_str())
-                    .and_then(codegraph_context::Rerank::parse)
-                    .unwrap_or(codegraph_context::Rerank::None),
+                rerank: rerank_from_args(&args),
             };
             // `include_source` đọc qua `Source` trait (đường query), root lấy
             // từ session — không còn `std::fs` rải rác trong context builder.
@@ -783,6 +787,14 @@ pub async fn dispatch_with_api(
                 .get("timeout_ms")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(20000);
+            let rerank = rerank_from_args(&args);
+            if rerank == codegraph_context::Rerank::Jev && (offset > 0 || resume.is_some()) {
+                return Err(Error::Invalid(
+                    "codegraph_search_symbol: rerank=jev chỉ hỗ trợ trang đầu (offset=0, không `resume`). \
+                     Bỏ `rerank` để lấy page tiếp, hoặc tăng `limit` để lấy đủ trong một lần."
+                        .into(),
+                ));
+            }
             let code_out = if source == "binary" {
                 // Chỉ binary — bỏ qua code index (tránh scan không cần).
                 None
@@ -812,19 +824,43 @@ pub async fn dispatch_with_api(
             }
             let detail = detail_from_args(&args, session_detail);
             let format = format_from_args(&args, session_format);
-            let total = code_out.as_ref().map_or(0, |out| out.total);
-            let code_resume = code_out.as_ref().and_then(|out| out.resume.clone());
-            let has_more = code_out
-                .as_ref()
-                .is_some_and(|out| offset as usize + out.page.len() < out.total);
-            let results: Vec<Value> = code_out
-                .map(|out| {
-                    out.page
-                        .into_iter()
-                        .map(|s| symbol_json(root.as_str(), &s, detail, format))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let mut no_match = false;
+            let mut rerank_info: Option<Value> = None;
+            let (results, total, code_resume, has_more): (Vec<Value>, usize, Option<String>, bool) =
+                if rerank == codegraph_context::Rerank::Jev && source != "binary" {
+                    // Rerank chỉ trên code index: thứ tự binary rows không đổi.
+                    let out = api
+                        .search_symbol_reranked(q, kind, mode, limit, timeout_ms, None)
+                        .await?;
+                    let mut rows = Vec::with_capacity(out.symbols.len());
+                    for (sym, probability) in out.symbols {
+                        let mut row = symbol_json(root.as_str(), &sym, detail, format);
+                        if let (Some(p), Some(map)) = (probability, row.as_object_mut()) {
+                            map.insert("match_score".into(), json!({ "probability": p }));
+                        }
+                        rows.push(row);
+                    }
+                    no_match = out.no_match;
+                    rerank_info = out
+                        .rerank
+                        .map(|r| json!({ "used": r.used, "reason": r.reason }));
+                    (rows, out.total, None, false)
+                } else {
+                    let total = code_out.as_ref().map_or(0, |out| out.total);
+                    let code_resume = code_out.as_ref().and_then(|out| out.resume.clone());
+                    let has_more = code_out
+                        .as_ref()
+                        .is_some_and(|out| offset as usize + out.page.len() < out.total);
+                    let rows: Vec<Value> = code_out
+                        .map(|out| {
+                            out.page
+                                .into_iter()
+                                .map(|s| symbol_json(root.as_str(), &s, detail, format))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (rows, total, code_resume, has_more)
+                };
             // Nhánh binary: `source: "all"|"binary"` — mở BinaryGraph lazy,
             // open fail (chưa có dataset) → bỏ phần binary khỏi response.
             // semantic/hybrid chỉ tồn tại ở code index — binary fallback contains.
@@ -865,6 +901,8 @@ pub async fn dispatch_with_api(
                     "has_more": has_more,
                     "resume": code_resume,
                     "binary": binary,
+                    "no_match": no_match,
+                    "rerank": rerank_info,
                 }),
             )
         }
@@ -1130,6 +1168,14 @@ fn arg_str<'a>(v: &'a Value, k: &str) -> Result<&'a str> {
         .and_then(|x| x.as_str())
         .ok_or_else(|| Error::Invalid(format!("missing string arg: {k}")))
 }
+/// `rerank` arg dùng chung cho context / symbol search / doc search.
+pub(crate) fn rerank_from_args(args: &Value) -> codegraph_context::Rerank {
+    args.get("rerank")
+        .and_then(|v| v.as_str())
+        .and_then(codegraph_context::Rerank::parse)
+        .unwrap_or(codegraph_context::Rerank::None)
+}
+
 fn arg_u64(v: &Value, k: &str) -> Result<u64> {
     v.get(k)
         .and_then(|x| x.as_u64())
@@ -1587,6 +1633,7 @@ pub async fn dispatch_doc_search(
     doc_graph: Arc<crate::SharedDocGraph>,
     pattern: &str,
     depth: usize,
+    rerank: Rerank,
 ) -> Result<String> {
     let graph = doc_graph.graph().await;
     let graph = graph.read().await;
@@ -1644,7 +1691,7 @@ pub async fn dispatch_doc_search(
                     })
                 })
                 .collect();
-            return emit_value("", Value::Array(results));
+            return emit_doc_rows(pattern, results, 100, rerank).await;
         }
         let hits = graph.search_key_fuzzy(&last, 50);
         if hits.is_empty() {
@@ -1658,6 +1705,7 @@ pub async fn dispatch_doc_search(
                 json!({
                     "id": h.node.id,
                     "doc": h.node.doc,
+                    "key": h.matched_key,
                     "matched_key": h.matched_key,
                     "score": (h.score * 1000.0).round() / 1000.0,
                     "kind": format!("{:?}", h.node.kind),
@@ -1665,7 +1713,7 @@ pub async fn dispatch_doc_search(
                 })
             })
             .collect();
-        return emit_value("", Value::Array(results));
+        return emit_doc_rows(pattern, results, 50, rerank).await;
     }
     let mut results = Vec::new();
     for id in ids.iter().take(100) {
@@ -1681,7 +1729,7 @@ pub async fn dispatch_doc_search(
             }));
         }
     }
-    emit_value("", Value::Array(results))
+    emit_doc_rows(pattern, results, 100, rerank).await
 }
 
 /// Search node theo kind chain cấu trúc (vd "MAP, FIELD, NUMBER") — kết quả
@@ -1692,6 +1740,7 @@ pub async fn dispatch_doc_search_struct(
     pattern: &str,
     depth: usize,
     limit: usize,
+    rerank: Rerank,
 ) -> Result<String> {
     let graph = doc_graph.graph().await;
     let graph = graph.read().await;
@@ -1731,8 +1780,8 @@ pub async fn dispatch_doc_search_struct(
         ));
     }
     rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let results: Vec<Value> = rows.into_iter().take(limit).map(|(_, v)| v).collect();
-    emit_value("", Value::Array(results))
+    let results: Vec<Value> = rows.into_iter().map(|(_, v)| v).collect();
+    emit_doc_rows(pattern, results, limit, rerank).await
 }
 
 /// Mine structural patterns — đếm kind chain trên mọi node lá scalar, cấp
@@ -1766,10 +1815,18 @@ pub async fn dispatch_doc_search_value(
     doc_graph: Arc<crate::SharedDocGraph>,
     query: &str,
     limit: usize,
+    rerank: Rerank,
 ) -> Result<String> {
     let graph = doc_graph.graph().await;
     let graph = graph.read().await;
-    let hits = graph.search_value_substring(query, limit);
+    // Rerank cần pool rộng hơn `limit` để model có lựa chọn; cap
+    // `[jev] max_candidates` áp sau trong `rerank_doc_rows`.
+    let fetch = if rerank == Rerank::Jev {
+        limit.saturating_mul(4).max(limit)
+    } else {
+        limit
+    };
+    let hits = graph.search_value_substring(query, fetch);
     if hits.is_empty() {
         return Ok(format!("no scalar values matched `{query}`"));
     }
@@ -1785,7 +1842,150 @@ pub async fn dispatch_doc_search_value(
             })
         })
         .collect();
-    emit_value("", Value::Array(results))
+    emit_doc_rows(query, results, limit, rerank).await
+}
+
+/// Pool tối thiểu để gọi Jev cho doc search — dưới ngưỡng này model không có
+/// gì để chọn mà request vẫn tốn token.
+const DOC_MIN_POOL: usize = 3;
+
+/// Kết quả rerank một lô doc row.
+struct DocRerank {
+    rows: Vec<Value>,
+    no_match: bool,
+    /// Khối `rerank` trả cho client (`used`/`reason`).
+    info: Value,
+}
+
+/// Rút text từ `value` của doc node — `Scalar` serialize thành
+/// `{"String": "..."}` / `{"Number": 3.0}` nên phải bóc lớp ngoài.
+fn scalar_text(v: &Value) -> Option<String> {
+    let text = match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Object(m) => match m.iter().next()? {
+            (k, inner) if k == "String" => inner.as_str()?.to_string(),
+            (k, inner) if k == "Number" || k == "Bool" => inner.to_string(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Dựng `Candidate` từ một row JSON của doc search.
+fn doc_candidate(row: &Value, cfg: &codegraph_core::JevConfig) -> Option<Candidate> {
+    let id = row.get("id")?.as_u64()?;
+    let key_path = row
+        .get("path")
+        .or_else(|| row.get("key"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let doc_path = row.get("doc").and_then(Value::as_str).unwrap_or("");
+    let kind = row.get("kind").and_then(Value::as_str).unwrap_or("node");
+    let value = row.get("value").and_then(scalar_text);
+    Some(Candidate::doc(
+        id,
+        key_path,
+        doc_path,
+        kind,
+        value.as_deref(),
+        cfg,
+    ))
+}
+
+/// Áp kết quả rerank lên rows: sắp theo xác suất, cắt `limit`, gắn
+/// `match_score`. Fail-open khi `outcome.used = false`.
+fn apply_doc_outcome(
+    outcome: RankOutcome,
+    rows: Vec<(Candidate, Value)>,
+    limit: usize,
+) -> DocRerank {
+    let info = serde_json::to_value(outcome.info()).unwrap_or(Value::Null);
+    if !outcome.used {
+        return DocRerank {
+            rows: rows.into_iter().take(limit).map(|(_, v)| v).collect(),
+            no_match: false,
+            info,
+        };
+    }
+    if outcome.no_match {
+        return DocRerank {
+            rows: Vec::new(),
+            no_match: true,
+            info,
+        };
+    }
+    let by_id: std::collections::HashMap<u64, Value> =
+        rows.into_iter().map(|(c, v)| (c.id, v)).collect();
+    let mut out = Vec::new();
+    for (id, p) in &outcome.ranking {
+        if out.len() >= limit {
+            break;
+        }
+        let Some(row) = by_id.get(id) else { continue };
+        let mut row = row.clone();
+        if let Some(map) = row.as_object_mut() {
+            map.insert("match_score".into(), json!({ "probability": p }));
+        }
+        out.push(row);
+    }
+    DocRerank {
+        rows: out,
+        no_match: false,
+        info,
+    }
+}
+
+/// Rerank một lô doc row bằng Jev (fail-open).
+async fn rerank_doc_rows(query: &str, rows: Vec<Value>, limit: usize) -> DocRerank {
+    let cfg = codegraph_core::jev_config();
+    let pool: Vec<(Candidate, Value)> = rows
+        .into_iter()
+        .filter_map(|row| doc_candidate(&row, cfg).map(|c| (c, row)))
+        .take(cfg.max_candidates)
+        .collect();
+    if pool.len() < DOC_MIN_POOL {
+        let n = pool.len();
+        return DocRerank {
+            rows: pool.into_iter().take(limit).map(|(_, v)| v).collect(),
+            no_match: false,
+            info: json!({
+                "used": false,
+                "reason": format!("chỉ có {n} candidate (< {DOC_MIN_POOL}) — không gọi Jev"),
+            }),
+        };
+    }
+    let candidates: Vec<Candidate> = pool.iter().map(|(c, _)| c.clone()).collect();
+    let outcome = codegraph_context::rank(query, cfg.repo.as_deref(), &candidates, cfg, None).await;
+    apply_doc_outcome(outcome, pool, limit)
+}
+
+/// Emit rows doc search, có rerank khi `rerank = jev`.
+///
+/// `rerank = none` giữ nguyên shape cũ (JSON array). Bật `jev` thì bọc thành
+/// `{"results": [...], "no_match": ..., "rerank": ...}` để client thấy được
+/// vì sao thứ tự đổi (hoặc vì sao Jev bị bỏ qua).
+async fn emit_doc_rows(
+    query: &str,
+    rows: Vec<Value>,
+    limit: usize,
+    rerank: Rerank,
+) -> Result<String> {
+    if rerank != Rerank::Jev {
+        // Giữ đúng shape cũ: array, cắt theo `limit` của tool.
+        return emit_value("", Value::Array(rows.into_iter().take(limit).collect()));
+    }
+    let out = rerank_doc_rows(query, rows, limit).await;
+    emit_value(
+        "",
+        json!({
+            "results": out.rows,
+            "no_match": out.no_match,
+            "rerank": out.info,
+        }),
+    )
 }
 
 pub async fn dispatch_doc_hydrate(

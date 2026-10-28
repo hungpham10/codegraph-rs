@@ -4,7 +4,7 @@
 //! mới nhất (`ensure_fresh`: rebuild khi version file đổi). Query surface mới
 //! của semgraph: search/symbol/flow/search_flow/callers/callees/references.
 
-use codegraph_context::ContextRequest;
+use codegraph_context::{Candidate, ContextRequest, Judge, RerankInfo};
 use codegraph_core::{
     CallSiteResult, ClassInfo, DependenciesReport, Error, FileInfo, FlowResult, FullFlowPath,
     FunctionScope, MemberInfo, ResolveResult, Result, SearchFlowResult, Symbol, SymbolKind,
@@ -176,6 +176,16 @@ pub struct ResumeSearchOutcome {
     pub index_version: u64,
 }
 
+/// Kết quả `search_symbol_reranked`: symbol kèm xác suất (nếu có).
+#[derive(Debug)]
+pub struct RerankedSearch {
+    pub symbols: Vec<(Symbol, Option<f32>)>,
+    /// Tổng số khớp gốc của search (trước rerank) — không phải số phần tử trả về.
+    pub total: usize,
+    pub no_match: bool,
+    pub rerank: Option<RerankInfo>,
+}
+
 /// Kết quả resumable cho search trả `Vec<CallSiteResult>` (`codegraph_references`
 /// / `codegraph_search_by_call`). Cùng hình dạng [`ResumeSearchOutcome`].
 #[derive(Debug)]
@@ -328,6 +338,102 @@ impl GraphApi {
             progress: out.progress,
             resume: resume_id,
             index_version: version,
+        })
+    }
+
+    /// Symbol search có **rerank bằng Jev** — chỉ dùng cho trang đầu.
+    ///
+    /// Pool rộng hơn `limit` (×4, cap `[jev] max_candidates`) để model có lựa
+    /// chọn, sau đó cắt về `limit`. Rerank phá tính ổn định của phân trang nên
+    /// chỉ nhận `offset = 0` và không có `resume`; caller phải từ chối hai
+    /// trường hợp đó trước khi gọi.
+    ///
+    /// Fail-open: Jev lỗi/tắt → trả page theo thứ tự lexical kèm
+    /// `rerank.used = false`.
+    pub async fn search_symbol_reranked(
+        &self,
+        query: &str,
+        kind: Option<SymbolKind>,
+        mode: SymbolMatch,
+        limit: u32,
+        timeout_ms: u64,
+        judge: Option<&dyn Judge>,
+    ) -> Result<RerankedSearch> {
+        let cfg = codegraph_core::jev_config();
+        let pool_limit = ((limit as usize) * 4)
+            .min(cfg.max_candidates)
+            .max(limit as usize) as u32;
+        let out = self
+            .search_symbol_paged_resumable(
+                query,
+                kind,
+                mode,
+                Pagination {
+                    limit: pool_limit,
+                    offset: 0,
+                },
+                None,
+                timeout_ms,
+            )
+            .await?;
+        if out.timed_out {
+            return Ok(RerankedSearch {
+                symbols: out.page.into_iter().map(|s| (s, None)).collect(),
+                total: out.total,
+                no_match: false,
+                rerank: Some(RerankInfo {
+                    used: false,
+                    reason: Some(
+                        "search timed out — trả page thô, thử lại với timeout_ms lớn hơn".into(),
+                    ),
+                }),
+            });
+        }
+
+        let total = out.total;
+        let candidates: Vec<Candidate> = out
+            .page
+            .iter()
+            .map(|s| Candidate::symbol(s, None))
+            .collect();
+        let outcome =
+            codegraph_context::rank(query, cfg.repo.as_deref(), &candidates, cfg, judge).await;
+        if !outcome.used {
+            return Ok(RerankedSearch {
+                symbols: out
+                    .page
+                    .into_iter()
+                    .take(limit as usize)
+                    .map(|s| (s, None))
+                    .collect(),
+                total,
+                no_match: false,
+                rerank: Some(outcome.info()),
+            });
+        }
+        let probabilities: std::collections::HashMap<u64, f32> =
+            outcome.ranking.iter().copied().collect();
+        let by_id: std::collections::HashMap<u64, Symbol> =
+            out.page.into_iter().map(|s| (s.id, s)).collect();
+        let symbols: Vec<(Symbol, Option<f32>)> = if outcome.no_match {
+            Vec::new()
+        } else {
+            outcome
+                .ranking
+                .iter()
+                .take(limit as usize)
+                .filter_map(|(id, _)| {
+                    by_id
+                        .get(id)
+                        .map(|s| (s.clone(), probabilities.get(id).copied()))
+                })
+                .collect()
+        };
+        Ok(RerankedSearch {
+            symbols,
+            total,
+            no_match: outcome.no_match,
+            rerank: Some(outcome.info()),
         })
     }
 

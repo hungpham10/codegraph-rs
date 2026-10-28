@@ -44,6 +44,14 @@ pub struct JevConfig {
     pub min_probability: f32,
     /// Tên repo đưa vào `state`. `None` → caller tự lấy basename workspace root.
     pub repo: Option<String>,
+    /// Đưa **value** của doc node vào mô tả option khi rerank doc search.
+    ///
+    /// `key` một mình thường không đủ phân biệt (`spec.replicas` có ở nhiều
+    /// file); value giúp Jev chọn đúng node nhưng tốn token theo số candidate,
+    /// nên mặc định TẮT.
+    pub doc_include_values: bool,
+    /// Cắt value còn bao nhiêu ký tự khi `doc_include_values = true`.
+    pub doc_value_chars: usize,
 }
 
 impl Default for JevConfig {
@@ -57,6 +65,8 @@ impl Default for JevConfig {
             max_candidates: 40,
             min_probability: 0.25,
             repo: None,
+            doc_include_values: false,
+            doc_value_chars: 120,
         }
     }
 }
@@ -76,6 +86,8 @@ impl JevConfig {
         max_candidates: Option<usize>,
         min_probability: Option<f32>,
         repo: Option<&str>,
+        doc_include_values: Option<bool>,
+        doc_value_chars: Option<usize>,
     ) -> Self {
         let d = Self::default();
         let text = |v: Option<&str>, fallback: &str| {
@@ -100,6 +112,10 @@ impl JevConfig {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            doc_include_values: doc_include_values.unwrap_or(d.doc_include_values),
+            doc_value_chars: doc_value_chars
+                .filter(|v| *v > 0)
+                .unwrap_or(d.doc_value_chars),
         }
     }
 
@@ -145,7 +161,7 @@ mod tests {
 
     #[test]
     fn from_raw_rỗng_thì_dùng_default_và_tắt() {
-        let cfg = JevConfig::from_raw(None, None, None, None, None, None, None, None);
+        let cfg = JevConfig::from_raw(None, None, None, None, None, None, None, None, None, None);
         assert!(!cfg.enabled);
         assert_eq!(cfg.endpoint, DEFAULT_ENDPOINT);
         assert_eq!(cfg.model, DEFAULT_MODEL);
@@ -154,6 +170,11 @@ mod tests {
         assert_eq!(cfg.max_candidates, 40);
         assert_eq!(cfg.min_probability, 0.25);
         assert!(cfg.repo.is_none());
+        assert!(
+            !cfg.doc_include_values,
+            "value doc tắt mặc định (tốn token)"
+        );
+        assert_eq!(cfg.doc_value_chars, 120);
     }
 
     #[test]
@@ -167,6 +188,8 @@ mod tests {
             Some(0),
             Some(-0.2),
             Some("  "),
+            Some(true),
+            Some(0),
         );
         assert!(cfg.enabled);
         assert_eq!(cfg.endpoint, DEFAULT_ENDPOINT, "chuỗi rỗng → default");
@@ -176,6 +199,8 @@ mod tests {
         assert_eq!(cfg.max_candidates, 40, "0 → default");
         assert_eq!(cfg.min_probability, 0.25, "ngoài [0,1] → default");
         assert!(cfg.repo.is_none(), "chuỗi rỗng → None");
+        assert!(cfg.doc_include_values);
+        assert_eq!(cfg.doc_value_chars, 120, "0 → default");
     }
 
     #[test]
