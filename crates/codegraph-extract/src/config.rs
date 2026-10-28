@@ -974,6 +974,22 @@ type = "sqlite"
 # type = "sqlite"
 # dsn = "sqlite:///tmp/binary.db"
 
+# [jev]
+# Rerank ngữ nghĩa bằng Jev (TypeSafe SystemOne) cho `codegraph_context`,
+# `codegraph_search_symbol` và các tool `codegraph_graphdoc_search*`.
+# OPT-IN: cần `enabled = true` + token trong env (`api_key_env`).
+# [jev]
+# enabled = true
+# endpoint = "https://opencode.ai/zen/v1/systemone"
+# model = "jev-1.13-free"            # "jev-1.13" = bản trả phí
+# api_key_env = "OPENCODE_API_KEY"   # token CHỈ đọc từ env, không lưu trong file này
+# timeout_ms = 2000                  # quá hạn → fail-open (giữ hành vi cũ)
+# max_candidates = 40                # số candidate gửi cho Jev
+# min_probability = 0.25             # xác suất tối thiểu của candidate hạng 1
+# repo = ""                          # tên repo trong `state`; rỗng → basename workspace root
+# doc_include_values = false         # đưa value của doc node vào mô tả option (tốn token)
+# doc_value_chars = 120              # cắt value còn bao nhiêu ký tự khi bật cờ trên
+
 # [docgraph]
 # Document graph — ingest tài liệu cấu trúc (HCL/Terraform, YAML, JSON, TOML)
 # lúc `codegraph init`, truy vấn qua MCP (`codegraph_graphdoc_*`) hoặc `codegraph doc`.
