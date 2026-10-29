@@ -81,16 +81,29 @@ use tokio::sync::RwLock;
 
 #[cfg(feature = "bloom-search")]
 mod bloom;
-pub mod diff;
-pub mod embeddings;
+mod diff;
+mod embeddings;
 mod lru;
-pub mod meminfo;
-pub mod memtrack;
+mod meminfo;
+mod memtrack;
 mod radix;
 mod search;
 mod shared;
 mod storage;
-pub mod vector_index;
+// Chỉ `VectorIndex::knn` được dùng nội bộ; phần API còn lại (insert/set_all/
+// kmeans...) giữ cho semantic search opt-in + test, nên tắt dead-code ở đây
+// thay vì để cả module public.
+#[allow(dead_code)]
+mod vector_index;
+
+// Các module nội bộ trên chỉ mở đúng phần API mà crate khác dùng — thay cho
+// `pub mod`, để bề mặt public không phình theo từng file nội bộ.
+pub use crate::diff::{FileDiff, Hunk, ParsedDiff, parse_unified_diff};
+#[cfg(feature = "fastembed")]
+pub use crate::embeddings::warm_model_cache;
+pub use crate::embeddings::{EmbeddingConfig, set_embedding_config};
+pub use crate::meminfo::{MemTracker, fmt_bytes, peak_rss_bytes, rss_bytes};
+pub use crate::memtrack::MemBreakdown;
 
 pub use shared::SharedGraphIndex;
 

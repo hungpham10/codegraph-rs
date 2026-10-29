@@ -161,6 +161,15 @@ Selects the storage backend for the semantic graph.
 
 **DSN override**: Set `dsn` to override the default for any backend.
 
+**LMDB map size** (`type = "lmdb"`): map mặc định **8 GiB** trên 64-bit (1 GiB
+trên 32-bit). LMDB chỉ reserve *address space* — `data.mdb` là file sparse, chỉ
+tốn đĩa cho trang thực ghi. Khi dữ liệu chạm **25%** map, CodeGraph tự nhân đôi
+map trước write txn kế tiếp, nên `MDB_MAP_FULL` không còn chặn ingest. Muốn đặt
+mức khởi đầu khác (ví dụ container giới hạn address space):
+```bash
+export CODEGRAPH_LMDB_MAP_SIZE_MB=2048
+```
+
 **Postgres/MySQL (multi-tenant, sharded)**:
 ```toml
 [storage]
