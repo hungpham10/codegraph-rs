@@ -16,8 +16,8 @@ use camino::Utf8Path;
 use clap::Parser;
 use codegraph_bench::{BenchOptions, Repo, extract, index_at, orchestrator, run_queries};
 use codegraph_core::{Annotation, CallRecord, EffectType, ScopeLevel, Symbol, SymbolKind};
-use codegraph_graph::meminfo::{MemTracker, fmt_bytes, rss_bytes};
-use codegraph_graph::memtrack::MemBreakdown;
+use codegraph_graph::MemBreakdown;
+use codegraph_graph::{MemTracker, fmt_bytes, rss_bytes};
 use std::sync::OnceLock;
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -555,7 +555,7 @@ fn main() -> anyhow::Result<()> {
         println!("\n=== breakdown: {} ===", r.repo);
         print_breakdown(&r.breakdown, &r.caches, r.rss_after_index);
     }
-    if let Some(peak) = codegraph_graph::meminfo::peak_rss_bytes() {
+    if let Some(peak) = codegraph_graph::peak_rss_bytes() {
         println!("\npeak RSS (VmHWM): {}", fmt_bytes(peak));
     } else {
         println!("\npeak RSS: không đọc được trên nền tảng này");

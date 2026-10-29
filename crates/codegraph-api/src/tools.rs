@@ -269,8 +269,8 @@ pub async fn dispatch_diff(
     args: Value,
 ) -> Result<String> {
     let diff = arg_str(&args, "diff")?;
-    let parsed = codegraph_graph::diff::parse_unified_diff(diff)
-        .map_err(|e| Error::Invalid(e.to_string()))?;
+    let parsed =
+        codegraph_graph::parse_unified_diff(diff).map_err(|e| Error::Invalid(e.to_string()))?;
 
     let idx = shared.ensure_fresh().await;
     let report = idx.diff_assess(&parsed, Some(root.as_std_path())).await;
@@ -402,8 +402,8 @@ pub async fn dispatch_branch_compare(
     let base = arg_str(&args, "base")?;
     let head = args.get("head").and_then(|v| v.as_str());
     let diff = git.diff(base, head).await?;
-    let parsed = codegraph_graph::diff::parse_unified_diff(&diff)
-        .map_err(|e| Error::Invalid(e.to_string()))?;
+    let parsed =
+        codegraph_graph::parse_unified_diff(&diff).map_err(|e| Error::Invalid(e.to_string()))?;
 
     let idx = shared.ensure_fresh().await;
     let report = idx.diff_assess(&parsed, Some(root.as_std_path())).await;
@@ -461,8 +461,8 @@ pub async fn dispatch_diff_simulate(
     args: Value,
 ) -> Result<String> {
     let diff = arg_str(&args, "diff")?;
-    let parsed = codegraph_graph::diff::parse_unified_diff(diff)
-        .map_err(|e| Error::Invalid(e.to_string()))?;
+    let parsed =
+        codegraph_graph::parse_unified_diff(diff).map_err(|e| Error::Invalid(e.to_string()))?;
     let base_ref = args
         .get("base_ref")
         .and_then(|v| v.as_str())

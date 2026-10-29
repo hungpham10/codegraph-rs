@@ -7,7 +7,7 @@ use codegraph_mcp::CodegraphServer;
 use std::sync::Arc;
 
 #[cfg(feature = "fastembed")]
-use codegraph_graph::embeddings::warm_model_cache;
+use codegraph_graph::warm_model_cache;
 
 /// CLI tối giản: chỉ còn lifecycle (`init`/`deinit`) + MCP server (`serve --mcp`).
 /// Mọi query/interact đi qua MCP tools (`codegraph_search_symbol`, `codegraph_context`,

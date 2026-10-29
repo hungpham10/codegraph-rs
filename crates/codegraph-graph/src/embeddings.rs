@@ -199,6 +199,8 @@ fn expand_tilde(path: &str) -> Option<PathBuf> {
 }
 
 /// Suffix file extension của sqlite-vss theo OS (`.dylib` / `.so` / `.dll`).
+// Chỉ `storage/sqlite.rs` dùng — tắt feature `sqlite` thì cặp hàm này dead code.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
 fn vss_lib_suffix() -> &'static str {
     if cfg!(target_os = "macos") {
         "dylib"
@@ -216,6 +218,7 @@ fn vss_lib_suffix() -> &'static str {
 /// dò `<cache_dir>/vss`. Chỉ trả `Some` khi file thực sự tồn tại → caller có
 /// thể yên tâm thêm extension vào kết nối SQLite mà không làm hỏng `open`
 /// khi thiếu binary.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
 pub fn resolve_vss_extensions() -> Option<(PathBuf, PathBuf)> {
     let cfg = embedding_config();
     let dir = cfg

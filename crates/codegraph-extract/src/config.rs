@@ -470,7 +470,7 @@ pub struct ExtractConfig {
     /// Backend storage được chọn trong config (mặc định sqlite).
     pub storage: StorageConfig,
     /// Cấu hình embedding backend (semantic search) — đọc từ `[embedding]`.
-    pub embedding: codegraph_graph::embeddings::EmbeddingConfig,
+    pub embedding: codegraph_graph::EmbeddingConfig,
     /// Cấu hình Jev rerank cho `codegraph_context` — đọc từ `[jev]`.
     pub jev: codegraph_core::JevConfig,
     /// Cấu hình document graph — đọc từ `[docgraph]`.
@@ -536,7 +536,7 @@ impl ExtractConfig {
             header_language: parse_header_language(file.languages.headers.as_deref()),
             effect_classifier,
             flow_classifier,
-            embedding: codegraph_graph::embeddings::EmbeddingConfig::from_raw(
+            embedding: codegraph_graph::EmbeddingConfig::from_raw(
                 file.embedding.backend.as_deref(),
                 file.embedding.model.as_deref(),
                 file.embedding.cache_dir.as_deref(),
@@ -606,7 +606,7 @@ impl ExtractConfig {
         // Áp dụng config embedding (backend/model/cache) cho process trước khi
         // mở index — `GraphIndex::new_with_storage` đọc global này để quyết định
         // có bật vector index hay không (opt-in: chỉ khi backend = "fastembed").
-        codegraph_graph::embeddings::set_embedding_config(self.embedding.clone());
+        codegraph_graph::set_embedding_config(self.embedding.clone());
         // Cùng thời điểm: `[jev]` là config toàn cục cho `codegraph-context`
         // (module context không phụ thuộc `codegraph-extract`, nên truyền qua
         // global giống embedding).

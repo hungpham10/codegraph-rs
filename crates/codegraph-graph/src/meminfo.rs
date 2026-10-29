@@ -11,7 +11,7 @@
 //! - **Platform khác**: `None` — caller phải xử lý, KHÔNG panic.
 //!
 //! ```no_run
-//! use codegraph_graph::meminfo::{MemTracker, rss_bytes};
+//! use codegraph_graph::{MemTracker, rss_bytes};
 //!
 //! let mut t = MemTracker::new();
 //! t.mark("baseline");
@@ -92,7 +92,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// (đỉnh), nên benchmark tự lấy mẫu tại các mốc rồi giữ max.
 ///
 /// ```no_run
-/// # use codegraph_graph::meminfo::MemTracker;
+/// # use codegraph_graph::MemTracker;
 /// let mut t = MemTracker::new();
 /// t.mark("open");
 /// t.mark("ingest");

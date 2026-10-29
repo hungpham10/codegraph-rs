@@ -190,15 +190,105 @@ const KEY_ONE: [u8; 8] = [0u8; 8];
 
 // ── Env ──
 
-fn open_env(path: &str) -> Result<Arc<Environment>> {
+/// Map size mặc định. LMDB chỉ **reserve address space**, không cấp phát đĩa:
+/// `data.mdb` là file sparse, chỉ tốn cho trang thực ghi. Trên 64-bit chọn 8 GiB
+/// để ingest repo lớn không chạm `MDB_MAP_FULL`; 32-bit giữ 1 GiB vì địa chỉ hạn chế.
+#[cfg(target_pointer_width = "64")]
+const DEFAULT_MAP_SIZE: usize = 8 << 30;
+#[cfg(not(target_pointer_width = "64"))]
+const DEFAULT_MAP_SIZE: usize = 1 << 30;
+
+/// Ngưỡng dùng/map khi bắt đầu grow: chỉ grow khi đã dùng ≥ 50% map.
+/// (25% grow quá dồn — sau khi gấp đôi, dùng lại 50% map mới → ngay kích hoạt
+/// grow lại, gây cascade của nhiều lần grow liên tiếp.)
+const GROW_THRESHOLD_DEN: usize = 2; // used * 2 >= map_size  <=> used >= 50%
+
+/// Map size tối đa cho phép grow. Tránh runaway nếu workload bất thường.
+/// 64 GiB trên 64-bit (rất già so với mọi repo thực tế — map chỉ là address
+/// space, data.mdb sparse chỉ tốn đĩa cho trang thực ghi). 32-bit giữ 4 GiB.
+#[cfg(target_pointer_width = "64")]
+const MAX_MAP_SIZE: usize = 64 << 30;
+#[cfg(not(target_pointer_width = "64"))]
+const MAX_MAP_SIZE: usize = 4 << 30;
+
+/// Map size khởi tạo: `CODEGRAPH_LMDB_MAP_SIZE_MB` (nếu hợp lệ) hoặc mặc định.
+///
+/// Đây chỉ là **điểm khởi đầu** — [`begin_rw`] tự grow map khi dữ liệu chạm
+/// ngưỡng, nên hiếm khi phải chỉnh tay.
+fn initial_map_size() -> usize {
+    std::env::var("CODEGRAPH_LMDB_MAP_SIZE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+        .map(|mb| mb.saturating_mul(1 << 20))
+        .unwrap_or(DEFAULT_MAP_SIZE)
+}
+
+fn open_env_with_map_size(path: &str, map_size: usize) -> Result<Arc<Environment>> {
     let p = Path::new(path);
     std::fs::create_dir_all(p).map_err(e)?;
     let mut b = Environment::new();
     b.set_max_dbs(32); // schema dùng ~17 named-db
     b.set_max_readers(512); // locktable đủ chỗ cho runtime/mcp probe + request song song
-    b.set_map_size(1 << 30); // 1 GiB address space (LMDB chỉ commit trang thực đụng)
+    b.set_map_size(map_size);
     let env = b.open(p).map_err(e)?;
     Ok(Arc::new(env))
+}
+
+fn open_env(path: &str) -> Result<Arc<Environment>> {
+    open_env_with_map_size(path, initial_map_size())
+}
+
+/// Tăng `map_size` trước khi ghi. Gấp đôi map, nhưng đảm bảo mới có ít nhất
+/// gấp 4 phần đã dùng — sau grow còn ≥ 75% trống, tránh grow liền lại.
+///
+/// LMDB không tự mở rộng map và trả `MDB_MAP_FULL` khi hết chỗ — giữa lúc
+/// ingest nghĩa là rollback cả transaction. Gọi hàm này **trước khi** mở write
+/// txn vì `mdb_env_set_mapsize` từ chối chạy khi đang có txn ghi.
+///
+/// Nếu đã đạt `MAX_MAP_SIZE` và vẫn đầy, trả `Error::MapFull` để caller xử lý
+/// (không grow vô hạn).
+fn grow_map(env: &Environment) -> lmdb::Result<usize> {
+    let info = env.info()?;
+    let page = env.stat()?.page_size() as usize;
+    let used = (info.last_pgno() + 1).saturating_mul(page);
+    let current = info.map_size();
+    // Tăng gấp đôi map, nhưng ít nhất gấp 4 phần đã dùng (để sau grow còn ≥
+    // 75% trống, tránh grow liền lại), và không vượt MAX_MAP_SIZE.
+    let mut next = current
+        .saturating_mul(2)
+        .max(used.saturating_mul(4))
+        .max(page);
+    if next > MAX_MAP_SIZE {
+        next = MAX_MAP_SIZE;
+    }
+    if next <= current {
+        return Err(lmdb::Error::MapFull);
+    }
+    env.set_map_size(next)?;
+    eprintln!(
+        "[codegraph] lmdb map size -> {} MiB (dùng {} trang/{} MiB map, chạm ngưỡng 50%)",
+        next >> 20,
+        info.last_pgno() + 1,
+        current >> 20
+    );
+    Ok(next)
+}
+
+/// Mở write transaction, đảm bảo map còn ≥ 50% chỗ trống trước khi ghi.
+///
+/// Nhờ kiểm tra **trước** khi mở txn nên `set_map_size` luôn hợp lệ (không có
+/// write txn đang mở), và map lớn dần theo nhu cầu thay vì chết ở một mức cố
+/// định.
+fn begin_rw(env: &Environment) -> Result<lmdb::RwTransaction<'_>> {
+    let info = env.info().map_err(e)?;
+    let page = env.stat().map_err(e)?.page_size() as usize;
+    let used = (info.last_pgno() + 1).saturating_mul(page);
+    // Chỉ grow khi đã dùng ≥ 50% map.
+    if used.saturating_mul(GROW_THRESHOLD_DEN) >= info.map_size() {
+        grow_map(env).map_err(e)?;
+    }
+    env.begin_rw_txn().map_err(e)
 }
 
 #[cfg(feature = "lmdb")]
@@ -207,9 +297,9 @@ fn open_env_read_only(path: &str) -> lmdb::Result<Environment> {
     let mut b = Environment::new();
     b.set_flags(EnvironmentFlags::READ_ONLY);
     b.set_max_dbs(32);
-    // Phải set map_size khớp với env read-write (1 GiB) — mở read-only không set
+    // Phải set map_size khớp với env read-write — mở read-only không set
     // map_size có thể trả EACCES/PERMISSION_DENIED trên một số platform.
-    b.set_map_size(1 << 30);
+    b.set_map_size(initial_map_size());
     b.open(Path::new(path))
 }
 
@@ -261,13 +351,28 @@ fn probe_env(path: &str) -> lmdb::Result<Arc<ProbeHandle>> {
 pub async fn probe_version(path: &str) -> Result<u64> {
     let handle = probe_env(path)
         .map_err(|err| StorageError::Internal(format!("lmdb file not found: {path} ({err})")))?;
-    let tx = handle.env.begin_ro_txn().map_err(e)?;
-    match tx.get(handle.db, &KEY_ONE).map(de_u64) {
-        Ok(v) => Ok(v),
-        Err(lmdb::Error::NotFound) => {
-            Err(StorageError::Internal("lmdb version row missing".into()))
+    let version = match read_probe_version(&handle) {
+        // Env read-write trong process vừa grow map → map của handle read-only
+        // đã cũ. `set_map_size(0)` = "lấy map size hiện tại trên đĩa"; cần khoá
+        // vì `mdb_env_set_mapsize` không thread-safe.
+        Err(lmdb::Error::MapResized) => {
+            static RESIZE: Mutex<()> = Mutex::new(());
+            let _guard = RESIZE.lock().unwrap_or_else(|e| e.into_inner());
+            handle.env.set_map_size(0).map_err(e)?;
+            read_probe_version(&handle).map_err(e)?
         }
-        Err(err) => Err(StorageError::Internal(err.to_string())),
+        other => other.map_err(e)?,
+    };
+    version.ok_or_else(|| StorageError::Internal("lmdb version row missing".into()))
+}
+
+#[cfg(feature = "lmdb")]
+fn read_probe_version(handle: &ProbeHandle) -> lmdb::Result<Option<u64>> {
+    let tx = handle.env.begin_ro_txn()?;
+    match tx.get(handle.db, &KEY_ONE) {
+        Ok(bytes) => Ok(Some(de_u64(bytes))),
+        Err(lmdb::Error::NotFound) => Ok(None),
+        Err(err) => Err(err),
     }
 }
 
@@ -404,7 +509,7 @@ impl LmdbStorage {
 
     /// Seed sentinel node 0 + counter/next_id/version nếu chưa tồn tại.
     async fn init(&self) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         let db = self.nodes;
         if matches!(tx.get(db, &k8(EMPTY)), Err(lmdb::Error::NotFound)) {
             tx.put(db, &k8(EMPTY), &node_val(b"", 0), WriteFlags::empty())
@@ -450,7 +555,7 @@ impl LmdbStorage {
 #[async_trait]
 impl CategoryStorage for LmdbStorage {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         // Không có RETURNING — đọc-rồi-ghi counter trong cùng write tx; an toàn
         // vì GraphIndex tuần tự hoá mọi writer qua RwLock.
         let next = match self.get_opt(&tx, self.counter, &KEY_ONE)? {
@@ -477,7 +582,7 @@ impl CategoryStorage for LmdbStorage {
         prefix: Option<Vec<u8>>,
         record: Option<usize>,
     ) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         let key = k8(id);
         let Some(cur) = self.get_opt(&tx, self.nodes, &key)?.map(de_node_val) else {
             return Err(StorageError::BranchOutOfRange(id));
@@ -550,7 +655,7 @@ impl CategoryStorage for LmdbStorage {
     }
 
     async fn set_root(&mut self, shard: usize, root: usize) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.roots, &k8(shard), &k8(root), WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -586,7 +691,7 @@ impl Storage for LmdbStorage {}
 #[async_trait]
 impl BloomStorage for LmdbStorage {
     async fn set_node_bloom(&mut self, id: usize, bloom: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.blooms, &k8(id), &bloom, WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -604,7 +709,7 @@ impl BloomStorage for LmdbStorage {
 #[async_trait]
 impl EdgeDataStorage for LmdbStorage {
     async fn set_edge_data(&mut self, edge: usize, data: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.edges, &k8(edge), &data, WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -619,7 +724,7 @@ impl EdgeDataStorage for LmdbStorage {
     }
 
     async fn clear_edges(&mut self) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.clear_db(self.edges).map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
@@ -631,7 +736,7 @@ impl EdgeDataStorage for LmdbStorage {
 #[async_trait]
 impl NodeMetaStorage for LmdbStorage {
     async fn set_node_meta(&mut self, elem: usize, meta: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.node_meta, &k8(elem), &meta, WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -646,14 +751,14 @@ impl NodeMetaStorage for LmdbStorage {
     }
 
     async fn clear_node_meta(&mut self) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.clear_db(self.node_meta).map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
     }
 
     async fn set_meta(&mut self, record: usize, meta: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.meta, &k8(record), &meta, WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -668,7 +773,7 @@ impl NodeMetaStorage for LmdbStorage {
     }
 
     async fn set_key_len(&mut self, record: usize, len: usize) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.keylen, &k8(record), &k8(len), WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -689,7 +794,7 @@ impl NodeMetaStorage for LmdbStorage {
 #[async_trait]
 impl ChainStorage for LmdbStorage {
     async fn set_chain(&mut self, record: usize, chain: &[u64]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(
             self.chains,
             &k8(record),
@@ -709,7 +814,7 @@ impl ChainStorage for LmdbStorage {
     }
 
     async fn clear_chains(&mut self) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.clear_db(self.chains).map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
@@ -723,7 +828,7 @@ impl EntityStorage for LmdbStorage {
     async fn save_symbol(&mut self, sym: &Symbol) -> Result<()> {
         let data =
             serde_json::to_vec(sym).map_err(|err| StorageError::Internal(err.to_string()))?;
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.symbols, &ku64(sym.id), &data, WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -754,7 +859,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn save_embedding(&mut self, symbol_id: u64, vector: &[f32]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(
             self.embeddings,
             &ku64(symbol_id),
@@ -790,14 +895,14 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn clear_embeddings(&mut self) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.clear_db(self.embeddings).map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
     }
 
     async fn save_next_id(&mut self, next: u64) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.next_id, &KEY_ONE, &ku64(next), WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -824,7 +929,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn set_call_records(&mut self, func: u64, records: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(
             self.call_records,
             &ku64(func),
@@ -855,7 +960,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn set_file_deps(&mut self, path: &str, deps: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.file_deps, &str_key(path), &deps, WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -875,7 +980,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn set_fn_ptr_assigns(&mut self, path: &str, assigns: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(
             self.fn_ptr_assigns,
             &str_key(path),
@@ -900,7 +1005,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn set_call_name_index(&mut self, name: &str, sites: &[u8]) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(
             self.call_names,
             &str_key(name),
@@ -933,7 +1038,7 @@ impl EntityStorage for LmdbStorage {
 
     async fn upsert_file(&mut self, f: &FileInfo) -> Result<()> {
         let data = serde_json::to_vec(f).map_err(|err| StorageError::Internal(err.to_string()))?;
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.files, &str_key(&f.path), &data, WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -962,7 +1067,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn set_version(&mut self, v: u64) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.version, &KEY_ONE, &ku64(v), WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -970,7 +1075,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn set_stats(&mut self, s: IndexCounts) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.put(self.stats, &KEY_ONE, &pack_counts(&s), WriteFlags::empty())
             .map_err(e)?;
         tx.commit().map_err(e)?;
@@ -987,7 +1092,7 @@ impl EntityStorage for LmdbStorage {
     }
 
     async fn clear_entities(&mut self) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         for db in [
             self.symbols,
             self.call_records,
@@ -1015,7 +1120,7 @@ impl ShortcutsStorage for LmdbStorage {
     async fn add_shortcut_node(&mut self, shard: usize, elem: &[u8], node_id: usize) -> Result<()> {
         let mut key = k8(shard).to_vec();
         key.extend_from_slice(elem);
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         let mut list = match self.get_opt(&tx, self.shortcuts, &key)? {
             Some(v) => de_list(v),
             None => Vec::new(),
@@ -1040,7 +1145,7 @@ impl ShortcutsStorage for LmdbStorage {
     }
 
     async fn clear_shortcuts(&mut self) -> Result<()> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         tx.clear_db(self.shortcuts).map_err(e)?;
         tx.commit().map_err(e)?;
         Ok(())
@@ -1064,7 +1169,7 @@ pub struct LmdbTx {
 #[async_trait]
 impl Tx for LmdbTx {
     async fn new_node(&mut self, prefix: Vec<u8>, record: usize) -> Result<usize> {
-        let mut tx = self.env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&self.env)?;
         let next = match tx.get(self.counter, &KEY_ONE).map(de_u64) {
             Ok(v) => v,
             Err(lmdb::Error::NotFound) => 1,
@@ -1107,7 +1212,7 @@ impl Tx for LmdbTx {
             nodes_pending,
             ops,
         } = *self;
-        let mut tx = env.begin_rw_txn().map_err(e)?;
+        let mut tx = begin_rw(&env)?;
 
         // 1. Materialize node mới — để ops add/move trỏ tới hợp lệ.
         for (id, prefix, record) in &nodes_pending {
@@ -1202,6 +1307,57 @@ mod tests {
         let path = dir.path().join("test.lmdb");
         let path = path.to_string_lossy().into_owned();
         (dir, path)
+    }
+
+    /// Map tự nhân đôi khi dữ liệu chạm ngưỡng 25%. Trước đây map cứng 1 GiB
+    /// nên repo lớn chết `MDB_MAP_FULL` giữa lúc ingest (rollback cả txn).
+    #[tokio::test]
+    async fn map_size_tự_tăng_khi_gần_đầy() {
+        let (_dir, path) = tmp_path();
+        // 1 MiB → ngưỡng 25% chỉ ~256 KiB nên test nhanh.
+        let env = open_env_with_map_size(&path, 1 << 20).unwrap();
+        let db = env.create_db(Some("grow"), DatabaseFlags::empty()).unwrap();
+        {
+            let mut tx = env.begin_rw_txn().unwrap();
+            for i in 0..100u64 {
+                tx.put(db, &ku64(i), &vec![7u8; 4096], WriteFlags::empty())
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        assert_eq!(env.info().unwrap().map_size(), 1 << 20);
+
+        drop(begin_rw(&env).unwrap());
+        assert!(
+            env.info().unwrap().map_size() > (1 << 20),
+            "begin_rw phải grow map khi đã dùng > 25%"
+        );
+
+        // Dữ liệu cũ vẫn đọc được sau khi munmap/mmap lại.
+        let tx = env.begin_ro_txn().unwrap();
+        assert_eq!(tx.get(db, &ku64(99)).unwrap().len(), 4096);
+    }
+
+    /// Ghi nhiều hơn map ban đầu qua API thật → map tự tăng, không `MDB_MAP_FULL`.
+    #[tokio::test]
+    async fn ghi_vượt_map_ban_đầu_không_map_full() {
+        let (_dir, path) = tmp_path();
+        let env = open_env_with_map_size(&path, 1 << 20).unwrap();
+        let mut s = LmdbStorage::from_env(env).unwrap();
+        s.init().await.unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..400usize {
+            // ~4 KiB prefix mỗi node → tổng ~1.6 MiB, vượt map 1 MiB.
+            let id = s.new_node(vec![b'x'; 4096], i).await.unwrap();
+            let mut tx = s.new_tx();
+            tx.add_child(0, id).await.unwrap();
+            tx.commit().await.unwrap();
+            ids.push(id);
+        }
+
+        assert_eq!(s.get_node(ids[0]).await.unwrap().1, 0);
+        assert_eq!(s.get_node(*ids.last().unwrap()).await.unwrap().1, 399);
     }
 
     /// `get_nodes` phải trả đúng thứ tự `ids` và giống hệt `get_node` từng cái.
